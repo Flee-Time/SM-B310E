@@ -117,13 +117,15 @@ struct Sc6530LcdcState {
 };
 
 struct Sc6530LcmState {
-    /*< private >*/
     SysBusDevice parent_obj;
+
     /*< public >*/
 
     MemoryRegion iomem;       /* 0x20800000 */
+    MemoryRegion data_iomem;  /* 0x60000000 data window */
 
     uint32_t regs[SC6530_LCM_SIZE / 4];   /* store+echo bank */
+    int rdid_state;
 };
 
 /* ---------------------------------------------------------------------- */
@@ -354,11 +356,65 @@ static const TypeInfo sc6530_lcdc_info = {
     .class_init    = sc6530_lcdc_class_init,
 };
 
+
+/* ---------------------------------------------------------------------- */
+/* LCM DATA WINDOW @ 0x60000000 (0x40000 size)                            */
+/* Stock panel driver (ST7735S) sends RDID (0x04) to 0x60000000 and reads */
+/* three bytes from 0x60020000: 0x7c, 0x89, 0xf0. If the ID is wrong, it  */
+/* bails out and never configures the LCDC img base.                      */
+/* ---------------------------------------------------------------------- */
+
+static uint64_t sc6530_lcm_data_read(void *opaque, hwaddr offset, unsigned size)
+{
+    Sc6530LcmState *s = opaque;
+    uint32_t val = 0;
+    qemu_log_mask(LOG_UNIMP, "sc6530_lcm_data: r addr=0x%lx state=%d\n", (long)offset, s->rdid_state);
+
+    if (offset == 0x20000) {
+        if (s->rdid_state == 1) {
+            val = 0x00; /* dummy read */
+            s->rdid_state = 2;
+        } else if (s->rdid_state == 2) {
+            val = 0x7c;
+            s->rdid_state = 3;
+        } else if (s->rdid_state == 3) {
+            val = 0x89;
+            s->rdid_state = 4;
+        } else if (s->rdid_state == 4) {
+            val = 0xf0;
+            s->rdid_state = 0;
+        }
+    }
+    return val;
+}
+
+static void sc6530_lcm_data_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
+{
+    Sc6530LcmState *s = opaque;
+    qemu_log_mask(LOG_UNIMP, "sc6530_lcm_data: w addr=0x%lx val=0x%lx\n", (long)offset, (long)val);
+
+
+    if (offset == 0 && val == 0x04) {
+        s->rdid_state = 1;
+    } else {
+        s->rdid_state = 0;
+    }
+}
+
+static const MemoryRegionOps sc6530_lcm_data_ops = {
+    .read  = sc6530_lcm_data_read,
+    .write = sc6530_lcm_data_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
 static void sc6530_lcm_reset(DeviceState *dev)
 {
     Sc6530LcmState *s = SC6530_LCM(dev);
 
     memset(s->regs, 0, sizeof(s->regs));
+    s->rdid_state = 0;
 }
 
 static void sc6530_lcm_init(Object *obj)
@@ -369,6 +425,10 @@ static void sc6530_lcm_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &sc6530_lcm_ops, s,
                           "sc6530-lcm", SC6530_LCM_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
+
+    memory_region_init_io(&s->data_iomem, obj, &sc6530_lcm_data_ops, s,
+                          "sc6530-lcm-data", 0x40000);
+    sysbus_init_mmio(sbd, &s->data_iomem);
 }
 
 static void sc6530_lcm_class_init(ObjectClass *klass, const void *data)

@@ -738,6 +738,8 @@ static void b310e_init(MachineState *machine)
 
         sysbus_mmio_map_overlap(lcm_sbd, 0, B310E_LCM_BASE,
                                 B310E_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(lcm_sbd, 1, 0x60000000,
+                                B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(lcm_sbd, &error_fatal);
     }
 

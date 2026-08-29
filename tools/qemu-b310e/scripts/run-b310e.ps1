@@ -10,6 +10,8 @@
 #     -drive file=<Nor>,format=raw,if=none,id=nor
 #     [-drive file=<Os>,format=raw,if=none,id=os]        # boot=ours only
 #
+# KEYBOARD MAP: ret->CENTER, kp_enter->DIAL, 0-9->0-9, minus/*->STAR, slash->HASH, f1->LSOFT, f2->RSOFT, esc/end->END, arrows->D-pad
+#
 # Sequence (FIXED SLEEPS - no log polling; Get-Content -Tail on a growing
 # multi-GB in_asm log is unusably slow in PS 5.1, the W4 QA-lesson #2 trap):
 #   warm|stock: keys every -KeyDelay s from t+5 s until t=TimeSec-8 s, then
@@ -51,7 +53,9 @@ param(
   [int]$KeyDelay = 5,           # seconds between sendkey injections
   [int]$BannerSec = 25,         # ours-only: wait for the banner before screendump #1
   [string[]]$Keys,              # default per boot mode (see below)
-  [string]$Qemu = (Join-Path $env:USERPROFILE 'qemu-b310e\qemu-src\build\qemu-system-arm.exe')
+  [string]$Qemu = (Join-Path $env:USERPROFILE 'qemu-b310e\qemu-src\build\qemu-system-arm.exe'),
+  [ValidateSet('gtk', 'sdl', 'none')]
+  [string]$Display = 'gtk'
 )
 $ErrorActionPreference = "Stop"
 
@@ -114,9 +118,14 @@ Get-Process qemu-system-arm -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 800
 
 # ---- build the qemu command line --------------------------------------------
+
+$displayArgs = @('-display', 'gtk,zoom-to-fit=on')
+if ($Display -eq 'none') { $displayArgs = @('-display', 'none') }
+elseif ($Display -eq 'sdl') { $displayArgs = @('-display', 'sdl') }
+
 $qargs = @(
   "-M", "b310e,boot-mode=$Boot",
-  "-display", "none", "-serial", "none",
+  $displayArgs[0], $displayArgs[1], "-serial", "none",
   "-d", "int", "-D", $logFull,
   "-monitor", "telnet:127.0.0.1:$MonitorPort,server,nowait",
   "-drive", "file=$Nor,format=raw,if=none,id=nor"

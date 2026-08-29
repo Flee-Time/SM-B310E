@@ -3,11 +3,13 @@
 # Bash port of run-b310e.ps1. Same params and behavior: fixed sleeps, no log
 # polling; HMP monitor via /dev/tcp; evidence in the -D log's directory.
 #
-#   qemu-system-arm -M b310e,boot-mode=<Boot> -display none -serial none
+#   qemu-system-arm -M b310e,boot-mode=<Boot> ${display_arg} -serial none
 #     -d int -D <log> [--trace <pattern> ...]
 #     -monitor telnet:127.0.0.1:<MonitorPort>,server,nowait
 #     -drive file=<Nor>,format=raw,if=none,id=nor
 #     [-drive file=<Os>,format=raw,if=none,id=os]        # boot=ours only
+#
+# KEYBOARD MAP: ret->CENTER, kp_enter->DIAL, 0-9->0-9, minus/*->STAR, slash->HASH, f1->LSOFT, f2->RSOFT, esc/end->END, arrows->D-pad
 #
 # Usage examples:
 #   run-b310e.sh -Boot warm -TimeSec 90 -D tools/qemu-b310e/logs/w7/final-sweep.log
@@ -26,6 +28,7 @@ KeyDelay=5
 BannerSec=25
 Keys=()
 Qemu=""
+Display="gtk"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     -BannerSec)   BannerSec="$2"; shift 2 ;;
     -Keys)        Keys+=("$2");   shift 2 ;;
     -Qemu)        Qemu="$2";      shift 2 ;;
+    -Display)     Display="$2";   shift 2 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -165,7 +169,16 @@ else
 fi
 
 # ---- build the qemu command line ---------------------------------------------
-qargs=(-M "b310e,boot-mode=$Boot" -display none -serial none -d int -D "$logFull"
+if [[ "$Display" == "none" ]]; then
+  display_arg="-display none"
+elif [[ "$Display" == "gtk" ]]; then
+  display_arg="-display gtk,zoom-to-fit=on"
+elif [[ "$Display" == "sdl" ]]; then
+  display_arg="-display sdl"
+else
+  display_arg="-display $Display"
+fi
+qargs=(-M "b310e,boot-mode=$Boot" ${display_arg} -serial none -d int -D "$logFull"
        -monitor "telnet:127.0.0.1:$MonitorPort,server,nowait"
        -drive "file=$Nor,format=raw,if=none,id=nor")
 for t in "${Trace[@]}"; do

@@ -334,6 +334,23 @@ every operation (`FUN_0011a188/0011a27a/0011a4cc`:
 for 0x20a00010 is **0x3** (bit 0 = ready | bit 1 = idle) - with the earlier 2
 (bit 0 clear) the OS spun the poll forever (526k reads/55s).
 
+
+### Keyboard Map
+
+With a live display window (GTK/SDL), you can use your host keyboard to press phone keys. Headless `sendkey` commands use the QEMU QKeyCode names (e.g. `ret`).
+
+| Host Key (sendkey) | Phone Key | Matrix (Row, Col) |
+| --- | --- | --- |
+| Enter (`ret`) | CENTER | Row 0, Col 0 |
+| Keypad Enter (`kp_enter`) | DIAL | Row 0, Col 1 |
+| 0-9 (`0`-`9`) | 0-9 | Various |
+| Minus (`minus`) / Asterisk (`asterisk`) | STAR (*) | Row 4, Col 0 |
+| Slash (`slash`) / Keypad Slash (`kp_slash`) | HASH (#) | Row 4, Col 2 |
+| F1 (`f1`) | LSOFT | Row 1, Col 3 |
+| F2 (`f2`) | RSOFT | Row 2, Col 3 |
+| Up/Down/Left/Right (`up`/`down`/`left`/`right`) | D-pad | Various |
+| Esc (`esc`) / End (`end`) | END / Power | EIC Channel |
+
 ## Limitations
 
 What the model does NOT do, and what that means for a guest (the plan's
@@ -405,6 +422,28 @@ list + everything learned since):
 - **Pinmux is safe here**: the stock OS's 0x8c pinmap replay (incl. the
   BANNED-on-HW 0x8c0002a4=0x231) executes harmlessly in the emulator - this
   is a feature, not a limitation. On real HW the 0x8c region stays banned.
+
+
+### Stock-OS Boot Investigation (Part 3)
+
+We investigated why the stock firmware on the `warm` and `stock` boot paths never configures the LCDC framebuffer (i.e., `0x20d00024` stays `0`).
+
+**Hypothesis**: The stock ST7735S panel driver reads the panel ID via the LCM DBI data window (writing `0x04` RDID command to `0x60000000`, then reading 3 bytes from `0x60020000`). If it reads `0` (which is what the catch-all region returned), the driver bails out and skips display initialization entirely, meaning `FUN_00027e38` is never called.
+
+**Machine Change**: We introduced an `sc6530_lcm` data window memory region at `0x60000000` (size `0x40000`). It implements a state machine that answers the `0x04` RDID command with the expected sequence for an ST7735S panel (`0x00` dummy, `0x7c`, `0x89`, `0xf0`).
+
+**Firmware Mismatch**: When verifying this with a publicly available FSPD firmware (Samsung_Guru_Music_2_SM-B310E_FSPD), we noted an **address mismatch**. The FSPD firmware is a different build/version than the user's original dump. While landmarks like `0x04259620` and `0x0422d4b4` align, the LCD driver table pointer (`0x000cb414`) provided by the `sc6530_aux` overlay points to invalid data (`0x0000002e`) in the FSPD firmware. Consequently, the FSPD firmware bails out early during the LCD init phase before ever attempting to read the panel ID from `0x60000000`.
+
+**How to verify**: Users with the original `dump_firmware.bin` that matches the machine's `sc6530_aux` overlays can run the following test locally:
+
+```bash
+./tools/qemu-b310e/scripts/run-b310e.sh -Boot stock -D tools/qemu-b310e/logs/stock.log
+# Or on Windows:
+# powershell -File tools/qemu-b310e/scripts/run-b310e.ps1 -Boot stock -D tools/qemu-b310e/logs/stock.log
+```
+
+Look for writes to `0x20d00024` in the `stock.log` or examine the final screendump PNG. If the RDID response satisfies the original panel driver, the UI/key phase should start and `0x20d00024` should be configured.
+
 
 ## Bring-up state (Wave 5)
 
