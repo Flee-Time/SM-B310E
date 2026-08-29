@@ -1,0 +1,76 @@
+{
+  "system": ["--bright", "50", "--charge", "2", "--rotate", "2,0"],
+  "categories": [
+    {
+      "name": "Ports",
+      "items": [
+        { "name": "Doom 1",
+          "bin": "fpbin/chocolate-doom.bin",
+          "args": ["--rotate", "2,3", "--scaler", "7", "--dir", "games/doom1", "doom", "-iwad", "doom.wad"] },
+        { "name": "Doom 2",
+          "bin": "fpbin/chocolate-doom.bin",
+          "args": ["--rotate", "2,3", "--scaler", "7", "--dir", "games/doom2", "doom", "-iwad", "doom2.wad"] },
+        { "name": "Into Sandys Cities",
+          "bin": "fpbin/chocolate-doom.bin",
+          "args": ["--rotate", "2,3", "--scaler", "7", "--dir", "games/doom2", "doom", "-iwad", "doom2.wad", "-merge", "sandy.wad"] },
+        { "name": "Duke 3D",
+          "bin": "fpbin/fpduke3d.bin",
+          "args": ["--dir", "games/duke3d", "duke3d"] },
+        { "name": "Shadow Warrior",
+          "bin": "fpbin/fpsw.bin",
+          "args": ["--dir", "games/sw", "sw"] },
+        { "name": "Heretic",
+          "bin": "fpbin/chocolate-heretic.bin",
+          "args": ["--rotate", "2,3", "--scaler", "7", "--dir", "games/heretic", "heretic", "-iwad", "HERETIC1.WAD"] },
+        { "name": "Hexen",
+          "bin": "fpbin/chocolate-hexen.bin",
+          "args": ["--rotate", "2,3", "--scaler", "7", "--dir", "games/hexen", "hexen", "-iwad", "HEXEN.WAD"] },
+        { "name": "Retris",
+          "bin": "fpbin/retris.bin",
+          "args": ["--dir", "games/retris", "retris"] }
+      ]
+    },
+    {
+      "name": "SNES",
+      "items": [
+        { "name": "Super Metroid",
+          "bin": "fpbin/snes9x_16bit.bin",
+          "args": ["--scaler", "99", "--dir", "games/snes", "snes9x", "--crc", "0xad2cbf9c", "--nocheck", "Super Metroid.sfc"] },
+        { "name": "F-Zero",
+          "bin": "fpbin/snes9x_16bit.bin",
+          "args": ["--scaler", "99", "--dir", "games/snes", "snes9x", "--crc", "0", "--nocheck", "F-Zero.sfc"] },
+        { "name": "EarthBound",
+          "bin": "fpbin/snes9x_16bit.bin",
+          "args": ["--scaler", "99", "--dir", "games/snes", "snes9x", "--crc", "0", "--nocheck", "EarthBound.sfc"] },
+        { "name": "Super Mario All-Stars",
+          "bin": "fpbin/snes9x_16bit.bin",
+          "args": ["--scaler", "99", "--dir", "games/snes", "snes9x", "--crc", "0", "--nocheck", "Super Mario All-Stars.sfc"] },
+        { "name": "Zelda - A Link to the Past",
+          "bin": "fpbin/snes9x_16bit.bin",
+          "args": ["--scaler", "99", "--dir", "games/snes", "snes9x", "--crc", "0", "--nocheck", "A Link to the Past.sfc"] }
+      ]
+    },
+    {
+      "name": "GameBoy",
+      "items": [
+        { "name": "Pokemon Silver",
+          "bin": "fpbin/gnuboy.bin",
+          "args": ["--rotate", "2,3", "--dir", "games/gameboy", "gnuboy", "Pokemon Silver.gbc"] }
+      ]
+    },
+    {
+      "name": "NES",
+      "items": [
+        { "name": "Super Mario Bros",
+          "bin": "fpbin/infones.bin",
+          "args": ["--scaler", "99", "--dir", "games/nes", "infones", "SMB.NES"] },
+        { "name": "Super Mario Bros. 3",
+          "bin": "fpbin/infones.bin",
+          "args": ["--scaler", "99", "--dir", "games/nes", "infones", "Super Mario Bros. 3.nes"] },
+        { "name": "The Legend of Zelda",
+          "bin": "fpbin/infones.bin",
+          "args": ["--scaler", "99", "--dir", "games/nes", "infones", "The Legend of Zelda.nes"] }
+      ]
+    }
+  ]
+}

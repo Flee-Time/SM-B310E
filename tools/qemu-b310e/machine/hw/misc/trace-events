@@ -1,0 +1,51 @@
+# sc6530_aux.c - APB (0x8b000000) log+store bank trace events.
+#
+# The APB bank carries the audio-relevant PA power ladder
+# (0x8b000060/64/a0/a4 bit 21/28) and the ARM-vs-DSP AUD-ownership
+# register 0x8b0001c4 bits 9-10 = 0x600, which the Wave-6 diff must
+# capture (docs/audio-dsp-protocol.md "Cross-map"). addr is the full
+# guest address, val the read/written value, pc the guest PC.
+# Enable at runtime with --trace "sc6530_aux_*".
+sc6530_aux_read(uint64_t addr, uint64_t val, uint32_t pc) "APB read  addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
+sc6530_aux_write(uint64_t addr, uint64_t val, uint32_t pc) "APB write addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
+
+# sc6530_adi.c - ADI mailbox (0x82000000) + ANA analog register bank
+# (0x82001000, 8 KiB: codec regs + WDG 0x82001480 + EIC 0x82001900) +
+# VBC audio FIFO (0x82003000) trace events - the audio observatory the
+# Wave-6 diff consumes. addr is the full guest address, val the
+# read/written value, pc the guest PC. For ADI mailbox READ-DATA
+# accesses (0x8200001c) the traced addr is the RESOLVED ANA register
+# (0x82001000 + the last 0x82000018 index write), NOT the MMIO offset
+# 0x8200001c; the mailbox command/status accesses trace their MMIO
+# addresses. Enable at runtime with --trace "sc6530_ana_*".
+sc6530_ana_read(uint64_t addr, uint64_t val, uint32_t pc) "ANA read  addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
+sc6530_ana_write(uint64_t addr, uint64_t val, uint32_t pc) "ANA write addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
+
+# sc6530_lcdc.c - LCDC refresh trigger: emitted when the guest starts a
+# refresh (LCDC ctrl bit 3 write, drivers/lcd.c lcd_show `ctrl |= 8`) -
+# the framebuffer copy from PSRAM at img.y_base_addr << 2 (0x20d00024)
+# into the console surface. fb = the resolved framebuffer address
+# (y_base_addr << 2), pc = the guest PC. Enable with --trace
+# "sc6530_lcdc_*".
+sc6530_lcdc_refresh(uint64_t fb, uint32_t pc) "LCDC refresh fb=0x%" PRIx64 " pc=0x%08" PRIx32
+
+# sc6530_dsp.c - the DSP fake (docs/audio-dsp-protocol.md "DSP-fake-spec"
+# section 6). Single event with a 12-value id enum (defined in
+# sc6530_dsp.c, SC6530_DspEvent; the id value = index into
+# sc6530_dsp_ev_names[]):
+#   SM_BOOT=0   reset released (strap<<16)|boot_vector
+#   SM_READY=1  fake sets DSP_READY          dsp_ctl word
+#   SM_BLOCK=2  guest writes dl_offset/size  (offset<<16)|block_size
+#   SM_DATA=3   guest writes READY|DATA_READY arm_ctl word
+#   SM_COPY=4   fake sets COPY_DONE + IRQ    arm_ctl at START_COPY
+#   SM_RUN=5    fake sets DSP_RUN            dsp_ctl word
+#   REG_WRITE=6 any spec-2c APB write        (addr_off<<16)|(val&0xffff)
+#   REG_READ=7  any spec-2c APB read         (addr_off<<16)|(val&0xffff)
+#   IRQ_ARM=8   INT_SET_CLR0 b0 (ARM->DSP)   val
+#   CLK_FORCE=9 DSP_CTL0 b1 set/clear        val
+#   OWNERSHIP=10 0x8b0001c4 b10/b9/b2 change val
+#   UNKNOWN=11  unexpected/unanswered access (addr_off<<16)|(val&0xffff)
+# pc = guest PC (0 for qtest/monitor accesses). Companion qemu_log lines
+# carry the full 32-bit values (the Wave-6 diff input). Enable at runtime
+# with --trace "sc6530_dsp_*" + -D.
+sc6530_dsp_cmd(uint32_t id, uint32_t arg, uint32_t pc) "DSP cmd id=%u arg=0x%08" PRIx32 " pc=0x%08" PRIx32
