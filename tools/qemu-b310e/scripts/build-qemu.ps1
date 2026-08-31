@@ -207,8 +207,13 @@ if (-not (Test-Path -LiteralPath (Join-Path $QemuSrc '.git'))) {
 # ---------------------------------------------------------------------------
 
 if (-not $SkipInstall) {
-    $installArgs = @('-QemuSrc', $QemuSrc)
-    if ($WhatIfPreference) { $installArgs += '-WhatIf' }
+    # HASHTABLE splatting: array splatting passes '-QemuSrc' POSITIONALLY,
+    # which lands in install-machine.ps1's MachineDir param (e.g.
+    # "C:\Windows\system32\-QemuSrc") -> "machine dir empty" no-op -> the
+    # machine sources never get copied into qemu-src. Hashtable splatting
+    # binds named params unambiguously.
+    $installArgs = @{ QemuSrc = $QemuSrc }
+    if ($WhatIfPreference) { $installArgs.WhatIf = $true }
     if ($PSCmdlet.ShouldProcess('install-machine.ps1', 'run')) {
         & (Join-Path $PSScriptRoot 'install-machine.ps1') @installArgs
         if ($LASTEXITCODE -ne 0) { throw "install-machine.ps1 failed (exit $LASTEXITCODE)" }
