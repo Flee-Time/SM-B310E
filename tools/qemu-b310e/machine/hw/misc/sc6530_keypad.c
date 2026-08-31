@@ -107,6 +107,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev.h"
 #include "ui/console.h"
@@ -245,6 +246,7 @@ struct Sc6530KeypadState {
     /* -M b310e,hold-end=on: assert the END level from reset (a physically
      * held key). The guest sees it once it unmasks EIC_DBNC_DMSK bit 3. */
     bool hold_end;
+    QEMUTimer *hold_end_timer;
 };
 
 /* ---------------------------------------------------------------------- */
@@ -520,6 +522,14 @@ static void sc6530_keypad_set_hold_end(Object *obj, bool value, Error **errp)
     SC6530_KEYPAD(obj)->hold_end = value;
 }
 
+static void sc6530_keypad_hold_end_cb(void *opaque)
+{
+    Sc6530KeypadState *s = opaque;
+
+    qemu_log("sc6530_keypad: 2-second hold-end timer expired -> releasing END key\n");
+    sc6530_keypad_end(s, false);
+}
+
 static void sc6530_keypad_reset(DeviceState *dev)
 {
     Sc6530KeypadState *s = SC6530_KEYPAD(dev);
@@ -543,8 +553,16 @@ static void sc6530_keypad_reset(DeviceState *dev)
         s->held[i] = -1;
     }
     s->end_held = false;
+    if (s->hold_end_timer) {
+        timer_del(s->hold_end_timer);
+    }
     if (s->hold_end) {
         sc6530_keypad_end(s, true);
+        if (s->hold_end_timer) {
+            timer_mod(s->hold_end_timer,
+                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                      2 * NANOSECONDS_PER_SECOND);
+        }
     } else if (s->adi) {
         sc6530_adi_set_eic_pb(s->adi, false);
     }
@@ -575,6 +593,9 @@ static void sc6530_keypad_realize(DeviceState *dev, Error **errp)
 {
     Sc6530KeypadState *s = SC6530_KEYPAD(dev);
 
+    s->hold_end_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                     sc6530_keypad_hold_end_cb, s);
+
     /* Register with the QEMU generic input layer: sendkey /
      * input-send-event deliveries land in sc6530_keypad_event. */
     s->hs = qemu_input_handler_register(dev, &sc6530_keypad_handler);
@@ -584,6 +605,10 @@ static void sc6530_keypad_unrealize(DeviceState *dev)
 {
     Sc6530KeypadState *s = SC6530_KEYPAD(dev);
 
+    if (s->hold_end_timer) {
+        timer_free(s->hold_end_timer);
+        s->hold_end_timer = NULL;
+    }
     g_clear_pointer(&s->hs, qemu_input_handler_unregister);
 }
 

@@ -158,6 +158,7 @@
 #define B310E_AUX_TXPOOL_BASE     0x04259638ULL
 #define B310E_AUX_TXNODE_BASE     0x04259700ULL
 #define B310E_AUX_TXSENT_BASE     0x0425a708ULL
+#define B310E_AUX_LCDSPEC_BASE    0x0425e0e8ULL
 
 /* sc6530_lcdc (todo 16): the LCDC display controller @ 0x20d00000 + the
  * LCM DBI controller @ 0x20800000 (both devices live in hw/misc/
@@ -628,7 +629,9 @@ static void b310e_init(MachineState *machine)
                                 B310E_DSP_REGION_PRIORITY);
         sysbus_mmio_map_overlap(aux_sbd, 25, B310E_AUX_TXSENT_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 26, B310E_AUX_CATCHALL_BASE, 0);
+        sysbus_mmio_map_overlap(aux_sbd, 26, B310E_AUX_LCDSPEC_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(aux_sbd, 27, B310E_AUX_CATCHALL_BASE, 0);
         sysbus_realize_and_unref(aux_sbd, &error_fatal);
     }
 
