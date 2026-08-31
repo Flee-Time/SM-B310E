@@ -409,6 +409,17 @@ static void sc6530_adi_reset(DeviceState *dev)
     memset(s->ana_regs, 0, sizeof(s->ana_regs));
     memset(s->vbc_regs, 0, sizeof(s->vbc_regs));
     s->rd_index = 0;
+
+    /* Initialize RTC registers to a valid date/time so stock OS RTC validation passes.
+     * RTC_SEC: 0x82001620, RTC_MIN: 0x82001624, RTC_HOUR: 0x82001628,
+     * RTC_DAY: 0x8200162c, RTC_MON: 0x82001630, RTC_YEAR: 0x82001634
+     */
+    s->ana_regs[(0x620) / 4] = 0;    /* sec = 0 */
+    s->ana_regs[(0x624) / 4] = 0;    /* min = 0 */
+    s->ana_regs[(0x628) / 4] = 12;   /* hour = 12 */
+    s->ana_regs[(0x62c) / 4] = 1;    /* day = 1 */
+    s->ana_regs[(0x630) / 4] = 1;    /* month = 1 */
+    s->ana_regs[(0x634) / 4] = 2024; /* year = 2024 */
     /* eic_pb_phys is the KEYPAD's domain (its reset asserts/releases the
      * hold-end level) - the ADI reset must NOT zero it (the keypad reset
      * runs BEFORE this one, so zeroing here would wipe the hold). */
