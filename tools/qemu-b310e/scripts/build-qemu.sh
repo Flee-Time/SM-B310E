@@ -11,7 +11,7 @@
 #      a DIFFERENT tag aborts with instructions instead of clobbering.
 #   2. INSTALL        - runs scripts/install-machine.sh (no-op until
 #      Wave 3 drops sources into tools/qemu-b310e/machine/).
-#   3. CONFIGURE      - ./configure --target-list=<arm-softmmu> --enable-png
+#   3. CONFIGURE      - ./configure --target-list=<arm-softmmu> --enable-png --enable-gtk
 #      --disable-werror. Skipped when build/config-host.mak exists and the
 #      args fingerprint matches, so re-runs do not reconfigure.
 #   4. BUILD          - make -j<N> (bounded by --build-timeout; kill + log
@@ -193,9 +193,17 @@ fi
 # ---------------------------------------------------------------------------
 BuildDir="$QemuSrc/build"
 FingerprintFile="$BuildDir/.b310e-configure-fingerprint"
-Fingerprint="target-list=$TargetList;png=1;werror=0"
+Fingerprint="target-list=$TargetList;png=1;gtk=1;werror=0"
 
 if [[ "$SkipConfigure" -eq 0 ]]; then
+
+  # Auto-provision GTK3
+  if ! dpkg -l | grep -q libgtk-3-dev 2>/dev/null; then
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "  Installing libgtk-3-dev..."
+      sudo apt-get update && sudo apt-get install -y libgtk-3-dev || echo "  warning: failed to install libgtk-3-dev"
+    fi
+  fi
   # Linux build-tool prereq check (meson/ninja/gcc/make + libpng via pkg-config)
   echo "  Linux build deps: meson, ninja, gcc, make, libpng-dev (checking...)"
   for t in python3 meson ninja gcc make; do
@@ -220,11 +228,11 @@ if [[ "$SkipConfigure" -eq 0 ]]; then
 
   if [[ "$need_configure" -eq 1 ]]; then
     cfgLog="$LocalDir/configure.log"
-    echo "==> configure --target-list=$TargetList --enable-png --disable-werror  (bounded: ${BuildTimeoutSec}s)"
+    echo "==> configure --target-list=$TargetList --enable-png --enable-gtk --disable-werror  (bounded: ${BuildTimeoutSec}s)"
     if [[ "$DRY" -eq 1 ]]; then
-      echo "  [dry run] would run: cd $QemuSrc && ./configure --target-list=$TargetList --enable-png --disable-werror"
+      echo "  [dry run] would run: cd $QemuSrc && ./configure --target-list=$TargetList --enable-png --enable-gtk --disable-werror"
     else
-      if run_bounded "$BuildTimeoutSec" "configure" "$cfgLog" bash -c 'cd "$1" && shift && exec ./configure "$@"' _ "$QemuSrc" --target-list="$TargetList" --enable-png --disable-werror; then
+      if run_bounded "$BuildTimeoutSec" "configure" "$cfgLog" bash -c 'cd "$1" && shift && exec ./configure "$@"' _ "$QemuSrc" --target-list="$TargetList" --enable-png --enable-gtk --disable-werror; then
         printf '%s' "$Fingerprint" > "$FingerprintFile"
         echo "  wrote configure fingerprint: $FingerprintFile"
       else

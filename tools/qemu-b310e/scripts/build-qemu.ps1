@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     Recreates the todo-6..9 build environment from scratch, with the todo-9b
-    addition of --enable-png (screendump needs PNG now). Steps:
+    addition of --enable-png --enable-gtk (screendump needs PNG now). Steps:
 
       1. CLONE-OR-PIN  - if <QemuSrc>/.git is missing, shallow-clone
          https://gitlab.com/qemu-project/qemu at tag v11.1.0 into it; if the
@@ -14,7 +14,7 @@
          a DIFFERENT tag aborts with instructions instead of clobbering.
       2. INSTALL        - runs scripts\install-machine.ps1 (no-op until
          Wave 3 drops sources into tools\qemu-b310e\machine\).
-      3. CONFIGURE      - ./configure --target-list=<arm-softmmu> --enable-png
+      3. CONFIGURE      - ./configure --target-list=<arm-softmmu> --enable-png --enable-gtk
          --disable-werror inside the MSYS2 MINGW64 shell. Skipped when
          build/config-host.mak exists and the args fingerprint matches, so
          re-runs do not reconfigure.
@@ -221,12 +221,19 @@ if (-not $SkipInstall) {
 
 $BuildDir = Join-Path $QemuSrc 'build'
 $FingerprintFile = Join-Path $BuildDir '.b310e-configure-fingerprint'
-$Fingerprint = "target-list=$TargetList;png=1;werror=0"
+$Fingerprint = "target-list=$TargetList;png=1;gtk=1;werror=0"
 
 if (-not $SkipConfigure) {
+
+    # Auto-provision GTK3 via pacman
+    if (-not (Test-Path (Join-Path $Msys64 "mingw64/include/gtk-3.0"))) {
+        Write-Host "  Installing mingw-w64-x86_64-gtk3..."
+        $cmd = "pacman -S --noconfirm mingw-w64-x86_64-gtk3"
+        Invoke-Bounded -FilePath $Bash -Arguments @('-lc', $cmd) -StdOutLog (Join-Path $LocalDir 'pacman.log') -StdErrLog (Join-Path $LocalDir 'pacman.log') -TimeoutSec $BuildTimeoutSec -What 'pacman gtk3'
+    }
     # fingerprint gate: configure only when (a) no build dir yet, (b) a build
     # dir exists but was NOT created by us (no fingerprint - e.g. the todo-8
-    # build, which predates --enable-png), or (c) the stored args differ.
+    # build, which predates --enable-png --enable-gtk), or (c) the stored args differ.
     $needConfigure = -not (Test-Path -LiteralPath (Join-Path $BuildDir 'config-host.mak'))
     if (-not $needConfigure) {
         if (Test-Path -LiteralPath $FingerprintFile) {
@@ -239,9 +246,9 @@ if (-not $SkipConfigure) {
     if ($needConfigure) {
         $cfgLog = Join-Path $LocalDir 'configure.log'
         $msysQemu = ConvertTo-MsysPath $QemuSrc
-        $cmd = "cd '$msysQemu' && ./configure --target-list=$TargetList --enable-png --disable-werror"
+        $cmd = "cd '$msysQemu' && ./configure --target-list=$TargetList --enable-png --enable-gtk --disable-werror"
         $env:MSYSTEM = 'MINGW64'   # meson/make resolve to the MINGW64 toolchain (todo-8 workaround)
-        if ($PSCmdlet.ShouldProcess("configure --target-list=$TargetList --enable-png --disable-werror", 'run')) {
+        if ($PSCmdlet.ShouldProcess("configure --target-list=$TargetList --enable-png --enable-gtk --disable-werror", 'run')) {
             Invoke-Bounded -FilePath $Bash -Arguments @('-lc', $cmd) `
                 -StdOutLog $cfgLog -StdErrLog $cfgLog -TimeoutSec $BuildTimeoutSec -What 'configure'
             if ($PSCmdlet.ShouldProcess($FingerprintFile, 'write configure fingerprint')) {
