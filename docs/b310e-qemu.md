@@ -479,3 +479,9 @@ Look for writes to `0x20d00024` in the `stock.log` or examine the final screendu
   priority 2; the catch-all (0x10000000..0xffffffff) is priority 0.
 - gdb breakpoints do NOT stick on this guest (the remote-stub overhead +
   PSRAM); use the monitor (`screendump`, `xp`) for evidence instead.
+
+### UART1 debug console
+- **Address**: `0x84000000` (SC6530 ARM_UART1)
+- **What it models**: The debug UART. TXD byte writes are logged (per-byte and line-buffered), while status reads confirm an empty transmit FIFO so the guest never blocks.
+- **How to read**: Grep the `-D` log for `sc6530_uart: TX`, or run with `--trace sc6530_uart_tx`.
+- **Findings**: The stock OS prints boot diagnostics over UART1 during execution.

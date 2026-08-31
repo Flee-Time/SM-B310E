@@ -49,3 +49,5 @@ sc6530_lcdc_refresh(uint64_t fb, uint32_t pc) "LCDC refresh fb=0x%" PRIx64 " pc=
 # carry the full 32-bit values (the Wave-6 diff input). Enable at runtime
 # with --trace "sc6530_dsp_*" + -D.
 sc6530_dsp_cmd(uint32_t id, uint32_t arg, uint32_t pc) "DSP cmd id=%u arg=0x%08" PRIx32 " pc=0x%08" PRIx32
+# sc6530_uart.c - SC6530 UART1 debug console
+sc6530_uart_tx(uint32_t byte, uint32_t pc) "UART1 TX byte=0x%02x pc=0x%08x"
