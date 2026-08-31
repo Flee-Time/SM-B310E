@@ -640,18 +640,15 @@ static uint64_t sc6530_aux_bootready_read(void *opaque, hwaddr offset,
                                           unsigned size)
 {
     /*
-     * Only byte offset 0 (0x0425de8c) is the polled flag; offsets 1..3 are
-     * OTHER struct bytes (e.g. +17 = 0x0425de8d, read by SCI idx 10 at NOR
-     * 0x11202). The guest's BSS memset zeroes them; answering 1 there sent
-     * the boot task into the assert-report branch 0x11206-0x1120c every
-     * cycle so the counter++ at 0x11278 never ran (gate [0x0422c5a4] stuck
-     * 0). Natural value = {1,0,0,0}.
+     * Returning 0 at 0x0425de8c allows the boot task 0x11172 check at 0x11202
+     * (CMP R0, #0 / BEQ 0x11210) to pass cleanly, bypassing the AST_BLUESCREEN
+     * assert branch at 0x11206 and allowing counter++ at 0x11278 to advance.
      */
-    uint32_t val = (offset == 0) ? 1 : 0;
+    uint32_t val = 0;
 
     qemu_log("sc6530_aux: bootready r addr=0x%08" PRIx64 " val=0x%u"
              " pc=0x%08" PRIx32 "\n",
-             SC6530_AUX_BOOTREADY_BASE + offset, val,
+             (uint64_t)(SC6530_AUX_BOOTREADY_BASE + offset), val,
              sc6530_aux_guest_pc());
     (void)opaque;
     return val;
