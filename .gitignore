@@ -76,6 +76,10 @@ handoff.md
 # -- Local tooling / machine-specific config -------------------------
 # ghidra MCP server config (machine-specific paths)
 opencode.json
+# Jules API key (opencode-jules plugin loads .env from the project root)
+.env
+# npm-installed opencode plugins
+.opencode/node_modules/
 # code intelligence index
 .codegraph/
 
