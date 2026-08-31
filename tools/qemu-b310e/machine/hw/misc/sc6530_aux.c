@@ -106,6 +106,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AuxState, SC6530_AUX)
 #define SC6530_AUX_TIMEROBJ_BASE   0x0422d2ccULL   /* timer-ops pointer */
 #define SC6530_AUX_TIMEROBJ_SIZE   0x4
 #define SC6530_AUX_TIMEROBJ_VAL    0x0422e3d0ULL   /* the timer ops struct */
+#define SC6530_AUX_TIMERFN_BASE    0x0422e3e0ULL   /* timer function pointer (+0x10) */
+#define SC6530_AUX_TIMERFN_SIZE    0x4
+#define SC6530_AUX_TIMERFN_VAL     0x00037c17ULL   /* stub fn returning 0 (thumb 0x37c16) */
 /* SCI IRQ nesting position (s_irq_status_postion, struct @ 0x0422d4ac).
  * The guest's SCI_IRQ_ENTRY (PSRAM 0x040066b2) pos++ / EXIT (0x040066f6)
  * pos-- balance is broken by our model: the position climbs in LOCKSTEP with
@@ -359,6 +362,7 @@ struct Sc6530AuxState {
     MemoryRegion busmon_iomem;    /* 0x20400000 (silent) */
     MemoryRegion bootready_iomem; /* 0x0425de8c over the PSRAM alias */
     MemoryRegion timerobj_iomem;  /* 0x0422d2cc over the PSRAM alias */
+    MemoryRegion timerfn_iomem;   /* 0x0422e3e0 over the PSRAM alias */
     MemoryRegion scirpos_iomem;   /* 0x0422d4b4 over the PSRAM alias */
     MemoryRegion dlofitbl_iomem;  /* 0x0422e330 over the PSRAM alias */
     MemoryRegion txkern_iomem;    /* 0x0422c654 ThreadX kernel magic */
@@ -636,18 +640,15 @@ static uint64_t sc6530_aux_bootready_read(void *opaque, hwaddr offset,
                                           unsigned size)
 {
     /*
-     * Only byte offset 0 (0x0425de8c) is the polled flag; offsets 1..3 are
-     * OTHER struct bytes (e.g. +17 = 0x0425de8d, read by SCI idx 10 at NOR
-     * 0x11202). The guest's BSS memset zeroes them; answering 1 there sent
-     * the boot task into the assert-report branch 0x11206-0x1120c every
-     * cycle so the counter++ at 0x11278 never ran (gate [0x0422c5a4] stuck
-     * 0). Natural value = {1,0,0,0}.
+     * Returning 0 at 0x0425de8c allows the boot task 0x11172 check at 0x11202
+     * (CMP R0, #0 / BEQ 0x11210) to pass cleanly, bypassing the AST_BLUESCREEN
+     * assert branch at 0x11206 and allowing counter++ at 0x11278 to advance.
      */
-    uint32_t val = (offset == 0) ? 1 : 0;
+    uint32_t val = 0;
 
     qemu_log("sc6530_aux: bootready r addr=0x%08" PRIx64 " val=0x%u"
              " pc=0x%08" PRIx32 "\n",
-             SC6530_AUX_BOOTREADY_BASE + offset, val,
+             (uint64_t)(SC6530_AUX_BOOTREADY_BASE + offset), val,
              sc6530_aux_guest_pc());
     (void)opaque;
     return val;
@@ -695,6 +696,35 @@ static void sc6530_aux_timerobj_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps sc6530_aux_timerobj_ops = {
     .read  = sc6530_aux_timerobj_read,
     .write = sc6530_aux_timerobj_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+static uint64_t sc6530_aux_timerfn_read(void *opaque, hwaddr offset,
+                                        unsigned size)
+{
+    qemu_log("sc6530_aux: timerfn r addr=0x%08" PRIx64 " val=0x%08"
+             PRIx64 " pc=0x%08" PRIx32 "\n",
+             SC6530_AUX_TIMERFN_BASE + offset,
+             (uint64_t)SC6530_AUX_TIMERFN_VAL, sc6530_aux_guest_pc());
+    (void)opaque;
+    return SC6530_AUX_TIMERFN_VAL;
+}
+
+static void sc6530_aux_timerfn_write(void *opaque, hwaddr offset,
+                                     uint64_t value, unsigned size)
+{
+    qemu_log("sc6530_aux: timerfn w addr=0x%08" PRIx64 " val=0x%08"
+             PRIx64 " pc=0x%08" PRIx32 " (ignored: answered fn ptr)\n",
+             SC6530_AUX_TIMERFN_BASE + offset, value,
+             sc6530_aux_guest_pc());
+    (void)opaque;
+}
+
+static const MemoryRegionOps sc6530_aux_timerfn_ops = {
+    .read  = sc6530_aux_timerfn_read,
+    .write = sc6530_aux_timerfn_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = { .min_access_size = 1, .max_access_size = 4 },
     .valid = { .min_access_size = 1, .max_access_size = 4 },
@@ -1326,7 +1356,7 @@ static uint64_t sc6530_aux_lcdtbl_read(void *opaque, hwaddr offset,
 {
     qemu_log("sc6530_aux: lcdtbl r addr=0x%08" PRIx64 " val=0x%08"
              PRIx64 " pc=0x%08" PRIx32 "\n",
-             SC6530_AUX_LCDTBL_BASE + offset,
+             (uint64_t)(SC6530_AUX_LCDTBL_BASE + offset),
              (uint64_t)SC6530_AUX_LCDTBL_VAL, sc6530_aux_guest_pc());
     (void)opaque;
     return SC6530_AUX_LCDTBL_VAL;
@@ -1337,7 +1367,7 @@ static void sc6530_aux_lcdtbl_write(void *opaque, hwaddr offset,
 {
     qemu_log("sc6530_aux: lcdtbl w addr=0x%08" PRIx64 " val=0x%08"
              PRIx64 " pc=0x%08" PRIx32 " (ignored: answered drv struct)\n",
-             SC6530_AUX_LCDTBL_BASE + offset, value, sc6530_aux_guest_pc());
+             (uint64_t)(SC6530_AUX_LCDTBL_BASE + offset), (uint64_t)value, sc6530_aux_guest_pc());
     (void)opaque;
 }
 
@@ -1354,7 +1384,7 @@ static uint64_t sc6530_aux_lcddrv_read(void *opaque, hwaddr offset,
 {
     qemu_log("sc6530_aux: lcddrv r addr=0x%08" PRIx64 " val=0x%08"
              PRIx64 " pc=0x%08" PRIx32 "\n",
-             SC6530_AUX_LCDDRV_PANEL_BASE + offset,
+             (uint64_t)(SC6530_AUX_LCDDRV_PANEL_BASE + offset),
              (uint64_t)SC6530_AUX_LCDDRV_PANEL_VAL, sc6530_aux_guest_pc());
     (void)opaque;
     return SC6530_AUX_LCDDRV_PANEL_VAL;
@@ -1365,7 +1395,7 @@ static void sc6530_aux_lcddrv_write(void *opaque, hwaddr offset,
 {
     qemu_log("sc6530_aux: lcddrv w addr=0x%08" PRIx64 " val=0x%08"
              PRIx64 " pc=0x%08" PRIx32 " (ignored: answered panel ptr)\n",
-             SC6530_AUX_LCDDRV_PANEL_BASE + offset, value,
+             (uint64_t)(SC6530_AUX_LCDDRV_PANEL_BASE + offset), (uint64_t)value,
              sc6530_aux_guest_pc());
     (void)opaque;
 }
@@ -1517,6 +1547,11 @@ static void sc6530_aux_init(Object *obj)
                           &sc6530_aux_timerobj_ops, s,
                           "sc6530-aux-timerobj", SC6530_AUX_TIMEROBJ_SIZE);
     sysbus_init_mmio(sbd, &s->timerobj_iomem);
+
+    memory_region_init_io(&s->timerfn_iomem, obj,
+                          &sc6530_aux_timerfn_ops, s,
+                          "sc6530-aux-timerfn", SC6530_AUX_TIMERFN_SIZE);
+    sysbus_init_mmio(sbd, &s->timerfn_iomem);
 
     memory_region_init_io(&s->scirpos_iomem, obj,
                           &sc6530_aux_scirpos_ops, s,

@@ -140,6 +140,7 @@
  * B310E_REGION_PRIORITY (same level as the DSP subregions). */
 #define B310E_AUX_BOOTREADY_BASE 0x0425de8cULL
 #define B310E_AUX_TIMEROBJ_BASE  0x0422d2ccULL
+#define B310E_AUX_TIMERFN_BASE   0x0422e3e0ULL
 #define B310E_AUX_SCIRPOS_BASE   0x0422d4b4ULL
 #define B310E_AUX_DLOFITBL_BASE  0x0422e330ULL
 #define B310E_AUX_TXKERN_BASE    0x0422c654ULL
@@ -591,41 +592,43 @@ static void b310e_init(MachineState *machine)
                                 B310E_DSP_REGION_PRIORITY);
         sysbus_mmio_map_overlap(aux_sbd, 7, B310E_AUX_TIMEROBJ_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 8, B310E_AUX_SCIRPOS_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 8, B310E_AUX_TIMERFN_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 9, B310E_AUX_DLOFITBL_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 9, B310E_AUX_SCIRPOS_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 10, B310E_AUX_TXKERN_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 10, B310E_AUX_DLOFITBL_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 11, B310E_AUX_TXOBJ_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 11, B310E_AUX_TXKERN_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 12, B310E_AUX_LCDTBL_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 12, B310E_AUX_TXOBJ_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 13, B310E_AUX_LCDDRV_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 13, B310E_AUX_LCDTBL_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 14, B310E_AUX_CLKOBJ_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 14, B310E_AUX_LCDDRV_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 15, B310E_AUX_CLKOBJFLAG_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 15, B310E_AUX_CLKOBJ_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 16, B310E_AUX_SCIPOOLTBL_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 16, B310E_AUX_CLKOBJFLAG_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 17, B310E_AUX_SCIPOOL_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 17, B310E_AUX_SCIPOOLTBL_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 18, B310E_AUX_SCIMEM_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 18, B310E_AUX_SCIPOOL_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 19, B310E_AUX_TXSTATE1_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 19, B310E_AUX_SCIMEM_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 20, B310E_AUX_TXSTATE2_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 20, B310E_AUX_TXSTATE1_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 21, B310E_AUX_TXGUARD_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 21, B310E_AUX_TXSTATE2_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 22, B310E_AUX_TXPOOL_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 22, B310E_AUX_TXGUARD_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 23, B310E_AUX_TXNODE_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 23, B310E_AUX_TXPOOL_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 24, B310E_AUX_TXSENT_BASE,
+        sysbus_mmio_map_overlap(aux_sbd, 24, B310E_AUX_TXNODE_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 25, B310E_AUX_CATCHALL_BASE, 0);
+        sysbus_mmio_map_overlap(aux_sbd, 25, B310E_AUX_TXSENT_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(aux_sbd, 26, B310E_AUX_CATCHALL_BASE, 0);
         sysbus_realize_and_unref(aux_sbd, &error_fatal);
     }
 
