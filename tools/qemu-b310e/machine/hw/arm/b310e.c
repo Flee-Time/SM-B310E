@@ -211,6 +211,8 @@
 /* sc6530_sdio (todo 19): SDIO0 @ 0x20700000 (0x1000 - dma/arg/resp/ctrl/
  * int regs). Keep in sync with hw/misc/sc6530_sdio.c (region geometry). */
 #define B310E_SDIO_BASE           0x20700000ULL
+#define B310E_UART_BASE           0x84000000ULL /* ARM_UART1 debug console, vendor-SDK verified */
+
 
 /*
  * All B310E regions are mapped with this priority; the todo-12 catch-all
@@ -234,6 +236,8 @@
 #define TYPE_SC6530_DSP          "sc6530_dsp"
 #define TYPE_SC6530_USB          "sc6530_usb"
 #define TYPE_SC6530_SDIO         "sc6530_sdio"
+#define TYPE_SC6530_UART         "sc6530_uart"
+
 
 /* Boot constants */
 #define B310E_WARM_MAGIC         0xFE519C04u   /* PBL warm-boot magic */
@@ -813,6 +817,16 @@ static void b310e_init(MachineState *machine)
         sysbus_mmio_map_overlap(usb_sbd, 1, B310E_USB_FIFO_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(usb_sbd, &error_fatal);
+    }
+
+    /* SC6530 UART1 (debug console) @ 0x84000000: stock firmware boot diagnostics */
+    {
+        DeviceState *uart_dev = qdev_new(TYPE_SC6530_UART);
+        SysBusDevice *uart_sbd = SYS_BUS_DEVICE(uart_dev);
+
+        sysbus_mmio_map_overlap(uart_sbd, 0, B310E_UART_BASE,
+                                B310E_REGION_PRIORITY);
+        sysbus_realize_and_unref(uart_sbd, &error_fatal);
     }
 
     /* SC6530 SDIO0 (todo 19) @ 0x20700000: log+store no-op - status
