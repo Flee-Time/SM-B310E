@@ -412,6 +412,9 @@ struct Sc6530AuxState {
 
     /* LCD spec state store+echo bank (0x0425e0e8) */
     uint32_t lcdspec_regs[SC6530_AUX_LCDSPEC_SIZE / 4];
+
+    /* LCD driver table store+echo bank (0x0422c8ec) */
+    uint32_t lcdtbl_regs[SC6530_AUX_LCDTBL_SIZE / 4];
 };
 
 /* ---------------------------------------------------------------------- */
@@ -1358,32 +1361,30 @@ static const MemoryRegionOps sc6530_aux_txobj_ops = {
 static uint64_t sc6530_aux_lcdtbl_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
-    uint64_t val = 0;
+    Sc6530AuxState *s = opaque;
+    uint32_t val = extract32(s->lcdtbl_regs[offset / 4], (offset % 4) * 8, size * 8);
 
-    if (offset == 0x00 || offset == 0x08) {
-        val = SC6530_AUX_LCDTBL_VAL;
-    } else if (offset == 0x10) {
-        val = SC6530_AUX_LCDDRV_PANEL_VAL;
-    } else if (offset == 0x40 || offset == 0x58 || offset == 0x60) {
-        val = 128;
-    } else if (offset == 0x42 || offset == 0x5a || offset == 0x62) {
-        val = 160;
-    }
     qemu_log("sc6530_aux: lcdtbl r addr=0x%08" PRIx64 " val=0x%" PRIx64
              " pc=0x%08" PRIx32 "\n",
              (uint64_t)(SC6530_AUX_LCDTBL_BASE + offset),
-             val, sc6530_aux_guest_pc());
-    (void)opaque;
+             (uint64_t)val, sc6530_aux_guest_pc());
     return val;
 }
 
 static void sc6530_aux_lcdtbl_write(void *opaque, hwaddr offset,
                                     uint64_t value, unsigned size)
 {
+    Sc6530AuxState *s = opaque;
+    uint32_t mask = (size == 4) ? 0xffffffffu : ((1u << (size * 8)) - 1);
+    unsigned shift = (offset % 4) * 8;
+    uint32_t word = s->lcdtbl_regs[offset / 4];
+
+    s->lcdtbl_regs[offset / 4] = (word & ~(mask << shift)) |
+                                  (((uint32_t)value & mask) << shift);
+
     qemu_log("sc6530_aux: lcdtbl w addr=0x%08" PRIx64 " val=0x%08"
-             PRIx64 " pc=0x%08" PRIx32 " (ignored: answered drv struct)\n",
+             PRIx64 " pc=0x%08" PRIx32 "\n",
              (uint64_t)(SC6530_AUX_LCDTBL_BASE + offset), (uint64_t)value, sc6530_aux_guest_pc());
-    (void)opaque;
 }
 
 static const MemoryRegionOps sc6530_aux_lcdtbl_ops = {
@@ -1585,6 +1586,14 @@ static void sc6530_aux_reset(DeviceState *dev)
     memset(s->txsent_regs, 0, sizeof(s->txsent_regs));
     s->txsent_regs[0x04 / 4] = SC6530_AUX_TXBYTESENT_MARK;
     memset(s->lcdspec_regs, 0, sizeof(s->lcdspec_regs));
+
+    memset(s->lcdtbl_regs, 0, sizeof(s->lcdtbl_regs));
+    s->lcdtbl_regs[0x00 / 4] = SC6530_AUX_LCDTBL_VAL;
+    s->lcdtbl_regs[0x08 / 4] = SC6530_AUX_LCDTBL_VAL;
+    s->lcdtbl_regs[0x10 / 4] = SC6530_AUX_LCDDRV_PANEL_VAL;
+    s->lcdtbl_regs[0x40 / 4] = 128 | (160 << 16);
+    s->lcdtbl_regs[0x58 / 4] = 128 | (160 << 16);
+    s->lcdtbl_regs[0x60 / 4] = 128 | (160 << 16);
 }
 
 static void sc6530_aux_init(Object *obj)
