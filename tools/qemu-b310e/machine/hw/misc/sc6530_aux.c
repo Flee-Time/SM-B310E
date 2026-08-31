@@ -150,8 +150,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AuxState, SC6530_AUX)
  * width=0x80 height=0xA0 sits at NOR 0x0CB414. Overlay: table[0] ->
  * a driver struct at 0x0422c8f4 whose +8 = 0x0CB414 (panel ptr). */
 #define SC6530_AUX_LCDTBL_BASE       0x0422c8ecULL  /* LCD driver table [0] */
-#define SC6530_AUX_LCDTBL_SIZE       0x4
+#define SC6530_AUX_LCDTBL_SIZE       0x70
 #define SC6530_AUX_LCDTBL_VAL        0x0422c8f4ULL  /* the driver struct */
+#define SC6530_AUX_LCDSPEC_BASE      0x0425e0e8ULL  /* LCD driver spec struct */
+#define SC6530_AUX_LCDSPEC_SIZE      0x210
 #define SC6530_AUX_LCDDRV_PANEL_BASE 0x0422c8fcULL  /* drv struct + 8 */
 #define SC6530_AUX_LCDDRV_PANEL_SIZE 0x4
 #define SC6530_AUX_LCDDRV_PANEL_VAL  0x000cb414ULL  /* the 128x160 panel */
@@ -380,6 +382,7 @@ struct Sc6530AuxState {
     MemoryRegion txpool_iomem;     /* 0x04259638 ThreadX byte pool */
     MemoryRegion txnode_iomem;     /* 0x04259700 byte-pool free node */
     MemoryRegion txsent_iomem;     /* 0x0425a708 byte-pool sentinel */
+    MemoryRegion lcdspec_iomem;    /* 0x0425e0e8 LCD driver spec struct */
     MemoryRegion catchall_iomem;  /* 0x10000000..0xffffffff, priority 0 */
 
     uint32_t ahb_regs[SC6530_AUX_AHB_SIZE / 4];
@@ -406,6 +409,9 @@ struct Sc6530AuxState {
     uint32_t txpool_regs[SC6530_AUX_TXBYTEPOOL_SIZE / 4];
     uint32_t txnode_regs[SC6530_AUX_TXBYTENODE_SIZE / 4];
     uint32_t txsent_regs[SC6530_AUX_TXBYTESENT_SIZE / 4];
+
+    /* LCD spec state store+echo bank (0x0425e0e8) */
+    uint32_t lcdspec_regs[SC6530_AUX_LCDSPEC_SIZE / 4];
 };
 
 /* ---------------------------------------------------------------------- */
@@ -640,11 +646,9 @@ static uint64_t sc6530_aux_bootready_read(void *opaque, hwaddr offset,
                                           unsigned size)
 {
     /*
-     * Returning 0 at 0x0425de8c allows the boot task 0x11172 check at 0x11202
-     * (CMP R0, #0 / BEQ 0x11210) to pass cleanly, bypassing the AST_BLUESCREEN
-     * assert branch at 0x11206 and allowing counter++ at 0x11278 to advance.
+     * Boot ready / mode byte @ 0x0425de8c: return 1 (normal boot mode).
      */
-    uint32_t val = 0;
+    uint32_t val = 1;
 
     qemu_log("sc6530_aux: bootready r addr=0x%08" PRIx64 " val=0x%u"
              " pc=0x%08" PRIx32 "\n",
@@ -1354,12 +1358,23 @@ static const MemoryRegionOps sc6530_aux_txobj_ops = {
 static uint64_t sc6530_aux_lcdtbl_read(void *opaque, hwaddr offset,
                                        unsigned size)
 {
-    qemu_log("sc6530_aux: lcdtbl r addr=0x%08" PRIx64 " val=0x%08"
-             PRIx64 " pc=0x%08" PRIx32 "\n",
+    uint64_t val = 0;
+
+    if (offset == 0x00 || offset == 0x08) {
+        val = SC6530_AUX_LCDTBL_VAL;
+    } else if (offset == 0x10) {
+        val = SC6530_AUX_LCDDRV_PANEL_VAL;
+    } else if (offset == 0x40 || offset == 0x58 || offset == 0x60) {
+        val = 128;
+    } else if (offset == 0x42 || offset == 0x5a || offset == 0x62) {
+        val = 160;
+    }
+    qemu_log("sc6530_aux: lcdtbl r addr=0x%08" PRIx64 " val=0x%" PRIx64
+             " pc=0x%08" PRIx32 "\n",
              (uint64_t)(SC6530_AUX_LCDTBL_BASE + offset),
-             (uint64_t)SC6530_AUX_LCDTBL_VAL, sc6530_aux_guest_pc());
+             val, sc6530_aux_guest_pc());
     (void)opaque;
-    return SC6530_AUX_LCDTBL_VAL;
+    return val;
 }
 
 static void sc6530_aux_lcdtbl_write(void *opaque, hwaddr offset,
@@ -1403,6 +1418,68 @@ static void sc6530_aux_lcddrv_write(void *opaque, hwaddr offset,
 static const MemoryRegionOps sc6530_aux_lcddrv_ops = {
     .read  = sc6530_aux_lcddrv_read,
     .write = sc6530_aux_lcddrv_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/* ---------------------------------------------------------------------- */
+/* LCD spec overlays (0x0425e0e8): ST7735S panel parameters & driver status */
+/* ---------------------------------------------------------------------- */
+
+static uint64_t sc6530_aux_lcdspec_read(void *opaque, hwaddr offset,
+                                        unsigned size)
+{
+    Sc6530AuxState *s = opaque;
+    uint32_t val = 0;
+
+    if (offset == 0x2c) {          /* 0x0425e114: driver count */
+        val = 1;
+    } else if (offset == 0x110) {  /* 0x0425e1f8: max_width */
+        val = 128;
+    } else if (offset == 0x112) {  /* 0x0425e1fa: max_height */
+        val = 160;
+    } else if (offset == 0x114) {  /* 0x0425e1fc: x_start */
+        val = 0;
+    } else if (offset == 0x116) {  /* 0x0425e1fe: y_start */
+        val = 0;
+    } else if (offset == 0x118) {  /* 0x0425e200: width */
+        val = 128;
+    } else if (offset == 0x11a) {  /* 0x0425e202: height */
+        val = 160;
+    } else if (offset == 0x11c) {  /* 0x0425e204: interface mode */
+        val = 3;
+    } else if (offset == 0x128) {  /* 0x0425e210: active status */
+        val = 1;
+    } else {
+        val = extract32(s->lcdspec_regs[offset / 4], (offset % 4) * 8, size * 8);
+    }
+    qemu_log("sc6530_aux: lcdspec r addr=0x%08" PRIx64 " val=0x%" PRIx64
+             " pc=0x%08" PRIx32 "\n",
+             (uint64_t)(SC6530_AUX_LCDSPEC_BASE + offset), (uint64_t)val,
+             sc6530_aux_guest_pc());
+    return val;
+}
+
+static void sc6530_aux_lcdspec_write(void *opaque, hwaddr offset,
+                                     uint64_t value, unsigned size)
+{
+    Sc6530AuxState *s = opaque;
+    uint32_t mask = (size == 4) ? 0xffffffffu : ((1u << (size * 8)) - 1);
+    unsigned shift = (offset % 4) * 8;
+    uint32_t word = s->lcdspec_regs[offset / 4];
+
+    s->lcdspec_regs[offset / 4] = (word & ~(mask << shift)) |
+                                  (((uint32_t)value & mask) << shift);
+    qemu_log("sc6530_aux: lcdspec w addr=0x%08" PRIx64 " val=0x%08"
+             PRIx64 " pc=0x%08" PRIx32 "\n",
+             (uint64_t)(SC6530_AUX_LCDSPEC_BASE + offset), (uint64_t)value,
+             sc6530_aux_guest_pc());
+}
+
+static const MemoryRegionOps sc6530_aux_lcdspec_ops = {
+    .read  = sc6530_aux_lcdspec_read,
+    .write = sc6530_aux_lcdspec_write,
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = { .min_access_size = 1, .max_access_size = 4 },
     .valid = { .min_access_size = 1, .max_access_size = 4 },
@@ -1507,6 +1584,7 @@ static void sc6530_aux_reset(DeviceState *dev)
     s->txnode_regs[0x04 / 4] = SC6530_AUX_TXBYTENODE_MARK;
     memset(s->txsent_regs, 0, sizeof(s->txsent_regs));
     s->txsent_regs[0x04 / 4] = SC6530_AUX_TXBYTESENT_MARK;
+    memset(s->lcdspec_regs, 0, sizeof(s->lcdspec_regs));
 }
 
 static void sc6530_aux_init(Object *obj)
@@ -1632,6 +1710,11 @@ static void sc6530_aux_init(Object *obj)
                           &sc6530_aux_txsent_ops, s,
                           "sc6530-aux-txsent", SC6530_AUX_TXBYTESENT_SIZE);
     sysbus_init_mmio(sbd, &s->txsent_iomem);
+
+    memory_region_init_io(&s->lcdspec_iomem, obj,
+                          &sc6530_aux_lcdspec_ops, s,
+                          "sc6530-aux-lcdspec", SC6530_AUX_LCDSPEC_SIZE);
+    sysbus_init_mmio(sbd, &s->lcdspec_iomem);
 
     memory_region_init_io(&s->catchall_iomem, obj,
                           &sc6530_aux_catchall_ops, s,
