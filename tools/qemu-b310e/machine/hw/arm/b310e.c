@@ -212,6 +212,7 @@
  * int regs). Keep in sync with hw/misc/sc6530_sdio.c (region geometry). */
 #define B310E_SDIO_BASE           0x20700000ULL
 #define B310E_UART_BASE           0x84000000ULL /* ARM_UART1 debug console, vendor-SDK verified */
+#define B310E_SFC_BASE            0x20A00000ULL /* SC6530 Serial Flash Controller */
 
 
 /*
@@ -237,6 +238,7 @@
 #define TYPE_SC6530_USB          "sc6530_usb"
 #define TYPE_SC6530_SDIO         "sc6530_sdio"
 #define TYPE_SC6530_UART         "sc6530_uart"
+#define TYPE_SC6530_SFC          "sc6530_sfc"
 
 
 /* Boot constants */
@@ -578,6 +580,12 @@ static void b310e_init(MachineState *machine)
      * NOTE: no watchdog here - 0x82001480 lives in the todo-15 ANA
      * region (sc6530_adi @ 0x82001000). */
     {
+    /* SC6530 Serial Flash Controller */
+    DeviceState *sfc_dev = qdev_new(TYPE_SC6530_SFC);
+    object_property_set_link(OBJECT(sfc_dev), "nor", OBJECT(&s->nor_iomem), &error_fatal);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(sfc_dev), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(sfc_dev), 0, B310E_SFC_BASE, B310E_REGION_PRIORITY);
+
         DeviceState *aux_dev = qdev_new(TYPE_SC6530_AUX);
         SysBusDevice *aux_sbd = SYS_BUS_DEVICE(aux_dev);
 
