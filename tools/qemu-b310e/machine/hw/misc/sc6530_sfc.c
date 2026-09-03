@@ -10,6 +10,8 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/cpu.h"
+#include "target/arm/cpu.h"
 #include "hw/core/qdev-properties.h"
 #include "qom/object.h"
 #include "system/memory.h"
@@ -41,6 +43,7 @@ struct Sc6530SfcState {
 
     uint32_t cmd_buf[12]; /* 0x40 - 0x6C */
     uint32_t type_buf[3]; /* 0x70 - 0x78 */
+    bool code_captured;
 };
 
 static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
@@ -88,17 +91,48 @@ static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
     return 0;
 }
 
+static uint64_t sc6530_sfc_guest_pc(void)
+{
+    CPUState *cs = current_cpu;
+
+    if (cs) {
+        return ARM_CPU(cs)->env.regs[15];
+    }
+    return 0;
+}
+
 static void sc6530_sfc_trigger(Sc6530SfcState *s)
 {
     uint32_t opcode = s->cmd_buf[0] & 0xFF;
     int resp_slot = 7 - ((s->cmd_cfg >> 3) & 3);
+    uint32_t pc = sc6530_sfc_guest_pc();
 
     if (resp_slot < 0 || resp_slot > 11) {
         resp_slot = 0;
     }
 
-    qemu_log("sc6530_sfc: TRIGGER opcode=0x%02x resp_slot=%d cmd_cfg=0x%08x\n",
-             opcode, resp_slot, s->cmd_cfg);
+    /* One-shot: capture the guest code at the trigger PC (the stock SFC
+     * driver runs from the PSRAM alias ~0x0400ffxx, wiped after the boot
+     * phase - this snapshots it live so the driver can be located in the
+     * NOR dump). */
+    if (!s->code_captured && pc >= 0x04000000 && pc < 0x04400000) {
+        uint8_t code[64] = { 0 };
+        int i;
+
+        address_space_read(&address_space_memory, pc & ~0x1f,
+                           MEMTXATTRS_UNSPECIFIED, code, sizeof(code));
+        qemu_log("sc6530_sfc: CODE@0x%08x:", pc & ~0x1f);
+        for (i = 0; i < 64; i += 4) {
+            uint32_t w = code[i] | (code[i + 1] << 8) |
+                         (code[i + 2] << 16) | (code[i + 3] << 24);
+            qemu_log(" %08x", w);
+        }
+        qemu_log("\n");
+        s->code_captured = true;
+    }
+
+    qemu_log("sc6530_sfc: TRIGGER opcode=0x%02x resp_slot=%d cmd_cfg=0x%08x pc=0x%08x\n",
+             opcode, resp_slot, s->cmd_cfg, pc);
 
     switch (opcode) {
     case 0x9F:
@@ -180,7 +214,9 @@ static void sc6530_sfc_write(void *opaque, hwaddr offset,
         break;
     case 0x70 ... 0x78:
         if ((offset - 0x70) % 4 == 0) {
-            s->type_buf[(offset - 0x70) / 4] = value;
+            int idx = (offset - 0x70) / 4;
+            s->type_buf[idx] = value;
+            qemu_log("sc6530_sfc: type_buf[%d] write 0x%08x\n", idx, (uint32_t)value);
         }
         break;
     default:
@@ -226,6 +262,7 @@ static void sc6530_sfc_reset(DeviceState *dev)
     for (i = 0; i < 3; i++) {
         s->type_buf[i] = 0;
     }
+    s->code_captured = false;
 }
 
 static void sc6530_sfc_init(Object *obj)
