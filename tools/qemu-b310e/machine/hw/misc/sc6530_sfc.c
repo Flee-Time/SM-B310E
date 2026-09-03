@@ -90,61 +90,51 @@ static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
 
 static void sc6530_sfc_trigger(Sc6530SfcState *s)
 {
-    uint32_t opcode = (s->cmd_buf[0] != 0) ? (s->cmd_buf[0] & 0xFF) : (s->cmd_cfg & 0xFF);
+    uint32_t opcode = s->cmd_buf[0] & 0xFF;
+    int resp_slot = 7 - ((s->cmd_cfg >> 3) & 3);
 
-    /* The response is always consumed from TYPE_BUF0 (0x70) - empirically
-     * verified (the JEDEC-ID response that unblocked the BML mount was read
-     * from 0x70; the guest's read-modify-write config assembly on 0x74/0x78
-     * is separate). */
+    if (resp_slot < 0 || resp_slot > 11) {
+        resp_slot = 0;
+    }
 
-    qemu_log("sc6530_sfc: TRIGGER cmd_buf[0]=0x%08x cmd_cfg=0x%08x -> opcode=0x%02x\n", s->cmd_buf[0], s->cmd_cfg, opcode);
+    qemu_log("sc6530_sfc: TRIGGER opcode=0x%02x resp_slot=%d cmd_cfg=0x%08x\n",
+             opcode, resp_slot, s->cmd_cfg);
 
-    if (opcode == 0x9F) {
-        /* JEDEC ID READ for W25Q64: 0xEF4017 */
-        qemu_log("sc6530_sfc: Responding to JEDEC ID read with 0xEF4017\n");
-        s->type_buf[0] = 0xEF4017;
-        s->type_buf[1] = 0;
-        s->type_buf[2] = 0;
-    } else if (opcode == 0x05) {
-        /* READ STATUS */
-        qemu_log("sc6530_sfc: Responding to READ STATUS (0x05) with 0x00\n");
-        s->type_buf[0] = 0x00;
-        s->type_buf[1] = 0;
-        s->type_buf[2] = 0;
-    } else if (opcode == 0x35) {
-        /* READ STATUS 2 */
-        qemu_log("sc6530_sfc: Responding to READ STATUS 2 (0x35) with 0x00\n");
-        s->type_buf[0] = 0x00;
-        s->type_buf[1] = 0;
-        s->type_buf[2] = 0;
-    } else if (opcode == 0x03 || opcode == 0x0B || opcode == 0x0C) {
-        /* SPI READ. Opcode in cmd_buf[0] byte 0; the 24-bit address is
-         * packed in cmd_buf[0] bits 8-31, or in cmd_buf[1] when cmd_buf[0]
-         * carries only the opcode. */
+    switch (opcode) {
+    case 0x9F:
+        s->cmd_buf[resp_slot] = 0xEF4017;
+        qemu_log("sc6530_sfc: JEDEC ID -> cmd_buf[%d]=0xEF4017\n", resp_slot);
+        break;
+    case 0x05:
+        s->cmd_buf[resp_slot] = 0x00;
+        qemu_log("sc6530_sfc: READ STATUS -> cmd_buf[%d]=0x00\n", resp_slot);
+        break;
+    case 0x35:
+        s->cmd_buf[resp_slot] = 0x00;
+        qemu_log("sc6530_sfc: READ STATUS 2 -> cmd_buf[%d]=0x00\n", resp_slot);
+        break;
+    case 0x03:
+    case 0x0B:
+    case 0x0C: {
         uint32_t addr = (s->cmd_buf[0] >> 8) & 0xFFFFFF;
-        if ((s->cmd_buf[0] & 0xFFFFFF00) == 0 && s->cmd_buf[1] != 0) {
-             addr = s->cmd_buf[1] & 0xFFFFFF;
+        uint8_t buf[4] = { 0 };
+
+        if (addr == 0 && s->cmd_buf[1] != 0) {
+            addr = s->cmd_buf[1] & 0xFFFFFF;
         }
-        
-        qemu_log("sc6530_sfc: Responding to SPI READ opcode=0x%02x at address 0x%06x\n", opcode, addr);
-        
-        uint8_t buf[12] = {0};
-        if (address_space_read(&address_space_memory, addr, MEMTXATTRS_UNSPECIFIED, buf, 12) == MEMTX_OK) {
-            s->type_buf[0] = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
-            s->type_buf[1] = buf[4] | (buf[5] << 8) | (buf[6] << 16) | (buf[7] << 24);
-            s->type_buf[2] = buf[8] | (buf[9] << 8) | (buf[10] << 16) | (buf[11] << 24);
-            qemu_log("sc6530_sfc: Read from NOR: %08x %08x %08x\n", s->type_buf[0], s->type_buf[1], s->type_buf[2]);
+        qemu_log("sc6530_sfc: SPI READ 0x%02x @0x%06x -> cmd_buf[%d]\n",
+                 opcode, addr, resp_slot);
+        if (address_space_read(&address_space_memory, addr,
+                               MEMTXATTRS_UNSPECIFIED, buf, 4) == MEMTX_OK) {
+            s->cmd_buf[resp_slot] = buf[0] | (buf[1] << 8) |
+                                    (buf[2] << 16) | (buf[3] << 24);
         } else {
-            qemu_log("sc6530_sfc: address_space_read failed for SPI READ\n");
-            s->type_buf[0] = 0;
-            s->type_buf[1] = 0;
-            s->type_buf[2] = 0;
+            s->cmd_buf[resp_slot] = 0;
         }
-    } else {
-        /* Other opcodes: clear type_buf to prevent stale reads */
-        s->type_buf[0] = 0;
-        s->type_buf[1] = 0;
-        s->type_buf[2] = 0;
+        break;
+    }
+    default:
+        break;
     }
 }
 
