@@ -2,7 +2,8 @@
  * Spreadtrum SC6530C Serial Flash Controller (SFC)
  *
  * Base: 0x20A00000, Size: 0x1000
- * Models the SFC minimal behavior to unblock BML flash init.
+ * Models the stock driver's software transactions, status polling and
+ * writes to the private NOR backing store.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -17,6 +18,7 @@
 #include "system/memory.h"
 #include "system/address-spaces.h"
 #include "migration/vmstate.h"
+#include "trace.h"
 
 #define TYPE_SC6530_SFC "sc6530_sfc"
 OBJECT_DECLARE_SIMPLE_TYPE(Sc6530SfcState, SC6530_SFC)
@@ -43,16 +45,26 @@ struct Sc6530SfcState {
 
     uint32_t cmd_buf[12]; /* 0x40 - 0x6C */
     uint32_t type_buf[3]; /* 0x70 - 0x78 */
-    bool code_captured;
+    uint32_t jedec_id;
+    uint8_t status1;
+    uint8_t status2;
+    bool reset_enabled;
 };
 
 static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
 {
     Sc6530SfcState *s = SC6530_SFC(opaque);
 
+    /* Stock 0x04010784 fills TX words a byte at a time. */
+    if (size < 4 || (offset & 3)) {
+        uint32_t word = sc6530_sfc_read(opaque, offset & ~3, 4);
+        uint32_t mask = size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
+        return (word >> ((offset & 3) * 8)) & mask;
+    }
+
     switch (offset) {
-    case 0x00: qemu_log("sc6530_sfc: r cmd_cfg=0x%08x\n", s->cmd_cfg); return s->cmd_cfg;
-    case 0x04: qemu_log("sc6530_sfc: r soft_req=0x%08x\n", s->soft_req); return s->soft_req;
+    case 0x00: return s->cmd_cfg;
+    case 0x04: return s->soft_req;
     case 0x08: return s->tbuf_clr;
     case 0x0C: return s->int_clr;
     case 0x10: {
@@ -60,7 +72,6 @@ static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
          * Returning 0x0 (busy) makes the BML's soft_req flow spin and
          * assert AST_BLUESCREEN (verified empirically: 0x3 -> boot
          * advances past the init.c:225 partition-check assert). */
-        qemu_log("sc6530_sfc: r status=0x3\n");
         return 0x3;
     }
     case 0x14: return s->cs_timing_cfg;
@@ -73,14 +84,12 @@ static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
     case 0x40 ... 0x6C:
         if ((offset - 0x40) % 4 == 0) {
             int idx = (offset - 0x40) / 4;
-            qemu_log("sc6530_sfc: r cmd_buf[%d]=0x%08x\n", idx, s->cmd_buf[idx]);
             return s->cmd_buf[idx];
         }
         break;
     case 0x70 ... 0x78:
         if ((offset - 0x70) % 4 == 0) {
             int idx = (offset - 0x70) / 4;
-            qemu_log("sc6530_sfc: r type_buf[%d]=0x%08x\n", idx, s->type_buf[idx]);
             return s->type_buf[idx];
         }
         break;
@@ -101,6 +110,58 @@ static uint64_t sc6530_sfc_guest_pc(void)
     return 0;
 }
 
+static unsigned sc6530_sfc_bytes(Sc6530SfcState *s, unsigned slot)
+{
+    uint8_t type = s->type_buf[slot / 4] >> ((slot % 4) * 8);
+
+    return (type & 1) && !(type & 0x20) ? ((type >> 3) & 3) + 1 : 0;
+}
+
+static void sc6530_sfc_program(Sc6530SfcState *s, uint32_t addr)
+{
+    uint8_t *nor;
+    uint64_t size;
+    uint32_t first = addr;
+
+    if (!s->nor_mr || !(s->status1 & 2)) {
+        return;
+    }
+    nor = memory_region_get_ram_ptr(s->nor_mr);
+    size = memory_region_size(s->nor_mr);
+    for (unsigned slot = 2; slot < 12; slot++) {
+        unsigned count = sc6530_sfc_bytes(s, slot);
+        for (unsigned byte = 0; byte < count; byte++) {
+            /* Stock 0x04012c7e sends a native halfword without swapping;
+             * its 0x55aa marker must read back as 0x55aa through XIP. */
+            uint8_t value = s->cmd_buf[slot] >> (byte * 8);
+            uint32_t target = (first & ~255u) | (addr++ & 255u);
+            if (target < size) {
+                nor[target] &= value;
+            }
+        }
+    }
+    memory_region_flush_rom_device(s->nor_mr, first & ~255u, 256);
+    s->status1 &= ~2u;
+}
+
+static void sc6530_sfc_erase(Sc6530SfcState *s, uint32_t addr, unsigned length)
+{
+    uint64_t size;
+
+    if (!s->nor_mr || !(s->status1 & 2)) {
+        return;
+    }
+    size = memory_region_size(s->nor_mr);
+    addr &= ~(length - 1);
+    if (addr < size) {
+        length = MIN(length, size - addr);
+        memset((uint8_t *)memory_region_get_ram_ptr(s->nor_mr) + addr,
+               0xff, length);
+        memory_region_flush_rom_device(s->nor_mr, addr, length);
+    }
+    s->status1 &= ~2u;
+}
+
 static void sc6530_sfc_trigger(Sc6530SfcState *s)
 {
     uint32_t opcode = s->cmd_buf[0] & 0xFF;
@@ -111,41 +172,56 @@ static void sc6530_sfc_trigger(Sc6530SfcState *s)
         resp_slot = 0;
     }
 
-    /* One-shot: capture the guest code at the trigger PC (the stock SFC
-     * driver runs from the PSRAM alias ~0x0400ffxx, wiped after the boot
-     * phase - this snapshots it live so the driver can be located in the
-     * NOR dump). */
-    if (!s->code_captured && pc >= 0x04000000 && pc < 0x04400000) {
-        uint8_t code[64] = { 0 };
-        int i;
-
-        address_space_read(&address_space_memory, pc & ~0x1f,
-                           MEMTXATTRS_UNSPECIFIED, code, sizeof(code));
-        qemu_log("sc6530_sfc: CODE@0x%08x:", pc & ~0x1f);
-        for (i = 0; i < 64; i += 4) {
-            uint32_t w = code[i] | (code[i + 1] << 8) |
-                         (code[i + 2] << 16) | (code[i + 3] << 24);
-            qemu_log(" %08x", w);
-        }
-        qemu_log("\n");
-        s->code_captured = true;
-    }
-
-    qemu_log("sc6530_sfc: TRIGGER opcode=0x%02x resp_slot=%d cmd_cfg=0x%08x pc=0x%08x\n",
-             opcode, resp_slot, s->cmd_cfg, pc);
+    trace_sc6530_sfc_command(opcode, s->cmd_buf[1], s->cmd_cfg, pc);
 
     switch (opcode) {
     case 0x9F:
-        s->cmd_buf[resp_slot] = 0xEF4017;
-        qemu_log("sc6530_sfc: JEDEC ID -> cmd_buf[%d]=0xEF4017\n", resp_slot);
+        /* The serial receive shifter places the first byte in bits 31:24.
+         * Stock 0x0401211c extracts manufacturer/type/capacity at 24/16/8. */
+        s->cmd_buf[resp_slot] = s->jedec_id << 8;
         break;
     case 0x05:
-        s->cmd_buf[resp_slot] = 0x00;
-        qemu_log("sc6530_sfc: READ STATUS -> cmd_buf[%d]=0x00\n", resp_slot);
+        s->cmd_buf[resp_slot] = (uint32_t)s->status1 << 24;
         break;
     case 0x35:
-        s->cmd_buf[resp_slot] = 0x00;
-        qemu_log("sc6530_sfc: READ STATUS 2 -> cmd_buf[%d]=0x00\n", resp_slot);
+        s->cmd_buf[resp_slot] = (uint32_t)s->status2 << 24;
+        break;
+    case 0x06:
+        s->status1 |= 2; /* WEL, polled at stock 0x04011030. */
+        break;
+    case 0x04:
+        s->status1 &= ~2u;
+        break;
+    case 0x01:
+        if (s->status1 & 2) {
+            s->status1 = s->cmd_buf[1] & ~3u;
+            s->status2 = s->cmd_buf[2];
+        }
+        break;
+    case 0x31:
+        if (s->status1 & 2) {
+            s->status2 = s->cmd_buf[1];
+            s->status1 &= ~2u;
+        }
+        break;
+    case 0x66:
+        s->reset_enabled = true;
+        break;
+    case 0x99:
+        if (s->reset_enabled) {
+            s->status1 = s->status2 = 0;
+            s->reset_enabled = false;
+        }
+        break;
+    case 0x02:
+    case 0x32:
+        sc6530_sfc_program(s, s->cmd_buf[1] & 0xffffff);
+        break;
+    case 0x20:
+        sc6530_sfc_erase(s, s->cmd_buf[1] & 0xffffff, 4096);
+        break;
+    case 0xd8:
+        sc6530_sfc_erase(s, s->cmd_buf[1] & 0xffffff, 65536);
         break;
     case 0x03:
     case 0x0B:
@@ -156,8 +232,6 @@ static void sc6530_sfc_trigger(Sc6530SfcState *s)
         if (addr == 0 && s->cmd_buf[1] != 0) {
             addr = s->cmd_buf[1] & 0xFFFFFF;
         }
-        qemu_log("sc6530_sfc: SPI READ 0x%02x @0x%06x -> cmd_buf[%d]\n",
-                 opcode, addr, resp_slot);
         if (address_space_read(&address_space_memory, addr,
                                MEMTXATTRS_UNSPECIFIED, buf, 4) == MEMTX_OK) {
             s->cmd_buf[resp_slot] = buf[0] | (buf[1] << 8) |
@@ -177,18 +251,37 @@ static void sc6530_sfc_write(void *opaque, hwaddr offset,
 {
     Sc6530SfcState *s = SC6530_SFC(opaque);
 
+    if (size < 4 || (offset & 3)) {
+        unsigned shift = (offset & 3) * 8;
+        uint32_t mask = ((1u << (size * 8)) - 1) << shift;
+        uint32_t old = sc6530_sfc_read(opaque, offset & ~3, 4);
+        sc6530_sfc_write(opaque, offset & ~3,
+                         (old & ~mask) | ((value << shift) & mask), 4);
+        return;
+    }
+
     switch (offset) {
     case 0x00:
         s->cmd_cfg = value;
-        qemu_log("sc6530_sfc: cmd_cfg write 0x%08x\n", (uint32_t)value);
-        sc6530_sfc_trigger(s);
         break;
     case 0x04:
         s->soft_req = value;
-        qemu_log("sc6530_sfc: soft_req write 0x%08x\n", (uint32_t)value);
-        sc6530_sfc_trigger(s);
+        if (value & 1) {
+            sc6530_sfc_trigger(s);
+            s->soft_req &= ~1u;
+        }
         break;
-    case 0x08: s->tbuf_clr = value; break;
+    case 0x08:
+        /* Stock 0x0400ff46 starts each transaction with TBUF_CLR bit 0.
+         * Drop the old slot enables, or a short program also transmits
+         * stale slots from a previous, longer program. */
+        if (value & 1) {
+            for (unsigned i = 0; i < 3; i++) {
+                s->type_buf[i] &= ~0x01010101u;
+            }
+            s->tbuf_clr = value & ~1u;
+        }
+        break;
     case 0x0C: s->int_clr = value; break;
     case 0x14: s->cs_timing_cfg = value; break;
     case 0x18: s->rd_sample_cfg = value; break;
@@ -201,22 +294,12 @@ static void sc6530_sfc_write(void *opaque, hwaddr offset,
         if ((offset - 0x40) % 4 == 0) {
             int idx = (offset - 0x40) / 4;
             s->cmd_buf[idx] = value;
-            qemu_log("sc6530_sfc: cmd_buf[%d] write 0x%08x\n", idx, (uint32_t)value);
-            /* The guest's driver starts the flash command when the opcode
-             * lands in cmd_buf[0] (no soft_req follows for READ commands in
-             * the observed trace - the JEDEC's soft_req is the only one).
-             * Execute immediately so the response is ready when the guest
-             * polls type_buf. */
-            if (idx == 0 && (value & 0xff) != 0) {
-                sc6530_sfc_trigger(s);
-            }
         }
         break;
     case 0x70 ... 0x78:
         if ((offset - 0x70) % 4 == 0) {
             int idx = (offset - 0x70) / 4;
             s->type_buf[idx] = value;
-            qemu_log("sc6530_sfc: type_buf[%d] write 0x%08x\n", idx, (uint32_t)value);
         }
         break;
     default:
@@ -262,7 +345,8 @@ static void sc6530_sfc_reset(DeviceState *dev)
     for (i = 0; i < 3; i++) {
         s->type_buf[i] = 0;
     }
-    s->code_captured = false;
+    s->status1 = s->status2 = 0;
+    s->reset_enabled = false;
 }
 
 static void sc6530_sfc_init(Object *obj)
@@ -276,13 +360,15 @@ static void sc6530_sfc_init(Object *obj)
 }
 
 static const Property sc6530_sfc_properties[] = {
+    /* The dump's TAIL/MAGH descriptor at 0x10320 specifies C8 60 17. */
+    DEFINE_PROP_UINT32("jedec-id", Sc6530SfcState, jedec_id, 0xc86017),
     DEFINE_PROP_LINK("nor", Sc6530SfcState, nor_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
 };
 
 static const VMStateDescription sc6530_sfc_vmsd = {
     .name = "sc6530_sfc",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(cmd_cfg, Sc6530SfcState),
@@ -298,6 +384,9 @@ static const VMStateDescription sc6530_sfc_vmsd = {
         VMSTATE_UINT32(wp_hld_init, Sc6530SfcState),
         VMSTATE_UINT32_ARRAY(cmd_buf, Sc6530SfcState, 12),
         VMSTATE_UINT32_ARRAY(type_buf, Sc6530SfcState, 3),
+        VMSTATE_UINT8_V(status1, Sc6530SfcState, 2),
+        VMSTATE_UINT8_V(status2, Sc6530SfcState, 2),
+        VMSTATE_BOOL_V(reset_enabled, Sc6530SfcState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

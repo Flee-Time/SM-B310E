@@ -1,37 +1,9 @@
 /*
- * Spreadtrum SC6530C interrupt controller (B310E-OS QEMU machine).
- *
- * Models the SC6530 INTC at 0x80000000: 32 level-sensitive input lines,
- * one output SysBus IRQ wired directly to the ARM926 CPU's IRQ line in
- * hw/arm/b310e.c (no GIC). Register semantics are pinned by the guest-side
- * usage in the B310E-OS kernel (kernel/irq.c) and the hardware learnings
- * (.omo/notepads/b310e-custom-os/learnings.md):
- *
- *   +0x04 PENDING (RO): level of all 32 input lines, INCLUDING lines whose
- *         mask bit is clear. This is the documented hardware quirk behind
- *         the "1ms tick + key activity" hard freeze on the real phone: an
- *         unmasked peripheral line asserts PENDING the moment its source
- *         asserts, so the guest IRQ handler must skip lines that have no
- *         registered C handler (kernel/irq.c irq_dispatch_for_test).
- *         There is NO pending-clear register: the peripheral ISR
- *         deasserts its own source line (the timer writes its +0xc = 9),
- *         which drops the pending bit here.
- *   +0x08 ENABLE (WO): full-register write of the interrupt mask. The
- *         guest arms the 1ms timer line with MEM4(0x80000008) = 1u << 23
- *         and masks everything with MEM4(0x80000008) = 0 (kernel/irq.c
- *         sys_timer_start / sys_timer_pause) - a later write of 0 clears.
- *   +0x0c DISABLE (WO): write 1<<j CLEARS mask bit j. The learnings'
- *         "INT_CLEAR" trap: this register is INT_DISABLE, not an
- *         acknowledge - a guest writing it masks the line; PENDING is
- *         untouched (the peripheral ISR owns source-clearing).
- *
- * CPU IRQ output = (pending & enabled) != 0, level-sensitive.
- *
- * Template: hw/arm/musicpal.c mv88w8618_pic (the surviving ARM926EJ-S +
- * custom-PIC pattern in QEMU v11.1.0). Key divergence: the SC6530 PENDING
- * read returns the raw line levels (musicpal masks them into its STATUS),
- * and the DISABLE register does not clear the pending level.
- *
+ * SC6530C interrupt controller at 0x80000000, 32 level inputs.
+ * IRQ: masked status +0, raw +4, enable R/W +8, disable strobe +12.
+ * FIQ: the corresponding bank is at +0x20. Stock 0x1b920 preserves the
+ * enable mask with a read/OR/write, 0x1ba20 routes sources to FIQ.
+ * Each peripheral acknowledges and deasserts its own source.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -46,6 +18,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530IntcState, SC6530_INTC)
 
 /* Register offsets from the SC6530 INTC base 0x80000000. */
 #define SC6530_INTC_PENDING  0x04
+#define SC6530_INTC_STATUS   0x00
 #define SC6530_INTC_ENABLE   0x08
 #define SC6530_INTC_DISABLE  0x0c
 
@@ -61,12 +34,15 @@ struct Sc6530IntcState {
     MemoryRegion iomem;
     uint32_t level;    /* raw input levels, one bit per line (PENDING) */
     uint32_t enabled;  /* interrupt mask (INT_ENABLE) */
+    uint32_t fiq_enabled;
     qemu_irq parent_irq;
+    qemu_irq parent_fiq;
 };
 
 static void sc6530_intc_update(Sc6530IntcState *s)
 {
     qemu_set_irq(s->parent_irq, (s->level & s->enabled) != 0);
+    qemu_set_irq(s->parent_fiq, (s->level & s->fiq_enabled) != 0);
 }
 
 static void sc6530_intc_set_irq(void *opaque, int irq, int level)
@@ -86,14 +62,25 @@ static uint64_t sc6530_intc_read(void *opaque, hwaddr offset, unsigned size)
     Sc6530IntcState *s = opaque;
 
     switch (offset) {
+    case SC6530_INTC_STATUS:
+        /* Stock 0x1b874 reads the masked status to dispatch an ISR. */
+        return s->level & s->enabled;
     case SC6530_INTC_PENDING:
         /* Raw line levels, INCLUDING lines that are masked: the SC6530
          * INTC pending reflects disabled lines too (the learnings root
          * cause - fpdoom checks pending bit 25 for USB without ever
          * enabling that line). */
         return s->level;
+    case SC6530_INTC_ENABLE:
+        /* Stock 0x1b920 preserves existing enables with a read/OR/write. */
+        return s->enabled;
+    case 0x20:
+        return s->level & s->fiq_enabled;
+    case 0x24:
+        return s->level;
+    case 0x28:
+        return s->fiq_enabled;
     default:
-        /* ENABLE/DISABLE are write-only on the real part. */
         return 0;
     }
 }
@@ -117,6 +104,12 @@ static void sc6530_intc_write(void *opaque, hwaddr offset,
          * untouched (the peripheral ISR clears its own source). */
         s->enabled &= ~(uint32_t)value;
         break;
+    case 0x28:
+        s->fiq_enabled = value;
+        break;
+    case 0x2c:
+        s->fiq_enabled &= ~value;
+        break;
     default:
         break;
     }
@@ -135,6 +128,8 @@ static void sc6530_intc_reset(DeviceState *d)
 
     s->level = 0;
     s->enabled = 0;
+    s->fiq_enabled = 0;
+    sc6530_intc_update(s);
 }
 
 static void sc6530_intc_init(Object *obj)
@@ -144,6 +139,7 @@ static void sc6530_intc_init(Object *obj)
 
     qdev_init_gpio_in(DEVICE(s), sc6530_intc_set_irq, 32);
     sysbus_init_irq(sbd, &s->parent_irq);
+    sysbus_init_irq(sbd, &s->parent_fiq);
     memory_region_init_io(&s->iomem, obj, &sc6530_intc_ops, s,
                           "sc6530-intc", SC6530_INTC_SIZE);
     sysbus_init_mmio(sbd, &s->iomem);
@@ -151,11 +147,12 @@ static void sc6530_intc_init(Object *obj)
 
 static const VMStateDescription sc6530_intc_vmsd = {
     .name = "sc6530_intc",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(level, Sc6530IntcState),
         VMSTATE_UINT32(enabled, Sc6530IntcState),
+        VMSTATE_UINT32_V(fiq_enabled, Sc6530IntcState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

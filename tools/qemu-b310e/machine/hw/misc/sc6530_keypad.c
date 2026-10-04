@@ -109,6 +109,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev.h"
 #include "ui/console.h"
 #include "ui/input.h"
@@ -243,6 +244,7 @@ struct Sc6530KeypadState {
 
     /* EIC END key current level (1 = held). */
     bool end_held;
+    qemu_irq irq;
     /* -M b310e,hold-end=on: assert the END level from reset (a physically
      * held key). The guest sees it once it unmasks EIC_DBNC_DMSK bit 3. */
     bool hold_end;
@@ -385,6 +387,7 @@ static void sc6530_keypad_event(DeviceState *dev, QemuConsole *src,
     } else {
         sc6530_keypad_release(s, m);
     }
+    qemu_set_irq(s->irq, (s->int_raw & s->int_en) != 0);
 }
 
 static const QemuInputHandler sc6530_keypad_handler = {
@@ -410,7 +413,7 @@ static uint64_t sc6530_keypad_read(void *opaque, hwaddr offset,
     case SC6530_KPD_INT_RAW:
         return s->int_raw & SC6530_KPD_EDGE_ALL;
     case SC6530_KPD_INT_MASK:
-        return s->int_mask;
+        return s->int_raw & s->int_en;
     case SC6530_KPD_DUMMY:
         return s->dummy;
     case SC6530_KPD_POLARITY:
@@ -452,18 +455,16 @@ static void sc6530_keypad_write(void *opaque, hwaddr offset,
         /* RO latch: absorb (the controller owns it). */
         break;
     case SC6530_KPD_INT_MASK:
-        s->int_mask = value;
+        /* Masked status is read-only. */
         break;
     case SC6530_KPD_INT_CLR:
-        /* Edge ACK: the firmware clears with int_clr = 0xfff after every
-         * read (drivers/keypad.c keypad_poll). Any write clears all
-         * latched edges. The status row bytes persist (see header). */
+        /* W1C edge ACK. The status row bytes persist after clearing. */
         if (s->int_raw) {
             qemu_log("sc6530_keypad: int_clr write val=0x%" PRIx64
                      " clears int_raw=0x%02x\n", value,
                      s->int_raw & SC6530_KPD_EDGE_ALL);
         }
-        s->int_raw = 0;
+        s->int_raw &= ~value;
         break;
     case SC6530_KPD_DUMMY:
         s->dummy = value;
@@ -498,6 +499,7 @@ static void sc6530_keypad_write(void *opaque, hwaddr offset,
     default:
         break;
     }
+    qemu_set_irq(s->irq, (s->int_raw & s->int_en) != 0);
 }
 
 static const MemoryRegionOps sc6530_keypad_ops = {
@@ -548,6 +550,7 @@ static void sc6530_keypad_reset(DeviceState *dev)
     s->dbg_stat1 = 0;
     s->dbg_stat2 = 0;
     s->int_raw = 0;
+    qemu_set_irq(s->irq, 0);
     s->key_status = 0;
     for (i = 0; i < 4; i++) {
         s->held[i] = -1;
@@ -571,6 +574,8 @@ static void sc6530_keypad_reset(DeviceState *dev)
 static void sc6530_keypad_init(Object *obj)
 {
     Sc6530KeypadState *s = SC6530_KEYPAD(obj);
+
+    sysbus_init_irq(SYS_BUS_DEVICE(s), &s->irq);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     memory_region_init_io(&s->matrix_iomem, obj, &sc6530_keypad_ops, s,

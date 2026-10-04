@@ -82,7 +82,7 @@ function New-ArmKconfigBlock {
     # machine stanza per hw/arm/Kconfig convention (MUSICPAL: bool/default y/depends on TCG && ARM)
     param([System.IO.FileInfo[]]$Files)
     $stanzas = foreach ($f in $Files) {
-        "config $(ConvertTo-SymbolName $f)`n    bool`n    default y`n    depends on TCG && ARM"
+        "config $(ConvertTo-SymbolName $f)`n    bool`n    default y`n    depends on TCG && ARM`n    select OR_IRQ"
     }
     return ($stanzas -join "`n`n")
 }
@@ -246,7 +246,7 @@ if (-not $Uninstall) {
 
 if (Test-Path -LiteralPath (Join-Path $QemuSrc '.git')) {
     Write-Host "`n  --- qemu-src git status (our additions only) ---"
-    & git -C $QemuSrc status --short
+    & git -c "safe.directory=$($QemuSrc.Replace('\', '/'))" -C $QemuSrc status --short
     Write-Host "  --- end git status ---"
 }
 

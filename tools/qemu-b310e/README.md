@@ -10,6 +10,10 @@ The usage doc (build recipe, run commands, memory map, trace recipes,
 limitations) lives at the repo root: **`docs/b310e-qemu.md`** (created in
 Wave 5/7 - do NOT add a `docs/` subdir here).
 
+Current boot/audio evidence and the reproducible Windows headless workflow
+are in [emulator-audio.md](../../docs/emulator-audio.md). Built-in stock MIDI
+ringtone output is verified; the full DSP and phone model are still incomplete.
+
 ## Layout
 
 ```

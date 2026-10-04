@@ -77,6 +77,7 @@
 #include "hw/core/boards.h"
 #include "hw/core/cpu.h"
 #include "hw/core/irq.h"
+#include "hw/core/or-irq.h"
 #include "hw/core/qdev.h"
 #include "hw/core/sysbus.h"
 #include "hw/arm/machines-qom.h"
@@ -266,6 +267,8 @@ struct B310EMachineState {
 
     /* -M b310e,hold-end=on (default off): hold the EIC END key from reset */
     bool hold_end;
+    bool boot_overlays;
+    bool gpio49_high;
 
     ARMCPU *cpu;
 
@@ -404,6 +407,26 @@ static void b310e_set_hold_end(Object *obj, bool value, Error **errp)
     B310E_MACHINE(obj)->hold_end = value;
 }
 
+static bool b310e_get_boot_overlays(Object *obj, Error **errp)
+{
+    return B310E_MACHINE(obj)->boot_overlays;
+}
+
+static void b310e_set_boot_overlays(Object *obj, bool value, Error **errp)
+{
+    B310E_MACHINE(obj)->boot_overlays = value;
+}
+
+static bool b310e_get_gpio49_high(Object *obj, Error **errp)
+{
+    return B310E_MACHINE(obj)->gpio49_high;
+}
+
+static void b310e_set_gpio49_high(Object *obj, bool value, Error **errp)
+{
+    B310E_MACHINE(obj)->gpio49_high = value;
+}
+
 /* ---------------------------------------------------------------------- */
 /* Machine init                                                           */
 /* ---------------------------------------------------------------------- */
@@ -415,6 +438,7 @@ static void b310e_init(MachineState *machine)
     MemoryRegion *address_space_mem = get_system_memory();
     BlockBackend *blk;
     DeviceState *adi_dev;   /* the ADI device: todo 17's keypad links to it */
+    DeviceState *dma_dev;
     int64_t len;
 
     if (machine->ram_size != mc->default_ram_size) {
@@ -449,9 +473,12 @@ static void b310e_init(MachineState *machine)
                                         B310E_REGION_PRIORITY);
 
     /* NOR XIP at 0x0: read-only with write logging. */
-    s->nor = g_malloc0(B310E_NOR_SIZE);
-    memory_region_init_io(&s->nor_iomem, OBJECT(machine), &b310e_nor_ops, s,
-                          "b310e.nor", B310E_NOR_SIZE);
+    /* CPU writes still go to the logging handler. SFC program/erase updates
+     * this private ROM backing; the input block image is never modified. */
+    memory_region_init_rom_device(&s->nor_iomem, NULL,
+                                  &b310e_nor_ops, s, "b310e.nor",
+                                  B310E_NOR_SIZE, &error_fatal);
+    s->nor = memory_region_get_ram_ptr(&s->nor_iomem);
     memory_region_add_subregion_overlap(address_space_mem, B310E_NOR_BASE,
                                         &s->nor_iomem, B310E_REGION_PRIORITY);
 
@@ -589,6 +616,8 @@ static void b310e_init(MachineState *machine)
         DeviceState *aux_dev = qdev_new(TYPE_SC6530_AUX);
         SysBusDevice *aux_sbd = SYS_BUS_DEVICE(aux_dev);
 
+        qdev_set_id(aux_dev, g_strdup("sc6530-aux"), &error_fatal);
+
         sysbus_mmio_map_overlap(aux_sbd, 0, B310E_AUX_AHB_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_mmio_map_overlap(aux_sbd, 1, B310E_AUX_APB_BASE,
@@ -601,50 +630,59 @@ static void b310e_init(MachineState *machine)
                                 B310E_REGION_PRIORITY);
         sysbus_mmio_map_overlap(aux_sbd, 5, B310E_AUX_BUSMON_BASE,
                                 B310E_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 6, B310E_AUX_BOOTREADY_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 7, B310E_AUX_TIMEROBJ_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 8, B310E_AUX_TIMERFN_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 9, B310E_AUX_SCIRPOS_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 10, B310E_AUX_DLOFITBL_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 11, B310E_AUX_TXKERN_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 12, B310E_AUX_TXOBJ_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 13, B310E_AUX_LCDTBL_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 14, B310E_AUX_LCDDRV_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 15, B310E_AUX_CLKOBJ_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 16, B310E_AUX_CLKOBJFLAG_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 17, B310E_AUX_SCIPOOLTBL_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 18, B310E_AUX_SCIPOOL_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 19, B310E_AUX_SCIMEM_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 20, B310E_AUX_TXSTATE1_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 21, B310E_AUX_TXSTATE2_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 22, B310E_AUX_TXGUARD_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 23, B310E_AUX_TXPOOL_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 24, B310E_AUX_TXNODE_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 25, B310E_AUX_TXSENT_BASE,
-                                B310E_DSP_REGION_PRIORITY);
-        sysbus_mmio_map_overlap(aux_sbd, 26, B310E_AUX_LCDSPEC_BASE,
-                                B310E_DSP_REGION_PRIORITY);
+        /* Legacy RAM overlays are opt-in. Stock initializes these objects;
+         * replacing them corrupts its memory pools (sci_mem.c:313). */
+        if (s->boot_overlays) {
+            sysbus_mmio_map_overlap(aux_sbd, 6, B310E_AUX_BOOTREADY_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 7, B310E_AUX_TIMEROBJ_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 8, B310E_AUX_TIMERFN_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 9, B310E_AUX_SCIRPOS_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 10, B310E_AUX_DLOFITBL_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 11, B310E_AUX_TXKERN_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 12, B310E_AUX_TXOBJ_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 13, B310E_AUX_LCDTBL_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 14, B310E_AUX_LCDDRV_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 15, B310E_AUX_CLKOBJ_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 16, B310E_AUX_CLKOBJFLAG_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 17, B310E_AUX_SCIPOOLTBL_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 18, B310E_AUX_SCIPOOL_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 19, B310E_AUX_SCIMEM_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 20, B310E_AUX_TXSTATE1_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 21, B310E_AUX_TXSTATE2_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 22, B310E_AUX_TXGUARD_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 23, B310E_AUX_TXPOOL_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 24, B310E_AUX_TXNODE_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 25, B310E_AUX_TXSENT_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+            sysbus_mmio_map_overlap(aux_sbd, 26, B310E_AUX_LCDSPEC_BASE,
+                                    B310E_DSP_REGION_PRIORITY);
+        }
         sysbus_mmio_map_overlap(aux_sbd, 27, B310E_AUX_CATCHALL_BASE, 0);
         sysbus_realize_and_unref(aux_sbd, &error_fatal);
+        /* The stock LCD_EnterSleep (0x15520) waits on input GPIO49.
+         * Its electrical role is not established yet. Expose an explicit
+         * board-level experiment; do not patch the firmware's wait flag. */
+        qemu_set_irq(qdev_get_gpio_in_named(aux_dev, "gpio-input", 49),
+                     s->gpio49_high);
     }
 
     /* SC6530 INTC @ 0x80000000 (todo 13): 32 input lines, output SysBus
@@ -662,6 +700,8 @@ static void b310e_init(MachineState *machine)
         sysbus_realize_and_unref(SYS_BUS_DEVICE(intc), &error_fatal);
         sysbus_connect_irq(SYS_BUS_DEVICE(intc), 0,
                            qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_IRQ));
+        sysbus_connect_irq(SYS_BUS_DEVICE(intc), 1,
+                           qdev_get_gpio_in(DEVICE(s->cpu), ARM_CPU_FIQ));
         sysbus_mmio_map_overlap(SYS_BUS_DEVICE(intc), 0, B310E_INTC_BASE,
                                 B310E_REGION_PRIORITY);
     }
@@ -678,10 +718,23 @@ static void b310e_init(MachineState *machine)
 
         sysbus_realize_and_unref(timer_sbd, &error_fatal);
         sysbus_connect_irq(timer_sbd, 0, qdev_get_gpio_in(s->intc, 23));
+        sysbus_connect_irq(timer_sbd, 1, qdev_get_gpio_in(s->intc, 16));
         sysbus_mmio_map_overlap(timer_sbd, 0, B310E_TIMER_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_mmio_map_overlap(timer_sbd, 1, B310E_SYSTIMER_BASE,
                                 B310E_REGION_PRIORITY);
+    }
+
+    /* Stock's timer HAL at 0x37b78 uses timer0/1 for IRQs 4/5. */
+    {
+        DeviceState *gpt = qdev_new("sc6530_gpt");
+        SysBusDevice *sbd = SYS_BUS_DEVICE(gpt);
+
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        sysbus_mmio_map_overlap(sbd, 0, B310E_TIMER_BASE,
+                                B310E_REGION_PRIORITY + 1);
+        sysbus_connect_irq(sbd, 0, qdev_get_gpio_in(s->intc, 4));
+        sysbus_connect_irq(sbd, 1, qdev_get_gpio_in(s->intc, 5));
     }
 
     /* SC6530 ADI (todo 15) @ 0x82000000: the ADI mailbox (0x18 read
@@ -695,7 +748,34 @@ static void b310e_init(MachineState *machine)
      * 0x82001900 inside the ANA region is NOT re-mapped: todo 17's
      * keypad device holds a QOM link to this device (adi_dev below)
      * and raises the END bit through the ANA bank. */
+    dma_dev = qdev_new("sc6530_dma");
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dma_dev), &error_fatal);
+    sysbus_mmio_map_overlap(SYS_BUS_DEVICE(dma_dev), 0, 0x20100000,
+                            B310E_REGION_PRIORITY);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dma_dev), 0, qdev_get_gpio_in(s->intc, 20));
+
+    {
+        DeviceState *combined = qdev_new(TYPE_OR_IRQ);
+        DeviceState *midi_dev = qdev_new("sc6530_midi");
+        DeviceState *lzma_dev = qdev_new("sc6530_lzma");
+        object_property_set_int(OBJECT(combined), "num-lines", 2, &error_fatal);
+        qdev_realize_and_unref(combined, NULL, &error_fatal);
+        qdev_connect_gpio_out(combined, 0, qdev_get_gpio_in(s->intc, 30));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(midi_dev), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(midi_dev), 0, 0x20b00000,
+                                B310E_REGION_PRIORITY);
+        sysbus_connect_irq(SYS_BUS_DEVICE(midi_dev), 0,
+                           qdev_get_gpio_in(combined, 0));
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(lzma_dev), &error_fatal);
+        sysbus_mmio_map_overlap(SYS_BUS_DEVICE(lzma_dev), 0, 0x20e00000,
+                                B310E_REGION_PRIORITY);
+        /* Stock 0x6a016 registers the accelerator handler on interrupt 30. */
+        sysbus_connect_irq(SYS_BUS_DEVICE(lzma_dev), 0,
+                           qdev_get_gpio_in(combined, 1));
+    }
+
     adi_dev = qdev_new(TYPE_SC6530_ADI);
+    object_property_set_link(OBJECT(adi_dev), "dma", OBJECT(dma_dev), &error_fatal);
     {
         SysBusDevice *adi_sbd = SYS_BUS_DEVICE(adi_dev);
 
@@ -705,7 +785,9 @@ static void b310e_init(MachineState *machine)
                                 B310E_REGION_PRIORITY);
         sysbus_mmio_map_overlap(adi_sbd, 2, B310E_ADI_VBC_BASE,
                                 B310E_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(adi_sbd, 3, 0x8a002000, B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(adi_sbd, &error_fatal);
+        sysbus_connect_irq(adi_sbd, 0, qdev_get_gpio_in(s->intc, 24));
     }
 
     /* SC6530 keypad (todo 17) @ 0x87000000: the matrix controller
@@ -732,6 +814,8 @@ static void b310e_init(MachineState *machine)
         sysbus_mmio_map_overlap(keypad_sbd, 0, B310E_KEYPAD_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(keypad_sbd, &error_fatal);
+        /* Stock keypad ISR 0x351de reads 0x87000008 on IRQ8. */
+        sysbus_connect_irq(keypad_sbd, 0, qdev_get_gpio_in(s->intc, 8));
     }
 
     /* SC6530 LCDC + LCM (todo 16) @ 0x20d00000 / 0x20800000: two devices
@@ -749,6 +833,8 @@ static void b310e_init(MachineState *machine)
         sysbus_mmio_map_overlap(lcdc_sbd, 0, B310E_LCDC_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(lcdc_sbd, &error_fatal);
+        /* Stock ARM ISR at 0x27974 dispatches LCDC completion on IRQ14. */
+        sysbus_connect_irq(lcdc_sbd, 0, qdev_get_gpio_in(s->intc, 14));
     }
     {
         DeviceState *lcm_dev = qdev_new(TYPE_SC6530_LCM);
@@ -792,21 +878,24 @@ static void b310e_init(MachineState *machine)
                                 B310E_DSP_REGION_PRIORITY);
         sysbus_mmio_map_overlap(dsp_sbd, 5, B310E_DSP_DSP_CTL0_BASE,
                                 B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 6, B310E_DSP_PERI_CTL0_BASE,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 7, B310E_DSP_APB_EB0_SET_BASE,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 8, B310E_DSP_APB_EB0_CLR_BASE,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 9, B310E_DSP_SHARE_DL_BASE,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 10, B310E_DSP_SHARE_DL_ALIAS,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 11, B310E_DSP_SHARE_CTL_BASE,
-                            B310E_DSP_REGION_PRIORITY);
-    sysbus_mmio_map_overlap(dsp_sbd, 12, B310E_DSP_SHARE_CTL_ALIAS,
-                            B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 6, B310E_DSP_PERI_CTL0_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 7, B310E_DSP_APB_EB0_SET_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 8, B310E_DSP_APB_EB0_CLR_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 9, B310E_DSP_SHARE_DL_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 10, B310E_DSP_SHARE_DL_ALIAS,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 11, B310E_DSP_SHARE_CTL_BASE,
+                                B310E_DSP_REGION_PRIORITY);
+        sysbus_mmio_map_overlap(dsp_sbd, 12, B310E_DSP_SHARE_CTL_ALIAS,
+                                B310E_DSP_REGION_PRIORITY);
         sysbus_realize_and_unref(dsp_sbd, &error_fatal);
+        sysbus_connect_irq(dsp_sbd, 0, qdev_get_gpio_in(s->intc, 13));
+        object_property_set_link(OBJECT(adi_dev), "dsp", OBJECT(dsp_dev),
+                                 &error_fatal);
     }
 
     /* SC6530 USB (todo 19) @ 0x20300000: log+store no-op ("host never
@@ -866,6 +955,10 @@ static void b310e_machine_init(MachineClass *mc)
                                   b310e_get_boot, b310e_set_boot);
     object_class_property_add_bool(OBJECT_CLASS(mc), "hold-end",
                                    b310e_get_hold_end, b310e_set_hold_end);
+    object_class_property_add_bool(OBJECT_CLASS(mc), "boot-overlays",
+                                   b310e_get_boot_overlays, b310e_set_boot_overlays);
+    object_class_property_add_bool(OBJECT_CLASS(mc), "gpio49-high",
+                                   b310e_get_gpio49_high, b310e_set_gpio49_high);
 }
 
 DEFINE_MACHINE_EXTENDED("b310e", MACHINE, B310EMachineState,

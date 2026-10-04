@@ -78,7 +78,7 @@ make_kconfig_arm() {
   local block="" first=1 f
   for f in "$@"; do
     if [[ $first -eq 1 ]]; then first=0; else block+=$'\n\n'; fi
-    block+="config $(sym_of "$f")"$'\n'"    bool"$'\n'"    default y"$'\n'"    depends on TCG && ARM"
+    block+="config $(sym_of "$f")"$'\n'"    bool"$'\n'"    default y"$'\n'"    depends on TCG && ARM"$'\n'"    select OR_IRQ"
   done
   echo "$block"
 }
