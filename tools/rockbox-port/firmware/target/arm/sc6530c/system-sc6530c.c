@@ -90,25 +90,21 @@ static void watchdog_stop(void)
 }
 
 /* ---- IRQ dispatch -------------------------------------------------------
- * The SC6530 INTC has no INTOFFSET register: read INT_PENDING and dispatch
- * only the lines we own — line 23 (the 1 ms tick, TIMER23) and line 4 (the
- * user timer, TIMER0); 23 wins when both are set. ANY OTHER pending bit is
- * a stray: the SC6530 pending register (0x80000004) reflects DISABLED lines
- * too, so a peripheral edge (SDIO DMA, keypad/EIC, USB) asserts its bit the
- * moment the source fires even though the line is masked. Strays are SKIPPED
- * — never panic, never ack a line we don't own (0x8000000C is INT_DISABLE,
- * not an acknowledge, and acking an unhandled line would starve the tick).
- * This mirrors the proven B310E-OS kernel fix (kernel/irq.c
- * irq_dispatch_for_test: "ONLY dispatch a pending line that has a registered
- * handler"). The stray bit stays pending and is re-seen harmlessly on the
- * next tick; if the source persists it can never wedge the tick because the
- * dispatch order never skips 23/4 to run a stray handler.
+ * Read masked status at 0x80000000 and dispatch only owned lines: tick 23,
+ * playback DMA 20 (normal firmware), then user timer 4. Raw status at +4
+ * includes disabled lines and must not dispatch DMA while the PCM lock
+ * masks it. Each handler acknowledges its own peripheral, preserving
+ * unrelated interrupt enables. INT_ENABLE +8 is a full R/W mask and
+ * INT_DISABLE +12 clears selected enables; neither acknowledges a source.
  */
 void TIMER23(void);   /* kernel-sc6530c.c (strong, the 1 ms tick) */
 void TIMER0(void);    /* timer-sc6530c.c (strong, the user timer) */
+#ifndef BOOTLOADER
+void DMA(void);       /* pcm-sc6530c.c, paced stereo bank completion */
+#endif
 
 /* Stray-IRQ counter: incremented by irq_handler whenever pending holds bits
- * that are neither the tick (23) nor the user timer (4). Read from a
+ * that have no registered handler (23, 20 or 4). Read from a
  * debugger / the debug menu to confirm the stray-line source after a
  * session (a non-zero count = stray edges were seen and safely skipped). */
 volatile uint32_t s_stray_irq_count = 0;
@@ -119,22 +115,25 @@ void irq_handler(void)
     asm volatile (
         "sub    lr, lr, #4            \r\n"
         "stmfd  sp!, {r0-r3, ip, lr}  \r\n"
-        "mov    r0, #0x80000000       \r\n" /* INT_PENDING */
-        "ldr    r0, [r0, #0x04]       \r\n"
+        "mov    r0, #0x80000000       \r\n" /* masked INT_STATUS */
+        "ldr    r0, [r0, #0x00]       \r\n"
         "tst    r0, r0                \r\n"
         "beq    3f                    \r\n" /* nothing pending */
         "ldr    r1, =0x00800000       \r\n" /* TIMER_IRQ_MASK (1<<23) */
         "tst    r0, r1                \r\n"
         "ldrne  r1, =TIMER23          \r\n"
         "bne    2f                    \r\n"
+#ifndef BOOTLOADER
+        "tst    r0, #0x00100000       \r\n" /* DMA IRQ20 */
+        "ldrne  r1, =DMA              \r\n"
+        "bne    2f                    \r\n"
+#endif
         "ldr    r1, =0x00000010       \r\n" /* TIMER0_MASK (1<<4) */
         "tst    r0, r1                \r\n"
         "ldrne  r1, =TIMER0           \r\n"
         "bne    2f                    \r\n"
-        /* Stray pending line(s) only — no registered handler (the SC6530
-         * pending register reflects DISABLED lines). Skip, never panic:
-         * count it for debugging and return. The timer ISRs ack their OWN
-         * sources (TIMER2_INT/TIMER0_INT = 9); the INTC is never touched. */
+        /* Enabled source without a registered handler: count it. Do not
+         * acknowledge a peripheral we do not own. */
         "ldr    r1, =s_stray_irq_count \r\n"
         "ldr    r2, [r1]                \r\n"
         "add    r2, r2, #1              \r\n"

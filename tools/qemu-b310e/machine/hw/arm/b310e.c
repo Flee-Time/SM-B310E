@@ -677,6 +677,8 @@ static void b310e_init(MachineState *machine)
                                     B310E_DSP_REGION_PRIORITY);
         }
         sysbus_mmio_map_overlap(aux_sbd, 27, B310E_AUX_CATCHALL_BASE, 0);
+        sysbus_mmio_map_overlap(aux_sbd, 28, 0x8a001000,
+                                B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(aux_sbd, &error_fatal);
         /* The stock LCD_EnterSleep (0x15520) waits on input GPIO49.
          * Its electrical role is not established yet. Expose an explicit

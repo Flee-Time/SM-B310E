@@ -1,7 +1,15 @@
 # B310E Rockbox port — integration patches (T2.1 deliverable)
 
-**Date:** 2026-08-27 · **Applies to:** the Rockbox clone at
-`%TEMP%\opencode\rockbox` (master @ `0e2a3cc`).
+**Original notes:** 2026-08-27. The reproducible build now uses
+`build/rockbox` at `ecdeb02dda6dbb94c1c3b01b8406203eda225f9f`; `build.sh`
+verifies that revision before staging the overlay. Line references below
+describe the original integration and are historical. Current playback
+implementation and validation are documented in [rockbox-audio.md](../../../docs/rockbox-audio.md).
+
+The current build also includes generic `apps/audio_path.c` for this
+speaker-only target, guards its input-routing code when `INPUT_SRC_CAPS=0`,
+and permits the target's `DEFAULT_SPEAKER_MODE=2` (Auto). These changes keep
+Rockbox's existing settings and jack-event policy connected to the driver.
 
 These are the 5+ integration edits the build task (T2.2) applies BEFORE
 running `tools/configure`. Each is documented with exact context + the
@@ -261,11 +269,11 @@ Configure is POSIX sh; it must run under MSYS2/WSL bash (not cmd/PowerShell).
 
 ## 8. Known build risks (documented, not fixed in this overlay)
 
-1. **`HW_SAMPR_CAPS` needs 44 kHz alongside 8 kHz** — `pcm_sampr.h` L238-246
-   `#error`s "Neither 48 or 44KHz supported?" if neither SAMPR_CAP_44 nor
-   SAMPR_CAP_48 is set. config/b310e.h defines `(SAMPR_CAP_8 |
-   SAMPR_CAP_44)` with a comment; the sink's own caps table stays {8000}.
-   The DSP will resample everything to 8 kHz (correct for the VBC path).
+1. **`HW_SAMPR_CAPS` matches the DMA sink** — the current port exposes
+   ten hardware rates from 8 to 96 kHz using `(SAMPR_CAP_96 |
+   SAMPR_CAP_ALL_48)`. Stock DAC modes were confirmed from the dump.
+   Rockbox's software codecs and DSP feed ARM-owned PCM; the vendor DSP
+   firmware is not required for this playback path.
 2. **`MEMORYSIZE`** comes from configure (`memory=4`), NOT config.h.
 3. **`AUDIOHW_SETTING`** is #defined empty by config.h L1479 outside
    sound.c — the codec header's call is a no-op in normal TUs, and sound.c

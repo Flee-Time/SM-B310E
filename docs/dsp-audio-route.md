@@ -1,11 +1,13 @@
-# B310E DSP + Audio Route — complete signal-path map
+# B310E DSP + Audio Route — historical research
 
-**Purpose:** the ONE authoritative map of how sound gets produced on the SM-B310E
-(SC6530C) — from the DSP firmware in NOR to the speaker — and what the custom
-OS (`os-dsp-boot.bin`) must do to reproduce it. Every register and sequence is
-**Ghidra-verified against `dump_firmware.bin`** (import base 0x0, file offset ==
-address) or read from the vendor SDK (leaked internal SDK — **never committed**;
-read-only reference, semantics only). Deep-dive: `docs/audio-dsp-protocol.md`.
+These are earlier static notes for `os-dsp-boot.bin`. Current measurements
+against the running, unpatched `e52q7a.bin` are in
+[emulator-audio.md](emulator-audio.md) and [rockbox-audio.md](rockbox-audio.md).
+They supersede the analog base and mute/clock interpretations below:
+the live codec base is `0x82001a00`, DAC_CTL bit14 requests mute and bit15
+enables its controller, APB +0x60/+0x64 are reset set/clear, and rail IDs
+28..31/2 control `0x82001164` rather than GPIOs. Do not replay the old
+activation chain as a hardware initialization recipe.
 
 
 ## 1. The hardware blocks (topology)

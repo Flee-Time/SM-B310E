@@ -50,6 +50,8 @@ def main():
     parser.add_argument("--mode", choices=["stock", "warm"], default="stock")
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--audio", action="store_true")
+    parser.add_argument("--headset", action="store_true",
+                        help="Start with a headset inserted (active-low digital EIC0)")
     parser.add_argument("--no-overlays", action="store_true")
     parser.add_argument("--hold-end", action="store_true")
     parser.add_argument("--gpio49-high", action="store_true",
@@ -76,6 +78,8 @@ def main():
                "--trace", "sc6530_gpt_write",
                "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off",
                "-drive", f"file={args.firmware.resolve().as_posix()},format=raw,if=none,id=nor,readonly=on"]
+    if args.headset:
+        command += ["-global", "sc6530_aux.headset-present=on"]
     if args.audio:
         command += ["-audiodev", f"wav,id=audio0,path={(args.output / 'audio.wav').as_posix()}",
                     "-global", "sc6530_adi.audiodev=audio0"]

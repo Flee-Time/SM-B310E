@@ -35,8 +35,8 @@
 #define CPUFREQ_NORMAL  208000000
 #define CPUFREQ_MAX     208000000
 
-/* The crt0 identity MMU maps VA == PA everywhere and nothing is cached in
- * M1, so there is no separate uncached alias region. */
+/* PSRAM is identity-mapped and cached. There is no uncached alias;
+ * drivers must commit DMA source ranges explicitly. */
 #define UNCACHED_ADDR(a) (a)
 
 void system_prepare_fw_start(void);

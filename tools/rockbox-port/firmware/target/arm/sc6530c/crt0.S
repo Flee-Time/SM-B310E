@@ -41,7 +41,7 @@
  *     in ARM state — the CPU must decode the first instruction here as
  *     ARM, hence .code 32)
  *   - SVC mode + IRQ/FIQ mask, mask all INTC lines
- *   - an IDENTITY MMU (VA == PA, uncached) plus the ARM high-vector page
+ *   - an IDENTITY MMU (VA == PA, cached PSRAM) plus the ARM high-vector page
  *     0xffff0000 aliased onto this image's vector table
  *   - bss zero, mode stacks, `ldr pc, =main`
  *
@@ -51,9 +51,8 @@
  * IRQ (kernel-sc6530c.c) could never fire and Rockbox would hang in
  * kernel_init. The identity mapping also means FRAME (the LCDC DMA source)
  * is at the same address for the CPU and the DMA — no aliasing headaches.
- * D-cache/MMU caching is a later optimization; M1 keeps everything
- * uncached (write-through to SDRAM) so the LCDC DMA always sees committed
- * pixels.
+ * PSRAM is cached. LCD and audio drivers explicitly commit their DMA
+ * source ranges so peripherals see the CPU's latest writes.
  */
 
 /* Exception Handlers */
@@ -113,6 +112,9 @@ start:
 
     /* enter supervisor mode, disable IRQ and FIQ */
     msr     cpsr, #0xd3
+    /* Establish a stack before the first boot-marker call. A loader may
+     * enter with SP=0; b310e_boot_mark saves registers on this stack. */
+    ldr     sp, =stackend
 
     /* Mask all interrupt lines at the SC6530 INTC. 0x8000000C is
      * INT_DISABLE (a set-ones-to-mask register), NOT an acknowledge —
@@ -133,8 +135,8 @@ start:
      * the MMU on with an identity table so (a) 0xffff0000 (high vectors,
      * V=1 left by the menu) maps onto our vector table and (b) every
      * address is VA == PA (the LCDC DMA reads FRAME at its physical
-     * address; the CPU writes it at the same address — no cache/alias
-     * issue, everything uncached).
+     * address; the CPU writes it at the same address). Peripheral windows
+     * stay uncached; the PSRAM descriptors are patched to cached below.
      *
      * Descriptor values are the B310E-OS/fpdoom-proven bit patterns
      * (B310E-OS kernel/irq.c mmu_build — HW-verified on this chip):

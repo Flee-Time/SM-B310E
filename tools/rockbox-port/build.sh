@@ -26,6 +26,7 @@ PORT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # `make clean`) - cloned here automatically if missing.
 REPO_DIR="$(cd "$PORT_DIR/../.." && pwd)"
 CLONE_DIR="$REPO_DIR/build/rockbox"
+ROCKBOX_REVISION=ecdeb02dda6dbb94c1c3b01b8406203eda225f9f
 BUILD_DIR="$CLONE_DIR/build-b310e"
 SDCARD_PROGS="$REPO_DIR/sdcard/progs"
 # The real toolchain lives under "C:\Program Files (x86)\Arm GNU Toolchain
@@ -68,8 +69,10 @@ fail() { echo "BUILD FAILED: $*"; exit 1; }
 if [ ! -d "$CLONE_DIR/.git" ]; then
     echo "--- cloning rockbox -> $CLONE_DIR ---"
     mkdir -p "$(dirname "$CLONE_DIR")" || fail "cannot mkdir $(dirname "$CLONE_DIR")"
-    git clone https://github.com/rockbox/rockbox.git "$CLONE_DIR" || fail "rockbox clone"
+    git clone --no-checkout https://github.com/rockbox/rockbox.git "$CLONE_DIR" || fail "rockbox clone"
+    git -c safe.directory="$CLONE_DIR" -C "$CLONE_DIR" checkout --detach "$ROCKBOX_REVISION" || fail "Rockbox revision"
 fi
+[ "$(git -c safe.directory="$CLONE_DIR" -C "$CLONE_DIR" rev-parse HEAD)" = "$ROCKBOX_REVISION" ] || fail "Rockbox must be at $ROCKBOX_REVISION; existing files were not reset"
 [ -f "$CLONE_DIR/tools/configure" ] || fail "rockbox clone incomplete at $CLONE_DIR"
 
 # ---- a. STAGE the overlay into the clone ---------------------------------
@@ -163,6 +166,10 @@ patch_file "$CLONE_DIR/firmware/export/cpu.h" '#include "sc6530c.h"' \
 patch_file "$CLONE_DIR/firmware/export/audiohw.h" "HAVE_SC6530_CODEC" \
   's/(#include "dummy_codec.h"\n)/$1#elif defined(HAVE_SC6530_CODEC)\n#include "audiohw-sc6530c.h"\n/'
 
+# B310E defaults to Auto output; other speaker targets retain their default.
+patch_file "$CLONE_DIR/apps/settings_list.c" 'DEFAULT_SPEAKER_MODE, "speaker mode"' \
+  's/    CHOICE_SETTING\(0, speaker_mode, LANG_ENABLE_SPEAKER, 0, "speaker mode",/#ifndef DEFAULT_SPEAKER_MODE\n#define DEFAULT_SPEAKER_MODE 0\n#endif\n    CHOICE_SETTING(0, speaker_mode, LANG_ENABLE_SPEAKER, DEFAULT_SPEAKER_MODE, "speaker mode",/'
+
 # 9. firmware/SOURCES — mmu-arm.S list gains SC6530C (commit_dcache etc.)
 patch_file "$CLONE_DIR/firmware/SOURCES" "CONFIG_CPU == SC6530C" \
   's/(\|\| CONFIG_CPU == S3C2440 \|\| CONFIG_CPU == TCC7801 \\\n)/$1   || CONFIG_CPU == SC6530C \\\n/'
@@ -204,6 +211,13 @@ fi
 # 11. apps/SOURCES — keymap line
 patch_file "$CLONE_DIR/apps/SOURCES" "keymap-b310e.c" \
   's/(keymaps\/keymap-hidizsap80max\.c\n)/$1#elif CONFIG_KEYPAD == B310E_PAD\nkeymaps\/keymap-b310e.c\n/'
+
+# This target has a speaker but no recording/tuner input sources. Include
+# the generic speaker/jack policy independently of INPUT_SRC_CAPS.
+patch_file "$CLONE_DIR/apps/SOURCES" 'INPUT_SRC_CAPS != 0 || defined(B310E)' \
+  's/#if INPUT_SRC_CAPS != 0\naudio_path\.c/#if INPUT_SRC_CAPS != 0 || defined(B310E)\naudio_path.c/'
+patch_file "$CLONE_DIR/apps/audio_path.c" 'B310E-PORT: speaker-only target' \
+  's/(#if \(\(CONFIG_PLATFORM & PLATFORM_NATIVE)/#if INPUT_SRC_CAPS != 0 \/* B310E-PORT: speaker-only target *\/\n$1/; s/(#endif \/\* PLATFORM_NATIVE \*\/)/$1\n#endif \/* INPUT_SRC_CAPS *\//'
 
 # 12. tools/addtargetdir.pl — Windows-drive-path normalization. On MSYS the
 # host gcc emits "C:/Users/…" dep paths while $rootdir is "/c/Users/…";
@@ -263,14 +277,14 @@ fi
 if grep -qF 's/\r//g;if(/^_?AD_' "$CLONE_DIR/tools/functions.make" 2>/dev/null; then
     echo "patch: SKIP (already applied)  functions.make [CR-strip]"
 else
-    cat > /tmp/asmdefs-crlf.pl <<'PERLEOF'
+    mkdir -p "$CLONE_DIR/build-helpers" || fail "build helpers directory"
+    cat > "$CLONE_DIR/build-helpers/asmdefs-crlf.pl" <<'PERLEOF'
 my $old = "perl -ne 'if(/^_?AD_";
 my $new = "perl -ne 's/\\r//g;if(/^_?AD_";
 my $i = index($_, $old);
 substr($_, $i, length($old), $new) if $i >= 0;
 PERLEOF
-    perl -0pi /tmp/asmdefs-crlf.pl "$CLONE_DIR/tools/functions.make"
-    rm -f /tmp/asmdefs-crlf.pl
+    perl -0pi "$CLONE_DIR/build-helpers/asmdefs-crlf.pl" "$CLONE_DIR/tools/functions.make"
     if grep -qF 's/\r//g;if(/^_?AD_' "$CLONE_DIR/tools/functions.make" 2>/dev/null; then
         echo "patch: OK  functions.make [CR-strip]"
     else
@@ -321,6 +335,8 @@ command -v gcc >/dev/null 2>&1 || fail "host gcc not on PATH (Rockbox host tools
 # distro package - fail with a clear message instead of guessing.
 command -v zip >/dev/null 2>&1 || { if [ "$MSYS_LIKE" -eq 1 ]; then pacman -S --noconfirm zip; else fail "zip not found (install the distro zip package)"; fi; } || fail "zip unavailable"
 mkdir -p "$BUILD_DIR" || fail "cannot mkdir $BUILD_DIR"
+# Validate the resolved path before cleaning this generated directory.
+[ "$(realpath "$BUILD_DIR")" = "$(realpath "$REPO_DIR")/build/rockbox/build-b310e" ] || fail "unexpected build directory"
 # Full clean every run: make.dep (generated with the CURRENT dep tooling)
 # and stale objects must not leak across runs — the header-ordering fixes
 # only take effect when make.dep is regenerated from scratch.
@@ -340,8 +356,7 @@ make -j1 \
     "$BUILD_DIR/sysfont.h" \
     "$BUILD_DIR/rbversion.h" \
     "$BUILD_DIR/bitmaps/rockboxlogo.h" \
-    "$BUILD_DIR/lang_enum.h" \
-    "$BUILD_DIR/fontbundle.h" 2>&1 || true
+    "$BUILD_DIR/lang_enum.h" 2>&1 || fail "generated headers"
 make_ok=0
 for pass in 1 2 3; do
     if make -j8; then
@@ -385,6 +400,7 @@ mkdir -p "$SDCARD_ROOT"
 # not reliably present in that env. On Linux GNU tar cannot read zips, so use
 # Info-ZIP unzip there.
 if [ "$MSYS_LIKE" -eq 1 ]; then
+    [ "$(realpath "$SDCARD_ROOT")" = "$(realpath "$REPO_DIR")/sdcard" ] || fail "unexpected staging directory"
     (cd "$SDCARD_ROOT" && rm -rf .rockbox && /c/Windows/System32/tar.exe -xf "$ZIP" '.rockbox/' 2>/dev/null)
 else
     (cd "$SDCARD_ROOT" && rm -rf .rockbox && unzip -q -o "$ZIP" '.rockbox/*' 2>/dev/null)
