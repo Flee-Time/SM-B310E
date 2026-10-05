@@ -69,6 +69,7 @@
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "hw/core/cpu.h"
 #include "hw/core/qdev.h"
 #include "target/arm/cpu.h"
@@ -77,6 +78,7 @@
 
 #define TYPE_SC6530_DSP "sc6530_dsp"
 OBJECT_DECLARE_SIMPLE_TYPE(Sc6530DspState, SC6530_DSP)
+bool sc6530_dsp_arm_audio_owned(Object *obj);
 
 /* ---------------------------------------------------------------------- */
 /* Register geometry (spec 2c; GLB_REG_BASE = 0x8b000000)                 */
@@ -215,6 +217,7 @@ struct Sc6530DspState {
     /*< public >*/
 
     MemoryRegion apb_mr[SC6530_DSP_REG_COUNT];  /* 4-byte APB subregions */
+    qemu_irq irq;              /* stock interrupt table: id 13, mask 0x2000 */
     MemoryRegion share_mr[4];                   /* 0x20 control windows  */
     Sc6530DspRegCtx apb_ctx[SC6530_DSP_REG_COUNT];
     Sc6530DspShareCtx share_ctx[4];
@@ -299,6 +302,7 @@ static void sc6530_dsp_machine_reset(Sc6530DspState *s)
     s->prev_arm_ctl = 0;
     s->dsp_ctl = 0;
     s->dsp_irq_pending = false;
+    qemu_set_irq(s->irq, 0);
     s->dl_offset = 0;
     s->dl_block_size = 0;
     if (s->sharemem_ptr) {
@@ -306,6 +310,11 @@ static void sc6530_dsp_machine_reset(Sc6530DspState *s)
         stw_le_p(s->sharemem_ptr + SC6530_DSP_SHARE_RAM_OFF + SC6530_DSP_SM_DSP_CTL_OFF,
                  s->dsp_ctl);
     }
+}
+
+bool sc6530_dsp_arm_audio_owned(Object *obj)
+{
+    return SC6530_DSP(obj)->apb_regs[SC6530_DSP_REG_PERI_CTL0] & 4;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -416,6 +425,7 @@ static void sc6530_dsp_arm_ctl_update(Sc6530DspState *s, uint32_t ram_off)
                     s->dsp_ctl |= SC6530_DSP_DSP_RUN;
                 }
                 s->dsp_irq_pending = true;
+                qemu_set_irq(s->irq, 1);
                 trace_sc6530_dsp_cmd(SC6530_DSP_EV_SM_COPY, new_ctl, pc);
                 qemu_log("sc6530_dsp: SM_COPY     arm_ctl=0x%04x "
                          "dsp_ctl=0x%04x irq=1 pc=0x%08x\n",
@@ -440,8 +450,8 @@ static void sc6530_dsp_arm_ctl_update(Sc6530DspState *s, uint32_t ram_off)
      * its "DSP responded" readiness (dump 0x1a516 writes arm_ctl=3,
      * dl_offset=0, then checks the u16 at +4). Answer it permissively
      * (spec 4 UNKNOWN-5 rule) whenever the guest drives DATA_READY. */
-    if (lduw_le_p(s->sharemem_ptr + ram_off + SC6530_DSP_SM_ARM_CTL_OFF) &
-        SC6530_DSP_ARM_DATA_READY) {
+    if (ram_off == SC6530_DSP_SHARE_RAM_OFF &&
+        (new_ctl & SC6530_DSP_ARM_DATA_READY)) {
         stw_le_p(s->sharemem_ptr + ram_off + SC6530_DSP_SM_DL_OFFSET_OFF, 1);
     }
     /* Always re-assert the fake's answer word: the fake owns +2 (a
@@ -508,10 +518,12 @@ static void sc6530_dsp_apb_write(void *opaque, hwaddr offset,
                         sc6530_dsp_pack_arg(reg, value));
         break;
     case SC6530_DSP_REG_INT_SET_CLR0:
-        /* Spec 2c: b2/b3 clear the pending DSP_IRQ; b0 = MCU_IRQ_SET
+        /* b2 clears the DSP_IRQ; b3 is the separate frequency request.
+         * b0 = MCU_IRQ_SET
          * (ARM->DSP IRQ) is logged, not interpreted. */
-        if (value & (SC6530_DSP_IRQ_DSP_CLR | SC6530_DSP_IRQ_FRQ_CLR)) {
+        if (value & SC6530_DSP_IRQ_DSP_CLR) {
             s->dsp_irq_pending = false;
+            qemu_set_irq(s->irq, 0);
             qemu_log("sc6530_dsp: DSP_IRQ cleared by INT_SET_CLR0=0x%08x "
                      "pc=0x%08x\n", (uint32_t)value, sc6530_dsp_guest_pc());
         }
@@ -651,6 +663,8 @@ static void sc6530_dsp_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     char name[32];
     int i;
+
+    sysbus_init_irq(sbd, &s->irq);
 
     /* 7 four-byte APB subregions (spec 2c), each with its own context so
      * the handlers know which register the access is for. */

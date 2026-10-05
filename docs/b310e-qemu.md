@@ -1,5 +1,15 @@
 # B310E QEMU machine - usage, boot paths, and bring-up state
 
+> **Current status (2026-10-04):** use [emulator-audio.md](emulator-audio.md)
+> for the verified stock boot state, audio tests and Windows headless build.
+> The older bring-up recipes below include RAM overlays and interpretations
+> that did not establish a successful stock boot. `0x11172` is a fatal SCI
+> assertion entry, and `AST_BLUESCREEN` is failure evidence. Legacy RAM
+> overlays now default off (`boot-overlays=on` is only for reproducing them).
+> Stock reaches time/date setup, and the experimental GPIO49 input permits
+> menu navigation and verified built-in ringtone playback. Full phone operation
+> and DSP-owned sound remain incomplete. The headless build needs no elevation.
+
 The SC6530C QEMU machine (Wave 5) runs the stock Samsung SM-B310E firmware
 (`tools/spd_dump/full-backup.bin`, 8 MiB NOR) and our own `os.bin` on the PC.
 This document is the usage + boot-path reference. The machine sources live in

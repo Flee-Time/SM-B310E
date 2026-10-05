@@ -81,8 +81,14 @@
 #include "qemu/log.h"
 #include "qemu/units.h"
 #include "qemu/bitops.h"
+#include "qemu/bswap.h"
+#include "qemu/timer.h"
+#include "qemu/audio.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "hw/core/cpu.h"
+#include "qapi/error.h"
+#include "system/system.h"
 #include "target/arm/cpu.h"
 #include "trace.h"
 
@@ -92,6 +98,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AdiState, SC6530_ADI)
 /* Exported for todo 17's sc6530_keypad (the EIC END-key hook, see below):
  * raises/lowers bit 3 of EIC_DBNC_DATA inside the ANA bank. */
 void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
+size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes);
+bool sc6530_dsp_arm_audio_owned(Object *obj);
 
 /* ---------------------------------------------------------------------- */
 /* Region geometry                                                        */
@@ -103,6 +111,12 @@ void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
 #define SC6530_ADI_ANA_SIZE      0x2000   /* 8 KiB: codec + WDG + EIC */
 #define SC6530_ADI_VBC_BASE      0x82003000ULL
 #define SC6530_ADI_VBC_SIZE      0x100
+#define SC6530_DP_SIZE          0x100
+#define VBC_BANK_FRAMES         160
+#define VBC_PCM_FRAMES          8192
+#define VBC_ENABLE             (1u << 15)
+#define VBC_RAM_ACCESS         (1u << 10)
+#define VBC_RAM_BANK           (1u << 9)
 
 /* Mailbox register offsets (SDK adi_reg_v5.h:40-42). */
 #define SC6530_ADI_RD_CMD_OFF    0x18
@@ -126,18 +140,9 @@ void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
 #define SC6530_ADI_RD_ADDR_MASK  0x1FFF0000u   /* [28:16] index echo */
 #define SC6530_ADI_RD_DATA_MASK  0x0000FFFFu   /* [15:0] analog value */
 
-/* Benign-ready entry (W4-20b os.bin smoke, 2026-08-24): the guest battery
- * fuel gauge (drivers/battery.c bat_adc_convert_ch) polls BAT_ADC_STATUS
- * (ANA offset 0x6DC = 0x820016dc) bit 0 = conversion-done with a
- * 1M-iteration budget. The emulator has no analog die, so the done bit
- * never sets and every conversion spins its full budget (~0.85 s per read
- * under TCG -> the banner frame rate collapses to ~1 fps; the guest
- * degrades gracefully via the timeout sentinel, but slowly). Answer
- * bit 0 = done: the wait terminates on the first read and the guest then
- * reads BAT_ADC_RESULT (0x820016cc, still 0) -> battery shows 0 mV / 0%
- * (truthful - there is no battery in the emulator). Covers BOTH read
- * paths: the mailbox RD_DATA resolve AND direct ANA-bank reads (the stock
- * OS's adc_phy_v5.c uses the mailbox; direct reads are covered for free). */
+/* Conversion starts at ANA +0x680 and sets this done flag. Channel 5
+ * returns battery-adc (default 900, about 3978 mV with the stock
+ * calibration). Returning zero makes the stock OS power itself off. */
 #define SC6530_ADI_ADC_STATUS_OFF 0x6DCu
 
 /* ---------------------------------------------------------------------- */
@@ -152,10 +157,30 @@ struct Sc6530AdiState {
     MemoryRegion mailbox_iomem;   /* 0x82000000 */
     MemoryRegion ana_iomem;       /* 0x82001000 */
     MemoryRegion vbc_iomem;       /* 0x82003000 */
+    MemoryRegion dp_iomem;        /* 0x8a002000 digital codec */
 
     uint32_t mailbox_regs[SC6530_ADI_MAILBOX_SIZE / 4];
+    uint16_t battery_adc;
     uint32_t ana_regs[SC6530_ADI_ANA_SIZE / 4];
     uint32_t vbc_regs[SC6530_ADI_VBC_SIZE / 4];
+    uint32_t dp_regs[SC6530_DP_SIZE / 4];
+    Object *dma;
+    Object *dsp;
+    AudioBackend *audio_be;
+    SWVoiceOut *voice;
+    QEMUTimer *audio_timer;
+    Notifier audio_exit;
+    qemu_irq analog_irq;
+    QEMUTimer *rtc_timer;
+    unsigned rate;
+    unsigned play_bank;
+    unsigned play_pos;
+    unsigned write_pos[2][2];
+    int16_t bank[2][2][VBC_BANK_FRAMES];
+    uint8_t pcm[VBC_PCM_FRAMES * 4]; /* explicitly little-endian stereo */
+    unsigned pcm_head;
+    unsigned pcm_count;
+    bool dma_filling;
 
     /* Index-echo state: the last ADI_ARM_RD_CMD write (addr & 0xFFF). */
     uint32_t rd_index;
@@ -166,17 +191,191 @@ struct Sc6530AdiState {
     uint32_t eic_pb_phys;
 };
 
+static uint32_t sc6530_analog_pending(const Sc6530AdiState *s)
+{
+    /* Stock IRQ context at 0x0422ca4c uses ANA +0x580 for masked
+     * status and +0x588 for enables; RTC is analog source bit 2. */
+    return (s->ana_regs[0x634 / 4] & s->ana_regs[0x630 / 4]) ? 4 : 0;
+}
+
+static void sc6530_analog_irq(Sc6530AdiState *s)
+{
+    qemu_set_irq(s->analog_irq,
+                 (sc6530_analog_pending(s) & s->ana_regs[0x588 / 4]) != 0);
+}
+
+static void sc6530_rtc_tick(void *opaque)
+{
+    Sc6530AdiState *s = opaque;
+    uint32_t *r = s->ana_regs;
+    uint32_t raw = 1;
+    if (++r[0x600 / 4] >= 60) {
+        r[0x600 / 4] = 0;
+        raw |= 2;
+        if (++r[0x604 / 4] >= 60) {
+            r[0x604 / 4] = 0;
+            raw |= 4;
+            if (++r[0x608 / 4] >= 24) {
+                r[0x608 / 4] = 0;
+                r[0x60c / 4]++;
+                raw |= 8;
+            }
+        }
+    }
+    if (r[0x600 / 4] == r[0x620 / 4] &&
+        r[0x604 / 4] == r[0x624 / 4] &&
+        r[0x608 / 4] == r[0x628 / 4] &&
+        r[0x60c / 4] == r[0x62c / 4]) {
+        raw |= 16;
+    }
+    r[0x634 / 4] |= raw;
+    sc6530_analog_irq(s);
+    timer_mod(s->rtc_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+}
+
+static unsigned sc6530_vbc_frames(Sc6530AdiState *s)
+{
+    /* NOR 0xb0740..0xb075a: DA size-1 occupies bits [15:8]. */
+    return MIN(((s->vbc_regs[0x10 / 4] >> 8) & 0xff) + 1,
+               VBC_BANK_FRAMES);
+}
+
+static void sc6530_audio_callback(void *opaque, int available)
+{
+    Sc6530AdiState *s = opaque;
+    while (available >= 4 && s->pcm_count) {
+        unsigned frames = MIN(s->pcm_count, VBC_PCM_FRAMES - s->pcm_head);
+        unsigned bytes = MIN(frames * 4, (unsigned)available & ~3u);
+        size_t written = audio_be_write(s->audio_be, s->voice,
+                                        s->pcm + s->pcm_head * 4, bytes);
+        if (!written) {
+            break;
+        }
+        s->pcm_head = (s->pcm_head + written / 4) % VBC_PCM_FRAMES;
+        s->pcm_count -= written / 4;
+        available -= written;
+    }
+}
+
+static void sc6530_audio_open(Sc6530AdiState *s)
+{
+    struct audsettings settings = {
+        .freq = s->rate, .nchannels = 2, .fmt = AUDIO_FORMAT_S16,
+        .big_endian = false,
+    };
+    s->voice = audio_be_open_out(s->audio_be, s->voice, "sc6530.vbc",
+                                 s, sc6530_audio_callback, &settings);
+}
+
+static void sc6530_audio_tick(void *opaque)
+{
+    Sc6530AdiState *s = opaque;
+    unsigned frames = sc6530_vbc_frames(s);
+    unsigned count = MIN(MAX(s->rate / 1000, 1u), frames - s->play_pos);
+    uint32_t ctl = s->vbc_regs[0x18 / 4];
+    bool owned = s->dsp && sc6530_dsp_arm_audio_owned(s->dsp);
+    /* DAC_CTL bit15 enables the ramp controller; bit14 requests mute.
+     * Stock normally plays with 0x8000 set and 0x4000 clear. */
+    bool mute = !owned || ((s->dp_regs[0x0c / 4] & 0xc000) == 0xc000);
+
+    if (!(ctl & VBC_ENABLE)) {
+        return;
+    }
+    if (!s->play_pos && owned && s->dma) {
+        s->dma_filling = true;
+        for (unsigned channel = 0; channel < 2; channel++) {
+            if (ctl & (1u << (13 + channel))) {
+                memset(s->bank[s->play_bank][channel], 0,
+                       sizeof(s->bank[s->play_bank][channel]));
+                s->write_pos[s->play_bank][channel] = 0;
+                sc6530_dma_request(s->dma, SC6530_ADI_VBC_BASE + channel * 4,
+                                   frames * 2);
+            }
+        }
+        s->dma_filling = false;
+    }
+    for (unsigned i = 0; i < count; i++) {
+        if (s->pcm_count < VBC_PCM_FRAMES) {
+            unsigned tail = (s->pcm_head + s->pcm_count) % VBC_PCM_FRAMES;
+            for (unsigned channel = 0; channel < 2; channel++) {
+                int16_t sample = s->bank[s->play_bank][channel][s->play_pos];
+                if (mute || !(s->dp_regs[0] & (1u << (channel * 2)))) {
+                    sample = 0;
+                }
+                stw_le_p(s->pcm + tail * 4 + channel * 2, sample);
+            }
+            s->pcm_count++;
+        }
+        s->play_pos++;
+    }
+    if (s->play_pos == frames) {
+        s->play_pos = 0;
+        s->play_bank ^= 1;
+        trace_sc6530_vbc_bank(s->play_bank, frames, s->pcm_count);
+    }
+    timer_mod(s->audio_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+               (uint64_t)count * NANOSECONDS_PER_SECOND / s->rate);
+}
+
+static uint64_t sc6530_dp_read(void *opaque, hwaddr offset, unsigned size)
+{
+    Sc6530AdiState *s = opaque;
+    uint32_t value = s->dp_regs[offset / 4];
+    return extract32(value, (offset & 3) * 8, size * 8);
+}
+
+static void sc6530_dp_write(void *opaque, hwaddr offset,
+                            uint64_t value, unsigned size)
+{
+    Sc6530AdiState *s = opaque;
+    unsigned shift = (offset & 3) * 8;
+    uint32_t mask = size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
+    uint32_t *word = &s->dp_regs[offset / 4];
+    /* NOR DAC FS lookup at 0x8123e..: modes run from 96k (0) to 8k (10).
+     * The historic custom driver used 9 for 8k; 9 actually selects 9600. */
+    static const unsigned rates[] = {
+        96000, 48000, 44100, 32000, 24000, 22050,
+        16000, 12000, 11025, 9600, 8000,
+    };
+    *word = (*word & ~(mask << shift)) | ((value & mask) << shift);
+    if ((offset & ~3) == 0x0c) {
+        unsigned mode = *word & 0xf;
+        if (mode < ARRAY_SIZE(rates) && s->rate != rates[mode]) {
+            s->rate = rates[mode];
+            s->pcm_head = s->pcm_count = 0;
+            sc6530_audio_open(s);
+            audio_be_set_active_out(s->audio_be, s->voice,
+                                    !!(s->vbc_regs[0x18 / 4] & VBC_ENABLE));
+        }
+        trace_sc6530_vbc_rate(mode, s->rate);
+    }
+    trace_sc6530_ana_write(0x8a002000 + offset, value,
+                           current_cpu ? ARM_CPU(current_cpu)->env.regs[15] : 0);
+}
+
+static const MemoryRegionOps sc6530_dp_ops = {
+    .read = sc6530_dp_read,
+    .write = sc6530_dp_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+};
+
 /* Effective ANA-bank word: the stored value with the benign-ready answers
  * applied (see the SC6530_ADI_ADC_STATUS_OFF entry above). */
 static uint32_t sc6530_adi_ana_effective(const Sc6530AdiState *s,
                                          hwaddr offset)
 {
+    offset &= ~3;
     uint32_t word = s->ana_regs[offset / 4];
 
-    if (offset == SC6530_ADI_ADC_STATUS_OFF) {
-        word |= 1u;   /* ADC conversion done */
-    }
-    if (offset == SC6530_ADI_EIC_DATA_OFF) {
+    if (offset == 0x580) {
+        return sc6530_analog_pending(s) & s->ana_regs[0x588 / 4];
+    } else if (offset == 0x584) {
+        return sc6530_analog_pending(s);
+    } else if (offset == 0x63c) {
+        return s->ana_regs[0x634 / 4] & s->ana_regs[0x630 / 4];
+    } else if (offset == SC6530_ADI_EIC_DATA_OFF) {
         /* Physical EIC level is the ground truth (the debounce-mask is a
          * config the guest may not touch for the power-button channel). */
         word |= (s->eic_pb_phys & 0xffffu);
@@ -313,6 +512,30 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
     Sc6530AdiState *s = opaque;
 
     sc6530_adi_regs_write(s->ana_regs, offset, value, size);
+    unsigned aligned = offset & ~3;
+    if (aligned >= 0x610 && aligned <= 0x61c) {
+        /* RTC time update -> counter, acknowledge bits 8..11. Stock
+         * 0x36008 updates each field and waits for its ISR to clear ACK. */
+        s->ana_regs[(aligned - 0x10) / 4] = s->ana_regs[aligned / 4];
+        s->ana_regs[0x634 / 4] |= 1u << (8 + (aligned - 0x610) / 4);
+    } else if (aligned >= 0x620 && aligned <= 0x62c) {
+        s->ana_regs[0x634 / 4] |= 1u << (12 + (aligned - 0x620) / 4);
+    } else if (aligned == 0x638) {
+        s->ana_regs[0x634 / 4] &= ~(value << ((offset & 3) * 8));
+        s->ana_regs[0x638 / 4] = 0;
+    }
+    sc6530_analog_irq(s);
+    /* Stock 0x20ef6 samples channel 5 via ADC_CTL +0x680, channel +0x684,
+     * result +0x6cc, clear +0x6d4 and raw status +0x6dc. Conversion is
+     * immediate for now. The dump calibrates raw 950 as 4200 mV. */
+    if ((offset & ~3) == 0x680 && (s->ana_regs[0x680 / 4] & 2)) {
+        unsigned channel = s->ana_regs[0x684 / 4] & 0xf;
+        s->ana_regs[0x6cc / 4] = channel == 5 ? s->battery_adc : 0;
+        s->ana_regs[SC6530_ADI_ADC_STATUS_OFF / 4] |= 1;
+        s->ana_regs[0x680 / 4] &= ~2u;
+    } else if ((offset & ~3) == 0x6d4 && (value & 1)) {
+        s->ana_regs[SC6530_ADI_ADC_STATUS_OFF / 4] &= ~1u;
+    }
     trace_sc6530_ana_write(SC6530_ADI_ANA_BASE + offset, value,
                            sc6530_adi_guest_pc());
 }
@@ -335,7 +558,13 @@ static uint64_t sc6530_adi_vbc_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
     Sc6530AdiState *s = opaque;
-    uint64_t val = sc6530_adi_regs_read(s->vbc_regs, offset, size);
+    uint32_t word = s->vbc_regs[offset / 4];
+    uint64_t val;
+
+    if ((offset & ~3) == 0x18 && (word & VBC_ENABLE)) {
+        word = (word & ~VBC_RAM_BANK) | (s->play_bank << 9);
+    }
+    val = extract32(word, (offset & 3) * 8, size * 8);
 
     trace_sc6530_ana_read(SC6530_ADI_VBC_BASE + offset, val,
                           sc6530_adi_guest_pc());
@@ -346,8 +575,39 @@ static void sc6530_adi_vbc_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
     Sc6530AdiState *s = opaque;
+    uint32_t old_ctl = s->vbc_regs[0x18 / 4];
 
     sc6530_adi_regs_write(s->vbc_regs, offset, value, size);
+    if (offset == 0 || offset == 4) {
+        unsigned channel = offset / 4;
+        unsigned bank = s->dma_filling ? s->play_bank :
+            (old_ctl & VBC_ENABLE) ? (s->play_bank ^ 1) :
+            !!(old_ctl & VBC_RAM_BANK);
+        if (s->dma_filling || (old_ctl & (VBC_ENABLE | VBC_RAM_ACCESS))) {
+            unsigned *pos = &s->write_pos[bank][channel];
+            s->bank[bank][channel][*pos] = (int16_t)value;
+            *pos = (*pos + 1) % sc6530_vbc_frames(s);
+        }
+    } else if ((offset & ~3) == 0x18) {
+        uint32_t ctl = s->vbc_regs[0x18 / 4];
+        if (!(old_ctl & VBC_ENABLE) && (ctl & VBC_ENABLE)) {
+            s->play_bank = s->play_pos = 0;
+            s->pcm_head = s->pcm_count = 0;
+            audio_be_set_active_out(s->audio_be, s->voice, true);
+            timer_mod(s->audio_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        } else if ((old_ctl & VBC_ENABLE) && !(ctl & VBC_ENABLE)) {
+            timer_del(s->audio_timer);
+            audio_be_set_active_out(s->audio_be, s->voice, false);
+            s->pcm_head = s->pcm_count = 0;
+        }
+        if ((old_ctl ^ ctl) & (VBC_RAM_BANK | VBC_RAM_ACCESS)) {
+            unsigned bank = !!(ctl & VBC_RAM_BANK);
+            s->write_pos[bank][0] = s->write_pos[bank][1] = 0;
+        }
+    } else if ((offset & ~3) == 0x10) {
+        memset(s->write_pos, 0, sizeof(s->write_pos));
+        s->play_pos = 0;
+    }
     trace_sc6530_ana_write(SC6530_ADI_VBC_BASE + offset, value,
                            sc6530_adi_guest_pc());
 }
@@ -408,18 +668,20 @@ static void sc6530_adi_reset(DeviceState *dev)
     memset(s->mailbox_regs, 0, sizeof(s->mailbox_regs));
     memset(s->ana_regs, 0, sizeof(s->ana_regs));
     memset(s->vbc_regs, 0, sizeof(s->vbc_regs));
+    memset(s->dp_regs, 0, sizeof(s->dp_regs));
+    memset(s->bank, 0, sizeof(s->bank));
+    memset(s->write_pos, 0, sizeof(s->write_pos));
+    s->pcm_head = s->pcm_count = s->play_pos = s->play_bank = 0;
+    timer_del(s->audio_timer);
+    audio_be_set_active_out(s->audio_be, s->voice, false);
+    s->rate = 8000;
+    sc6530_audio_open(s);
     s->rd_index = 0;
 
-    /* Initialize RTC registers to a valid date/time so stock OS RTC validation passes.
-     * RTC_SEC: 0x82001620, RTC_MIN: 0x82001624, RTC_HOUR: 0x82001628,
-     * RTC_DAY: 0x8200162c, RTC_MON: 0x82001630, RTC_YEAR: 0x82001634
-     */
-    s->ana_regs[(0x620) / 4] = 0;    /* sec = 0 */
-    s->ana_regs[(0x624) / 4] = 0;    /* min = 0 */
-    s->ana_regs[(0x628) / 4] = 12;   /* hour = 12 */
-    s->ana_regs[(0x62c) / 4] = 1;    /* day = 1 */
-    s->ana_regs[(0x630) / 4] = 1;    /* month = 1 */
-    s->ana_regs[(0x634) / 4] = 2024; /* year = 2024 */
+    /* The SC6530 RTC has counters at +0x600, alarms at +0x620 and IRQ
+     * enable/raw at +0x630/+0x634. There are no month/year registers. */
+    sc6530_analog_irq(s);
+    timer_mod(s->rtc_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
     /* eic_pb_phys is the KEYPAD's domain (its reset asserts/releases the
      * hold-end level) - the ADI reset must NOT zero it (the keypad reset
      * runs BEFORE this one, so zeroing here would wipe the hold). */
@@ -441,13 +703,79 @@ static void sc6530_adi_init(Object *obj)
     memory_region_init_io(&s->vbc_iomem, obj, &sc6530_adi_vbc_ops, s,
                           "sc6530-adi-vbc", SC6530_ADI_VBC_SIZE);
     sysbus_init_mmio(sbd, &s->vbc_iomem);
+
+    memory_region_init_io(&s->dp_iomem, obj, &sc6530_dp_ops, s,
+                          "sc6530-codec-dp", SC6530_DP_SIZE);
+    sysbus_init_mmio(sbd, &s->dp_iomem);
+    s->rate = 8000;
+    s->audio_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_audio_tick, s);
+    s->rtc_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sc6530_rtc_tick, s);
+    sysbus_init_irq(sbd, &s->analog_irq);
+    object_property_add_link(obj, "dma", "sc6530_dma", &s->dma,
+                             object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
+    object_property_add_link(obj, "dsp", "sc6530_dsp", &s->dsp,
+                             object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
 }
+
+static void sc6530_audio_exit(Notifier *notifier, void *data)
+{
+    Sc6530AdiState *s = container_of(notifier, Sc6530AdiState, audio_exit);
+    /* Sysbus devices need not be unrealized on process exit. Close the last
+     * voice explicitly so the WAV backend finalizes its RIFF/data lengths. */
+    timer_del(s->audio_timer);
+    timer_del(s->rtc_timer);
+    audio_be_close_out(s->audio_be, s->voice);
+    s->voice = NULL;
+}
+
+static void sc6530_adi_realize(DeviceState *dev, Error **errp)
+{
+    Sc6530AdiState *s = SC6530_ADI(dev);
+    if (s->battery_adc > 1023) {
+        error_setg(errp, "battery-adc must fit the 10-bit ADC (0..1023)");
+        return;
+    }
+    if (!audio_be_check(&s->audio_be, errp)) {
+        return;
+    }
+    sc6530_audio_open(s);
+    if (!s->voice) {
+        error_setg(errp, "SC6530 VBC could not open audio output");
+        return;
+    }
+    s->audio_exit.notify = sc6530_audio_exit;
+    qemu_add_exit_notifier(&s->audio_exit);
+}
+
+static void sc6530_adi_unrealize(DeviceState *dev)
+{
+    Sc6530AdiState *s = SC6530_ADI(dev);
+    qemu_remove_exit_notifier(&s->audio_exit);
+    timer_del(s->audio_timer);
+    timer_del(s->rtc_timer);
+    audio_be_close_out(s->audio_be, s->voice);
+    s->voice = NULL;
+}
+
+static void sc6530_adi_finalize(Object *obj)
+{
+    timer_free(SC6530_ADI(obj)->audio_timer);
+    timer_free(SC6530_ADI(obj)->rtc_timer);
+}
+
+static const Property sc6530_adi_properties[] = {
+    DEFINE_PROP_UINT16("battery-adc", Sc6530AdiState, battery_adc, 900),
+    DEFINE_AUDIO_PROPERTIES(Sc6530AdiState, audio_be),
+};
 
 static void sc6530_adi_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "Spreadtrum SC6530 ADI mailbox + ANA analog bank + VBC";
+    dc->realize = sc6530_adi_realize;
+    dc->unrealize = sc6530_adi_unrealize;
+    device_class_set_props(dc, sc6530_adi_properties);
     device_class_set_legacy_reset(dc, sc6530_adi_reset);
 }
 
@@ -456,6 +784,7 @@ static const TypeInfo sc6530_adi_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(Sc6530AdiState),
     .instance_init = sc6530_adi_init,
+    .instance_finalize = sc6530_adi_finalize,
     .class_init    = sc6530_adi_class_init,
 };
 

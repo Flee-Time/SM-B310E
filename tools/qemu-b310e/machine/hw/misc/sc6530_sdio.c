@@ -1,28 +1,7 @@
 /*
- * Spreadtrum SC6530C SDIO0 controller log+store no-op model.
- *
- * Todo 19 of .omo/plans/b310e-qemu-machine.md (Wave 4).
- *
- * The plan says: a no-op model so the stock OS's SD init and our os.bin's
- * SD probe (demo_sd_task / os-diag-sd) do not fault. Store+echo uint32
- * bank at SDIO0 0x20700000 (0x1000). Reads return the last written value
- * and 0 for status-type registers that are never written = "no card
- * present" - benign: the guest's init completes with an absent card
- * instead of faulting. All SDIO waits in drivers/sdio.c are bounded
- * (SDIO_WAIT_BUDGET 1M, iteration-capped CMD8/ACMD41 loops), so a never-
- * completing card probe cannot hang the guest; it degrades to "no card".
- *
- * Guest register map (fpdoom sdio.c ground truth, drivers/AGENTS.md):
- * dma_addr / blk_size / arg / tr_mode / resp[4] / buf_port / state /
- * ctrl1 / ctrl2 / int_st / int_en / int_sig at 0x20700000 + low offsets.
- * Store+echo keeps the guest's read-modify-write chains stable (e.g. the
- * fpdoom pinmux RMW on 0x8c000250-264 lives in the todo-12 aux pinmux
- * bank, NOT here - do not map 0x8c here).
- *
- * If Wave 5 finds a STOCK-OS SD wait that is unbounded (poll-until-set on
- * a status bit), the todo-12 benign-ready table rule applies (answer the
- * known polled register with a benign value); until then: log+store only.
- *
+ * SC6530C SDIO0 at 0x20700000: absent-card model.
+ * Software resets self-clear, internal clock becomes stable, commands
+ * time out and interrupt status is W1C. No card storage or DMA is modeled.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -110,7 +89,29 @@ static void sc6530_sdio_write(void *opaque, hwaddr offset,
 {
     Sc6530SdioState *s = opaque;
 
+    if ((offset & ~3) == 0x30) {
+        uint32_t clear = (uint32_t)value << ((offset & 3) * 8);
+        s->sdio_regs[0x30 / 4] &= ~clear; /* interrupt status W1C */
+        return;
+    }
+    if ((offset & ~3) == 0x24) {
+        return; /* present state is read-only, no card inserted */
+    }
     sc6530_sdio_regs_write(s->sdio_regs, offset, value, size);
+    if ((offset & ~3) == 0x2c) {
+        /* Stock 0xb55c8 polls software-reset b24 until it clears.
+         * Command/data resets b25/b26 also self-clear. */
+        s->sdio_regs[0x2c / 4] &= ~0x07000000u;
+        /* SDHCI internal-clock-stable follows internal-clock-enable. */
+        s->sdio_regs[0x2c / 4] &= ~2u;
+        if (s->sdio_regs[0x2c / 4] & 1) {
+            s->sdio_regs[0x2c / 4] |= 2;
+        }
+    }
+    if ((offset & ~3) == 0xc && offset + size > 0xe) {
+        /* An absent card cannot answer a command: command timeout + error. */
+        s->sdio_regs[0x30 / 4] |= 0x00018000;
+    }
     qemu_log("sc6530_sdio: write addr=0x%08" PRIx64 " val=0x%08" PRIx64
              " pc=0x%08" PRIx32 "\n",
              SC6530_SDIO_BASE + offset, value, sc6530_sdio_guest_pc());

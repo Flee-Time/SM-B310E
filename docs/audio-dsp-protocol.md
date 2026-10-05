@@ -1,5 +1,12 @@
 # SC6530C Audio/DSP Protocol — static extraction
 
+Current stock-dump measurements and implementation status are in
+[emulator-audio.md](emulator-audio.md). For `e52q7a.bin`, the downloader uses
+shared memory at `0x10000000`, its runtime status area is at `+0xfe0`, and
+the compressed DSP image is read from NOR `0xcc874` (65300 bytes, expanding
+to 267484 bytes). Older partition/base assumptions below are historical
+research notes and should not override these observed addresses.
+
 > Protocol-facts document for the **ARM↔DSP host interface** of the SC6530C.
 > Sources: the **vendor SDK** (leaked internal Samsung/Spreadtrum SDK — **never
 > committed**; read-only reference for register ground truth, semantics only, no

@@ -1,57 +1,12 @@
 /*
- * Spreadtrum SC6530C system timers (B310E-OS QEMU machine).
- *
- * Todo 14 of .omo/plans/b310e-qemu-machine.md (Wave 3).
- *
- * Two register banks:
- *
- * 1. Timer2 at 0x81000040 (SYS_TIMER2_LOAD etc., kernel/irq.c). The whole
- *    4 KiB timer block at 0x81000000 is mapped so timer0/1 accesses stay
- *    benign (the registers of timer2, the one the B310E-OS kernel uses):
- *      +0x0 LOAD  - countdown reload value (guest writes 26000 = 1 ms
- *                   at the 26 MHz timer clock)
- *      +0x8 CTL   - 0xc0 = enable/run, 0 = stop (bits 7:6)
- *      +0xc INT   - bit0 = IRQ output enable (write 1),
- *                   bit1 = underflow/done status (the stock OS's one-shot
- *                   delay timer polls it - dump PSRAM 0x4010888),
- *                   bit2 = pending flag (readable),
- *                   write bit3 = clear pending (write 9 = clear + keep
- *                   enabled, the kernel's sys_tick_isr verbatim)
- *    A periodic 1 ms ptimer (26 MHz countdown, limit = LOAD) raises the
- *    SysBus IRQ output; the line stays asserted (level) until the guest
- *    clears the source at +0xc - the INTC has no pending-clear, the
- *    peripheral ISR owns source-clearing (see sc6530_intc.c).
- *
- *    Guest contract (kernel/irq.c sys_timer_start, lines 149-174):
- *      MEM4(+8)   = 0;          ctl off while configuring
- *      MEM4(+0)   = 26000;      load (1 ms @ 26 MHz)
- *      MEM4(+0xc) = 1;          int enable
- *      MEM4(+8)   = 0xc0;       ctl: enable
- *    ISR (kernel/sched.c sys_tick_isr, lines 57-65):
- *      if (MEM4(+0xc) & 4u) MEM4(+0xc) = 9;   clear + keep enabled
- *
- * 2. Sys-timer at 0x81003000 (SC6530_SYS_TIMER per include/arch.h):
- *      +0x4 SYS_CNT0 - free-running 1 ms counter (the stock PBL delay
- *                      loops busy-wait on it advancing; the counter must
- *                      move or the guest spins)
- *      +0x8 SYS_CTL  - store+echo control register: the stock OS's
- *                      Syscnt_Init RMW chain (dump 0x69350, SDK
- *                      syscnt_drv.c: REG32(SYS_CTL) &= ~BIT_0; |= BIT_3,
- *                      which writes 9) reads the register back between
- *                      writes - echo keeps that chain stable
- *      +0xc SYS_MS   - 1 ms monotonic counter with bit 0 write-echo: the
- *                      same 0x69350 loop does REG32(SYS_MS) &= ~1, so the
- *                      bit-0 write must survive while the counter keeps
- *                      counting
- *    These three addresses were benign-table entries in todo-12's
- *    sc6530_aux catch-all; this device now shadows them at a higher
- *    priority (b310e.c maps at B310E_REGION_PRIORITY 1) and reproduces
- *    the same semantics (the aux entries are dead code from here on).
- *
- * All qemu_log lines carry the guest PC where applicable; the timer2
- * INT read/write lines are the todo-14 acceptance evidence (the guest's
- * pending check "& 4" and the write-9 clear).
- *
+ * SC6530C timer2 at 0x81000040 and millisecond counter/alarm at 0x81003000.
+ * Timer2: LOAD +0, VALUE +4, CTL +8 (bit7 enable, bit6 periodic), INT +12
+ * (bit0 enable, bit1/2 pending, bit3 W1C). Timer2 uses 26 MHz and IRQ 23.
+ * The stock flash driver uses one-shot delays; the custom OS uses periodic.
+ * Timer0/1 are implemented separately by sc6530_gpt.c.
+ * SYS: alarm +0, counter +4/+12, control +8 with enable bit0 and clear bit3.
+ * Stock 0x6939a sets an absolute millisecond alarm, delivered through FIQ16.
+ * Read/tick traces are opt-in to avoid slowing guest polling loops.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -65,6 +20,7 @@
 #include "target/arm/cpu.h"       /* ARM_CPU() cast (same helper) */
 #include "migration/vmstate.h"
 #include "qemu/module.h"
+#include "trace.h"
 
 #define TYPE_SC6530_TIMER "sc6530_timer"
 OBJECT_DECLARE_SIMPLE_TYPE(Sc6530TimerState, SC6530_TIMER)
@@ -96,6 +52,10 @@ struct Sc6530TimerState {
 
     ptimer_state *ptimer;
     qemu_irq irq;
+    qemu_irq sys_irq;
+    QEMUTimer *sys_alarm_timer;
+    uint32_t sys_alarm;
+    bool sys_pending;
 
     uint32_t load;       /* SYS_TIMER2_LOAD countdown reload value */
     uint32_t ctl;        /* SYS_TIMER2_CTL (0xc0 = run) */
@@ -121,6 +81,35 @@ static void sc6530_timer_update_irq(Sc6530TimerState *s)
     qemu_set_irq(s->irq, s->pending && s->int_enable);
 }
 
+static void sc6530_systimer_irq(Sc6530TimerState *s)
+{
+    qemu_set_irq(s->sys_irq, s->sys_pending && (s->sys_ctl & 1));
+}
+
+static void sc6530_systimer_tick(void *opaque)
+{
+    Sc6530TimerState *s = opaque;
+    s->sys_pending = true;
+    /* The comparator next matches after one 32-bit millisecond wrap.
+     * Acknowledging it must not repeat an old deadline every millisecond. */
+    if (s->sys_ctl & 1) {
+        timer_mod(s->sys_alarm_timer,
+                  qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + (1ULL << 32));
+    }
+    sc6530_systimer_irq(s);
+}
+
+static void sc6530_systimer_schedule(Sc6530TimerState *s)
+{
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+    uint32_t delay = s->sys_alarm - (uint32_t)now;
+    timer_del(s->sys_alarm_timer);
+    if (s->sys_ctl & 1) {
+        timer_mod(s->sys_alarm_timer, now + delay);
+    }
+    sc6530_systimer_irq(s);
+}
+
 static void sc6530_timer_tick(void *opaque)
 {
     Sc6530TimerState *s = opaque;
@@ -129,20 +118,20 @@ static void sc6530_timer_tick(void *opaque)
      * line stays up until the guest clears the source (write-9 to +0xc).
      * The ptimer keeps running periodically from its load value. */
     s->pending = true;
-    qemu_log("sc6530_timer: tick expired (pending=1)\n");
+    trace_sc6530_timer_tick(s->load, s->ctl);
     sc6530_timer_update_irq(s);
 }
 
 static void sc6530_timer2_run(Sc6530TimerState *s)
 {
-    /* Start (or restart) the periodic countdown: limit = LOAD at the
-     * 26 MHz timer clock -> 26000 = 1 ms. ptimer_run(..., 0) is the
-     * periodic mode (musicpal's mv88w8618_timer pattern). */
+    /* Reload the countdown at 26 MHz; CTL selects one-shot or periodic. */
     ptimer_transaction_begin(s->ptimer);
     ptimer_set_limit(s->ptimer,
                      s->load ? s->load : SC6530_TIMER2_DEFLOAD, 1);
     ptimer_set_freq(s->ptimer, SC6530_TIMER2_FREQ);
-    ptimer_run(s->ptimer, 0);
+    /* Stock's short delay at PSRAM 0x040109ae sets only enable (bit 7).
+     * Bit 6 selects periodic mode; 0x80 is one-shot, 0xc0 repeats. */
+    ptimer_run(s->ptimer, !(s->ctl & 0x40));
     ptimer_transaction_commit(s->ptimer);
 }
 
@@ -177,8 +166,7 @@ static uint64_t sc6530_timer2_read(void *opaque, hwaddr offset,
          * (our os.bin's sys_tick_isr checks & 4). Both 1 and 2 latch on
          * the tick. */
         val = (s->int_enable ? 1u : 0u) | (s->pending ? 6u : 0u);
-        qemu_log("sc6530_timer: INT read val=0x%" PRIx64 " pc=0x%08"
-                 PRIx32 "\n", val, sc6530_timer_guest_pc());
+        trace_sc6530_timer_int(val, sc6530_timer_guest_pc());
         break;
     default:
         /* Unknown offsets in the timer block: benign (read 0). */
@@ -198,7 +186,7 @@ static void sc6530_timer2_write(void *opaque, hwaddr offset,
         s->load = value;
         qemu_log("sc6530_timer: timer2 LOAD write val=0x%" PRIx64
                  " pc=0x%08" PRIx32 "\n", value, pc);
-        if (s->ctl & 0xc0) {
+        if (s->ctl & 0x80) {
             sc6530_timer2_run(s);   /* reload while running */
         }
         break;
@@ -206,7 +194,7 @@ static void sc6530_timer2_write(void *opaque, hwaddr offset,
         s->ctl = value;
         qemu_log("sc6530_timer: timer2 CTL write val=0x%" PRIx64
                  " pc=0x%08" PRIx32 "\n", value, pc);
-        if (value & 0xc0) {
+        if (value & 0x80) {
             sc6530_timer2_run(s);
         } else {
             sc6530_timer2_stop(s);
@@ -249,14 +237,15 @@ static uint64_t sc6530_systimer_read(void *opaque, hwaddr offset,
     uint64_t ms;
 
     switch (offset) {
+    case 0x00:
+        return s->sys_alarm;
     case SC6530_SYSTIMER_CNT0:
         /* Free-running 1 ms counter: the stock PBL delay loops busy-wait
          * on it advancing, so it must always move. */
         return qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     case SC6530_SYSTIMER_CTL:
-        /* Store+echo: the stock Syscnt_Init RMW chain (dump 0x69350)
-         * reads this register back between writes. */
-        return s->sys_ctl;
+        /* Enable plus pending status; bit3 is a clear strobe. */
+        return s->sys_ctl | (s->sys_pending ? 6 : 0);
     case SC6530_SYSTIMER_MS:
         /* 1 ms monotonic counter, bit 0 write-echo: the same 0x69350
          * chain does REG32(SYS_MS) &= ~1, so bit 0 is guest-writable
@@ -275,14 +264,28 @@ static void sc6530_systimer_write(void *opaque, hwaddr offset,
     uint32_t pc = sc6530_timer_guest_pc();
 
     switch (offset) {
+    case 0x00:
+        s->sys_alarm = value;
+        sc6530_systimer_schedule(s);
+        break;
     case SC6530_SYSTIMER_CNT0:
         /* Counter: absorb writes. */
         break;
-    case SC6530_SYSTIMER_CTL:
-        s->sys_ctl = value;
+    case SC6530_SYSTIMER_CTL: {
+        uint32_t previous = s->sys_ctl;
+        s->sys_ctl = value & ~14u;
+        if (value & 8) {
+            s->sys_pending = false;
+        }
+        if ((previous ^ s->sys_ctl) & 1) {
+            sc6530_systimer_schedule(s);
+        } else {
+            sc6530_systimer_irq(s);
+        }
         qemu_log("sc6530_timer: sys-ctl write val=0x%" PRIx64 " pc=0x%08"
                  PRIx32 "\n", value, pc);
         break;
+    }
     case SC6530_SYSTIMER_MS:
         /* Echo bit 0 (the &= ~1 write), keep the counter counting. */
         s->sys_ms_b0 = value & 1u;
@@ -315,6 +318,10 @@ static void sc6530_timer_reset(DeviceState *dev)
     s->pending = false;
     s->sys_ctl = 0;
     s->sys_ms_b0 = 0;
+    s->sys_alarm = 0;
+    s->sys_pending = false;
+    timer_del(s->sys_alarm_timer);
+    sc6530_systimer_irq(s);
     sc6530_timer_update_irq(s);
 }
 
@@ -324,6 +331,9 @@ static void sc6530_timer_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     sysbus_init_irq(sbd, &s->irq);
+    sysbus_init_irq(sbd, &s->sys_irq);
+    s->sys_alarm_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
+                                     sc6530_systimer_tick, s);
 
     s->ptimer = ptimer_init(sc6530_timer_tick, s, PTIMER_POLICY_LEGACY);
     s->load = SC6530_TIMER2_DEFLOAD;
@@ -342,11 +352,12 @@ static void sc6530_timer_finalize(Object *obj)
     Sc6530TimerState *s = SC6530_TIMER(obj);
 
     ptimer_free(s->ptimer);
+    timer_free(s->sys_alarm_timer);
 }
 
 static const VMStateDescription sc6530_timer_vmsd = {
     .name = "sc6530_timer",
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PTIMER(ptimer, Sc6530TimerState),
@@ -356,6 +367,9 @@ static const VMStateDescription sc6530_timer_vmsd = {
         VMSTATE_BOOL(pending, Sc6530TimerState),
         VMSTATE_UINT32(sys_ctl, Sc6530TimerState),
         VMSTATE_UINT32(sys_ms_b0, Sc6530TimerState),
+        VMSTATE_UINT32_V(sys_alarm, Sc6530TimerState, 2),
+        VMSTATE_BOOL_V(sys_pending, Sc6530TimerState, 2),
+        VMSTATE_TIMER_PTR_V(sys_alarm_timer, Sc6530TimerState, 2),
         VMSTATE_END_OF_LIST()
     }
 };

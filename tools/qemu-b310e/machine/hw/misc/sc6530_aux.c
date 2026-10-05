@@ -54,6 +54,7 @@
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/irq.h"
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
 #include "trace.h"
@@ -389,6 +390,7 @@ struct Sc6530AuxState {
     uint32_t apb_regs[SC6530_AUX_APB_SIZE / 4];
     uint32_t smc_regs[SC6530_AUX_SMC_SIZE / 4];
     uint32_t gpio_regs[SC6530_AUX_GPIO_SIZE / 4];
+    uint16_t gpio_inputs[8]; /* external levels, unaffected by guest reset */
     uint32_t pinmux_regs[SC6530_AUX_PINMUX_SIZE / 4];
     uint32_t busmon_regs[SC6530_AUX_BUSMON_SIZE / 4];
 
@@ -558,7 +560,28 @@ static uint64_t sc6530_aux_gpio_read(void *opaque, hwaddr offset,
 {
     Sc6530AuxState *s = opaque;
 
+    if (offset < 0x400 && (offset & 0x7f) < 4) {
+        unsigned bank = offset / 0x80;
+        uint32_t base = bank * 0x80 / 4;
+        uint32_t dir = s->gpio_regs[base + 2];
+        uint32_t value = ((s->gpio_regs[base] & dir) |
+                          (s->gpio_inputs[bank] & ~dir)) &
+                         s->gpio_regs[base + 1] & 0xffff;
+        return (value >> ((offset & 3) * 8)) &
+               (size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1);
+    }
     return sc6530_regs_read(s->gpio_regs, offset, size);
+}
+
+static void sc6530_aux_gpio_input(void *opaque, int pin, int level)
+{
+    Sc6530AuxState *s = opaque;
+    uint16_t bit = 1u << (pin & 15);
+    if (level) {
+        s->gpio_inputs[pin / 16] |= bit;
+    } else {
+        s->gpio_inputs[pin / 16] &= ~bit;
+    }
 }
 
 static void sc6530_aux_gpio_write(void *opaque, hwaddr offset,
@@ -1600,6 +1623,9 @@ static void sc6530_aux_init(Object *obj)
 {
     Sc6530AuxState *s = SC6530_AUX(obj);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
+
+    qdev_init_gpio_in_named(DEVICE(obj), sc6530_aux_gpio_input,
+                           "gpio-input", 128);
 
     memory_region_init_io(&s->ahb_iomem, obj, &sc6530_aux_ahb_ops, s,
                           "sc6530-aux-ahb", SC6530_AUX_AHB_SIZE);
