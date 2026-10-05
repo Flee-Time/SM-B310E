@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--boot-seconds", type=float, default=90)
     parser.add_argument("--play-seconds", type=float, default=15)
+    parser.add_argument("--headset", action="store_true",
+                        help="Capture the headset route instead of the default unplugged route")
     args = parser.parse_args()
     if args.boot_seconds < 10 or args.play_seconds < 2:
         parser.error("allow at least 10 boot seconds and 2 playback seconds")
@@ -34,12 +36,18 @@ def main():
     navigation = ["left", "left", "ret", "down", "ret",  # Settings / Profiles
                   "up", "f1", "down", "ret",             # edit Normal
                   "down", "ret", "ret"]                   # call/default ringtones
+    if not args.headset:
+        # With the headset absent the stock UI asks whether to preview in
+        # the silent profile before opening its Default ringtones submenu.
+        navigation += ["ret"]
     keys += [(12 + i * 2, key, 100) for i, key in enumerate(navigation)]
     # capture-stock runs/finishes the process, dumps state and closes the WAV.
     sys.argv = ["capture-stock.py", "--qemu", str(args.qemu), "--firmware",
                 str(args.firmware), "--output", str(args.output), "--audio",
                 "--hold-end", "--gpio49-high", "--no-overlays", "--seconds",
                 str(args.boot_seconds + keys[-1][0] + args.play_seconds)]
+    if args.headset:
+        sys.argv += ["--headset"]
     for when, key, hold in keys:
         sys.argv += ["--key", f"{args.boot_seconds + when}:{key}:{hold}"]
     runpy.run_path(str(Path(__file__).with_name("capture-stock.py")), run_name="__main__")

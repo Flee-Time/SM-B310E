@@ -54,6 +54,7 @@
 #include "qemu/timer.h"
 #include "qemu/bitops.h"
 #include "hw/core/sysbus.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/irq.h"
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
@@ -361,6 +362,7 @@ struct Sc6530AuxState {
     MemoryRegion apb_iomem;       /* 0x8b000000 */
     MemoryRegion smc_iomem;       /* 0x20000000 */
     MemoryRegion gpio_iomem;      /* 0x8a000000 */
+    MemoryRegion eic_iomem;       /* 0x8a001000, digital headset input */
     MemoryRegion pinmux_iomem;    /* 0x8c000000 */
     MemoryRegion busmon_iomem;    /* 0x20400000 (silent) */
     MemoryRegion bootready_iomem; /* 0x0425de8c over the PSRAM alias */
@@ -390,6 +392,8 @@ struct Sc6530AuxState {
     uint32_t apb_regs[SC6530_AUX_APB_SIZE / 4];
     uint32_t smc_regs[SC6530_AUX_SMC_SIZE / 4];
     uint32_t gpio_regs[SC6530_AUX_GPIO_SIZE / 4];
+    uint32_t eic_regs[0x1000 / 4];
+    bool headset_present;
     uint16_t gpio_inputs[8]; /* external levels, unaffected by guest reset */
     uint32_t pinmux_regs[SC6530_AUX_PINMUX_SIZE / 4];
     uint32_t busmon_regs[SC6530_AUX_BUSMON_SIZE / 4];
@@ -601,6 +605,43 @@ static const MemoryRegionOps sc6530_aux_gpio_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
     .impl = { .min_access_size = 1, .max_access_size = 4 },
     .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
+
+/* Stock GPIO table at RAM 0x0423c8dc: product ID17 is active-low EIC0.
+ * NOR EIC table 0xca92c maps logical channel0 to digital 0x8a001000,
+ * not the analog power-button EIC at 0x82001900. A zero-filled catch-all
+ * input makes the stock OS show its headset icon and select the HP path.
+ * Only initial/polled presence is modeled; debounce/hotplug IRQs are not. */
+static uint64_t sc6530_aux_eic_read(void *opaque, hwaddr offset, unsigned size)
+{
+    Sc6530AuxState *s = opaque;
+    if ((offset & ~3u) == 0) {
+        uint32_t data = (s->eic_regs[0] & ~1u) | !s->headset_present;
+        data &= s->eic_regs[1] & 0xffff;
+        return extract32(data, (offset & 3) * 8, size * 8);
+    }
+    return sc6530_regs_read(s->eic_regs, offset, size);
+}
+
+static void sc6530_aux_eic_input(void *opaque, int pin, int level)
+{
+    Sc6530AuxState *s = opaque;
+    s->headset_present = !level;
+}
+
+static void sc6530_aux_eic_write(void *opaque, hwaddr offset,
+                                uint64_t value, unsigned size)
+{
+    Sc6530AuxState *s = opaque;
+    sc6530_regs_write(s->eic_regs, offset, value, size);
+}
+
+static const MemoryRegionOps sc6530_aux_eic_ops = {
+    .read = sc6530_aux_eic_read,
+    .write = sc6530_aux_eic_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
 };
 
 static uint64_t sc6530_aux_pinmux_read(void *opaque, hwaddr offset,
@@ -1584,6 +1625,7 @@ static void sc6530_aux_reset(DeviceState *dev)
     memset(s->apb_regs, 0, sizeof(s->apb_regs));
     memset(s->smc_regs, 0, sizeof(s->smc_regs));
     memset(s->gpio_regs, 0, sizeof(s->gpio_regs));
+    memset(s->eic_regs, 0, sizeof(s->eic_regs));
     memset(s->pinmux_regs, 0, sizeof(s->pinmux_regs));
     memset(s->busmon_regs, 0, sizeof(s->busmon_regs));
     memset(s->benign_echo, 0, sizeof(s->benign_echo));
@@ -1622,6 +1664,7 @@ static void sc6530_aux_reset(DeviceState *dev)
 static void sc6530_aux_init(Object *obj)
 {
     Sc6530AuxState *s = SC6530_AUX(obj);
+    qdev_init_gpio_in_named(DEVICE(obj), sc6530_aux_eic_input, "eic-input", 1);
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
 
     qdev_init_gpio_in_named(DEVICE(obj), sc6530_aux_gpio_input,
@@ -1755,13 +1798,21 @@ static void sc6530_aux_init(Object *obj)
                           &sc6530_aux_catchall_ops, s,
                           "sc6530-aux-catchall", SC6530_AUX_CATCHALL_SIZE);
     sysbus_init_mmio(sbd, &s->catchall_iomem);
+    memory_region_init_io(&s->eic_iomem, obj, &sc6530_aux_eic_ops, s,
+                          "sc6530-digital-eic", 0x1000);
+    sysbus_init_mmio(sbd, &s->eic_iomem);
 }
+
+static const Property sc6530_aux_properties[] = {
+    DEFINE_PROP_BOOL("headset-present", Sc6530AuxState, headset_present, false),
+};
 
 static void sc6530_aux_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     device_class_set_legacy_reset(dc, sc6530_aux_reset);
+    device_class_set_props(dc, sc6530_aux_properties);
 }
 
 static const TypeInfo sc6530_aux_info = {

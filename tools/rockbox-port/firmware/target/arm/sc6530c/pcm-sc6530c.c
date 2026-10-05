@@ -1,205 +1,214 @@
-/***************************************************************************
- *             __________               __   ___.
- *   Open      \______   \ ____   ____ |  | _\_ |__   _______  ___
- *   Source     |       _//  _ \_/ ___\|  |/ /| __ \ /  _ \  \/  /
- *   Jukebox    |    |   (  <_> )  \___|    < | \_\ (  <_> > <  <
- *   Firmware   |____|_  /\____/ \___  >__|_ \|___  /\____/__/\_ \
- *                     \/            \/     \/    \/            \/
- *
- * Copyright (C) 2025 by Sho Tanimoto
- * Copyright (C) 2026 by B310E-OS project
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This software is distributed on an "AS IS" basis, WITHOUT WARRANTY OF ANY
- * KIND, either express or implied.
- *
- ****************************************************************************/
-#include <stdlib.h>
+/* SC6530C stereo playback, reconstructed from the e52q7a stock DMA/VBC path.
+ * Copyright (C) 2026 B310E-OS project
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
 #include "config.h"
 #include "system.h"
-#include "kernel.h"
-#include "thread.h"
-#include "backlight.h"
-#include "logf.h"
-#include "audio.h"
 #include "audiohw.h"
-#include "sound.h"
-#include "file.h"
 #include "pcm-internal.h"
-#include "pcm_mixer.h"
+#include "pcm_sampr.h"
+#include "audio-target.h"
 
-/* DIAGNOSTIC INSTRUMENT (keylight blink): proves the pcm completion path
- * fires. backlight-sc6530c.c's keylight_set + the current setting global. */
-extern void keylight_set(int level);
+/* Stock uses standard channel 4 for DA0 and channel 3 for DA1 (one-based).
+ * Interleaved Rockbox data is staged as two contiguous halfword planes.
+ * Each IRQ means a bank was filled, with up to 160 frames still in VBC.
+ * The next plane can then be prepared while that bank plays. */
+#define DMA_LEFT  3
+#define DMA_RIGHT 2
+#define DMA_CHANNELS ((1u << DMA_LEFT) | (1u << DMA_RIGHT))
+#define DMA_IRQ (1u << 20)
+#define DMA_REG(ch, off) SC_AUDIO_REG(0x20101000u + (ch) * 0x40u + (off))
+#define DMA_BLOCK_IRQ 2u
+#define DMA_ERROR_IRQ 16u
+#define DMA_ACK 0x1f000000u
 
-/*
- * B310E-OS Rockbox port — b310e/target/arm/sc6530c/pcm-sc6530c.c
- * (GPLv2, Rockbox-derived; modeled on Rockbox's s3c2440/gigabeat-fx/
- * pcm-meg-fx.c builtin_pcm_sink — the CURRENT sink API).
- *
- * The sink pushes the mixer's 16-bit stereo frames at 8 kHz to the SC6530C
- * VBC DA path (VBDAL/VBDAR 0x82003000/04) — the custom-OS audio route
- * (the ARM codec chain alone is documented as hang-free but SILENT; the
- * music data path is DSP/NV-driven at 48 kHz, out of scope — Rockbox's
- * DSP layer resamples everything down to the sink's 8000).
- *
- * The full hardware bring-up (subsystem power P2-P6 + codec ladder +
- * DAC path + DP DAC + PA + VBC data path with the D8 fixes) happens in
- * audiohw-sc6530c.c audiohw_init(), called from sink_init() — the same
- * convention as the other ARM sinks (pcm-gigabeat-s.c).
- *
- * VOLUME: volume_type is PCM_SINK_SWVOL — Rockbox's swvol DSP path applies
- * the volume setting to the samples BEFORE ops.play(), so the sink output
- * is already scaled; audiohw_set_volume() deliberately does not re-scale.
- */
-
-#define REG32(a) (*(volatile uint32_t *)(a))
-
-/* ---- sink caps ----------------------------------------------------------
- * The hardware's ONLY honest rate is 8 kHz (the VBC DA path). The table
- * stays {8000} even though HW_SAMPR_CAPS also advertises 44 kHz (see
- * config/b310e.h — pcm_sampr.h's HW_FREQ_DEFAULT chain #errors without a
- * 44/48 cap); pcm_set_frequency() rounds every request down to 8000 and
- * the DSP resamples to it. */
-static const unsigned long b310e_sampr[] =
-{
-    8000,
-};
-#define B310E_NUM_SAMPRS  1
-#define B310E_DEFAULT_FREQ 0
-
-/* ---- VBC DA registers (vbc_phy_v5.h + dsp-data-path.md D8) ------------- */
-#define VBC_VBDAL     0x82003000u
-#define VBC_VBDAR     0x82003004u
-
-/* ---- ops ---------------------------------------------------------------- */
-
-static void sink_init(void)
-{
-    /* Bring up the whole audio chain (subsystem power P2-P6 -> codec ladder
-     * -> DAC path r2=1 -> DAC-on -> DP DAC -> PA -> VBC DA data path) and
-     * leave the VBC enabled. See audiohw-sc6530c.c for the exact
-     * register sequence and the D1-D8 fixes from the audio findings. */
-    audiohw_init();
-}
-
-static void sink_postinit(void)
-{
-}
-
-static void sink_set_freq(uint16_t freq)
-{
-    /* Only one rate (8000) is advertised; remember it, do nothing. */
-    (void)freq;
-}
+static int16_t plane[2][SC_VBC_FRAMES] __attribute__((aligned(32)));
+static const int16_t *source;
+static size_t source_frames;
+static unsigned lock_depth, completed;
+static bool running, requesting, eof, draining;
 
 static void sink_lock(void)
 {
-    /* No DMA interrupt to guard — the swvol double-buffer is the only
-     * producer and runs in thread context. */
+    int old = disable_irq_save();
+    if (lock_depth++ == 0)
+        SC_AUDIO_REG(0x8000000c) = DMA_IRQ;
+    restore_irq(old);
 }
 
 static void sink_unlock(void)
 {
+    int old = disable_irq_save();
+    if (lock_depth && --lock_depth == 0 && running)
+        SC_AUDIO_REG(0x80000008) |= DMA_IRQ;
+    restore_irq(old);
 }
 
-static void sink_play(const void *addr, size_t size)
+static void stop_hardware(void)
 {
-    const void *buf = addr;
-    size_t sz = size;
-
-    /* DIAGNOSTIC: a keylight pulse at entry proves start_pcm -> ops.play
-     * actually ran when the user presses PLAY. */
-    keylight_set(0);
-    sleep(1);
-    keylight_set(backlight_brightness);
-
-    /* Blocking completion loop (the sink IS the DMA ISR — nothing in
-     * pcm.c/pcm_sw_volume.c re-calls ops.play). Per buffer: push it to
-     * the VBC (fast bounded writes, no drain — the DA overrun is
-     * irrelevant while the output is silent, and the position is derived
-     * from CONSUMED samples), yield briefly (sleep(1) — UI stays
-     * responsive, NO CPU spin), then the reference handshake:
-     * complete_callback returns the next double-buffer (or false = stop)
-     * and status_callback(STARTED) flips/refills it.
-     *
-     * PACING: the previous version slept ~20 ms per 160-word burst
-     * (≈ real-time) — the pipeline then never visibly advanced (the
-     * position is driven by the codec's decode, which in turn only
-     * advances as buffers are consumed; at real-time pacing the visible
-     * update lag made it look frozen). The task allows a fast-counting
-     * timestamp over a frozen one: consume as fast as the codec supplies
-     * (MP3 at 208 MHz cached decodes faster than real-time) with only a
-     * minimal per-buffer yield to keep the scheduler fair. */
-    for (;;) {
-        const int16_t *samples = (const int16_t *)buf;
-        size_t n = sz / sizeof(int16_t);
-        size_t i;
-
-        for (i = 0; i + 1 < n; i += 2) {
-            REG32(VBC_VBDAL) = (uint32_t)(uint16_t)samples[i];
-            REG32(VBC_VBDAR) = (uint32_t)(uint16_t)samples[i + 1];
-        }
-        if (i < n) {
-            uint32_t s = (uint32_t)(uint16_t)samples[i];
-
-            REG32(VBC_VBDAL) = s;
-            REG32(VBC_VBDAR) = s;
-        }
-
-        sleep(1);
-
-        /* DIAGNOSTIC: blink the keylight per completed buffer. The user
-         * reports: blinking/flickering = the completion path fires; a
-         * single pulse then nothing = the loop exits after the first
-         * buffer; no change at all = sink_play never entered. */
-        keylight_set(0);
-        sleep(1);
-        keylight_set(backlight_brightness);
-
-        if (!pcm_play_dma_complete_callback(PCM_DMAST_OK, &buf, &sz))
-            break;
-        pcm_play_dma_status_callback(PCM_DMAST_STARTED);
-    }
-
-    /* STOP→RESTART HANDOFF (2026-08-27 fix): the pcmbuf's restart branch
-     * (apps/pcmbuf.c pcmbuf_request_buffer, the !playing path) requires
-     * mixer_channel_status(PCM_MIXER_CHAN_PLAYBACK) == CHANNEL_STOPPED, but
-     * on this target the channel's STOPPED status relies entirely on
-     * mixer_buffer_callback's dry-detection firing while the sink's loop
-     * unwinds — if any state (fade_out_complete, a paused/playing residue)
-     * makes the channel read non-STOPPED, the restart never fires and the
-     * codec blocks forever on a full pcmbuf. Force the channel back to
-     * CHANNEL_STOPPED here so the next pcmbuf_request_buffer always hits the
-     * restart branch (idempotent; safe with our no-op pcm locks). */
-    mixer_channel_stop(PCM_MIXER_CHAN_PLAYBACK);
+    SC_AUDIO_REG(0x8000000c) = DMA_IRQ;
+    SC_VBC_CTRL &= ~SC_VBC_PLAY;
+    DMA_REG(DMA_LEFT, 8) = 0;
+    DMA_REG(DMA_RIGHT, 8) = 0;
+    DMA_REG(DMA_LEFT, 12) = DMA_ACK;
+    DMA_REG(DMA_RIGHT, 12) = DMA_ACK;
+    audiohw_mute(true);
+    running = false;
+    completed = 0;
 }
 
 static void sink_stop(void)
 {
+    /* The core stops synchronously when a completion callback runs dry.
+     * Let the bank already queued in VBC finish before muting the DAC.
+     * An explicit stop outside that callback remains immediate. */
+    if (requesting)
+        return;
+    stop_hardware();
+    source = NULL;
+    source_frames = 0;
+    eof = draining = false;
 }
 
-/* ---- the sink ----------------------------------------------------------- */
-
-struct pcm_sink builtin_pcm_sink =
+static unsigned fill_plane(void)
 {
+    unsigned n;
+    for (n = 0; n < SC_VBC_FRAMES; n++)
+    {
+        if (!source_frames)
+        {
+            const void *addr = NULL;
+            size_t size = 0;
+            if (eof)
+                break;
+            requesting = true;
+            bool more = pcm_play_dma_complete_callback(PCM_DMAST_OK, &addr, &size);
+            requesting = false;
+            if (!more || !addr || size < 4)
+            {
+                eof = true;
+                break;
+            }
+            source = addr;
+            source_frames = size / 4;
+            pcm_play_dma_status_callback(PCM_DMAST_STARTED);
+        }
+        plane[0][n] = *source++;
+        plane[1][n] = *source++;
+        source_frames--;
+    }
+    unsigned valid = n;
+    while (n < SC_VBC_FRAMES)
+    {
+        plane[0][n] = plane[1][n] = 0;
+        n++;
+    }
+    commit_dcache_range(plane, sizeof(plane));
+    return valid;
+}
+
+static void arm_channel(unsigned ch, const int16_t *samples, uint32_t port)
+{
+    DMA_REG(ch, 8) = 0;
+    DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+    DMA_REG(ch, 16) = (uintptr_t)samples;
+    DMA_REG(ch, 20) = port;
+    /* Halfword widths [31:30]/[29:28], destination fixed [21:20],
+     * 320-byte fragment/block. These fields differ from older SC6530. */
+    DMA_REG(ch, 24) = 0x50300140u;
+    DMA_REG(ch, 28) = SC_VBC_FRAMES * 2;
+    DMA_REG(ch, 8) = 0x3001u; /* priority 3, normal request, enable */
+}
+
+static void arm_stereo(void)
+{
+    completed = 0;
+    arm_channel(DMA_LEFT, plane[0], SC_VBC_BASE);
+    arm_channel(DMA_RIGHT, plane[1], SC_VBC_BASE + 4);
+}
+
+void DMA(void)
+{
+    uint32_t pending = SC_AUDIO_REG(0x20100010) & DMA_CHANNELS;
+    bool error = false;
+    for (unsigned ch = DMA_RIGHT; ch <= DMA_LEFT; ch++)
+    {
+        if (!(pending & (1u << ch)))
+            continue;
+        uint32_t status = DMA_REG(ch, 12);
+        DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+        error |= (status & (1u << 12)) != 0;
+        if (status & (1u << 9))
+            completed |= 1u << ch;
+    }
+    if (!running)
+        return;
+    if (error)
+    {
+        const void *addr;
+        size_t size;
+        stop_hardware();
+        pcm_play_dma_complete_callback(PCM_DMAST_ERR_DMA, &addr, &size);
+        return;
+    }
+    /* Do not reuse either plane until both channels finished reading it. */
+    if (completed != DMA_CHANNELS)
+        return;
+    if (draining)
+    {
+        stop_hardware();
+        /* A very short initial buffer can run dry during ops.play(),
+         * before the core sets pcm_playing. Finish that state here too. */
+        if (pcm_is_playing())
+            pcm_play_stop_int();
+        return;
+    }
+    draining = fill_plane() == 0 && eof;
+    arm_stereo();
+}
+
+static void sink_set_freq(uint16_t freq)
+{
+    audiohw_set_frequency(freq);
+}
+
+static void sink_init(void)
+{
+    audiohw_init();
+    stop_hardware();
+}
+
+static void sink_play(const void *addr, size_t size)
+{
+    sink_stop();
+    if (!addr || size < 4)
+        return;
+    source = addr;
+    source_frames = size / 4;
+    eof = draining = false;
+    fill_plane();
+    arm_stereo();
+    running = true;
+    audiohw_mute(false);
+    SC_VBC_CTRL = (SC_VBC_CTRL & ~SC_VBC_CPU_ACCESS) | SC_VBC_PLAY;
+    if (!lock_depth)
+        SC_AUDIO_REG(0x80000008) |= DMA_IRQ;
+}
+
+struct pcm_sink builtin_pcm_sink = {
     .caps = {
-        .samprs       = b310e_sampr,
-        .num_samprs   = B310E_NUM_SAMPRS,
-        .default_freq = B310E_DEFAULT_FREQ,
-        .volume_type  = PCM_NATIVE_VOLUME_TYPE,
+        .samprs = hw_freq_sampr,
+        .num_samprs = HW_NUM_FREQ,
+        .default_freq = HW_FREQ_DEFAULT,
+        .volume_type = PCM_NATIVE_VOLUME_TYPE,
     },
     .ops = {
-        .init     = sink_init,
-        .postinit = sink_postinit,
+        .init = sink_init,
+        .postinit = audiohw_postinit,
         .set_freq = sink_set_freq,
-        .lock     = sink_lock,
-        .unlock   = sink_unlock,
-        .play     = sink_play,
-        .stop     = sink_stop,
+        .lock = sink_lock,
+        .unlock = sink_unlock,
+        .play = sink_play,
+        .stop = sink_stop,
     },
 };

@@ -35,5 +35,7 @@ $msysPath = "/" + $shPath.Substring(0, 1).ToLower() + $shPath.Substring(2)
 Write-Host "== B310E Rockbox build via MSYS2 bash =="
 Write-Host "  build.sh: $shPath"
 
-& $bash -lc "$msysPath"
+$env:B310E_BUILD_SCRIPT = $msysPath
+# Keep the caller's Git/tool paths and avoid login-profile side effects.
+& $bash -c 'export PATH=/usr/bin:/bin:$PATH; exec bash "$B310E_BUILD_SCRIPT"'
 exit $LASTEXITCODE

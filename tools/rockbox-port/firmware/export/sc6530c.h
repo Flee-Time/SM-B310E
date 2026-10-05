@@ -74,7 +74,7 @@
 #define ANA_BASE      0x82001000 /* analog die registers                  */
 #define WDG_BASE      0x82001480 /* watchdog (ADI)                        */
 #define EIC_BASE      0x82001900 /* external interrupt ctrl (END/power)   */
-#define VBC_BASE      0x82003000 /* voice band codec (8 kHz DA path)      */
+#define VBC_BASE      0x82003000 /* stereo DAC ping-pong sample ports     */
 #define KEYPAD_BASE   0x87000000 /* keypad matrix controller              */
 #define SDIO_BASE     0x20700000 /* SDIO0 controller                      */
 #define LCM_BASE      0x20800000 /* parallel DBI LCM controller           */

@@ -169,6 +169,7 @@ struct Sc6530AdiState {
     AudioBackend *audio_be;
     SWVoiceOut *voice;
     QEMUTimer *audio_timer;
+    int64_t audio_deadline;
     Notifier audio_exit;
     qemu_irq analog_irq;
     QEMUTimer *rtc_timer;
@@ -255,6 +256,9 @@ static void sc6530_audio_callback(void *opaque, int available)
         s->pcm_count -= written / 4;
         available -= written;
     }
+    if (!s->pcm_count && !(s->vbc_regs[0x18 / 4] & VBC_ENABLE)) {
+        audio_be_set_active_out(s->audio_be, s->voice, false);
+    }
 }
 
 static void sc6530_audio_open(Sc6530AdiState *s)
@@ -313,8 +317,11 @@ static void sc6530_audio_tick(void *opaque)
         s->play_bank ^= 1;
         trace_sc6530_vbc_bank(s->play_bank, frames, s->pcm_count);
     }
-    timer_mod(s->audio_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-               (uint64_t)count * NANOSECONDS_PER_SECOND / s->rate);
+    /* The DAC clock runs independently of host callback latency. Anchoring
+     * every tick to "now" accumulates that latency and slows the guest's
+     * stream, especially on Windows. Keep the deadline on the sample clock. */
+    s->audio_deadline += (uint64_t)count * NANOSECONDS_PER_SECOND / s->rate;
+    timer_mod(s->audio_timer, s->audio_deadline);
 }
 
 static uint64_t sc6530_dp_read(void *opaque, hwaddr offset, unsigned size)
@@ -342,6 +349,7 @@ static void sc6530_dp_write(void *opaque, hwaddr offset,
         unsigned mode = *word & 0xf;
         if (mode < ARRAY_SIZE(rates) && s->rate != rates[mode]) {
             s->rate = rates[mode];
+            s->audio_deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             s->pcm_head = s->pcm_count = 0;
             sc6530_audio_open(s);
             audio_be_set_active_out(s->audio_be, s->voice,
@@ -594,11 +602,15 @@ static void sc6530_adi_vbc_write(void *opaque, hwaddr offset,
             s->play_bank = s->play_pos = 0;
             s->pcm_head = s->pcm_count = 0;
             audio_be_set_active_out(s->audio_be, s->voice, true);
-            timer_mod(s->audio_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+            s->audio_deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+            timer_mod(s->audio_timer, s->audio_deadline);
         } else if ((old_ctl & VBC_ENABLE) && !(ctl & VBC_ENABLE)) {
             timer_del(s->audio_timer);
-            audio_be_set_active_out(s->audio_be, s->voice, false);
-            s->pcm_head = s->pcm_count = 0;
+            /* These frames have already left the emulated DAC. Let the
+             * host consume them before deactivating its output voice. */
+            if (!s->pcm_count) {
+                audio_be_set_active_out(s->audio_be, s->voice, false);
+            }
         }
         if ((old_ctl ^ ctl) & (VBC_RAM_BANK | VBC_RAM_ACCESS)) {
             unsigned bank = !!(ctl & VBC_RAM_BANK);

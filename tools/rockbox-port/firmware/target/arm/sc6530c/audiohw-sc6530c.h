@@ -27,11 +27,10 @@
  * "codec header" pulled in by the AUDIOHW_SETTING chain in audiohw.h
  * via the HAVE_SC6530_CODEC define).
  *
- * The SC6530C on-die codec has NO ARM-controllable data path (it is
- * DSP/NV-driven; the ARM register chain produces no sound — see the
- * B310E-OS audio notes). M1 declares a MONO volume setting so the sound
- * menu exists; every audiohw_set_* is a documented no-op. The volume
- * scale is centibels (sound.c's requirement for VOLUME).
+ * Playback uses the stock ARM-owned DMA/VBC/on-die DAC route. Rockbox
+ * applies software volume before the DMA sink; analog gain stays at
+ * the captured stock value. The settings table exposes one master
+ * volume control for both channels, with no unverified input/amp controls.
  *
  * This header is processed TWICE per TU class:
  *  - in firmware/sound.c (AUDIOHW_IS_SOUND_C defined) the AUDIOHW_SETTING

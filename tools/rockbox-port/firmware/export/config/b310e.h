@@ -77,16 +77,12 @@
 /* I2C: not used on this SoC */
 #define CONFIG_I2C I2C_NONE
 
-/* On-die SC6530C codec (data path is DSP/VBC driven; the ARM codec chain
- * produces no sound — see firmware/target/arm/sc6530c/audiohw-sc6530c.h) */
+/* ARM-owned on-die DAC fed by paced stereo VBC DMA. */
 #define HAVE_SC6530_CODEC
-
-/* The only honest hardware rate is the 8 kHz VBC path. SAMPR_CAP_44 is
- * added ONLY because pcm_sampr.h's HW_FREQ_DEFAULT chain #errors without
- * 44 or 48 kHz ("Neither 48 or 44KHz supported?") — a shared-file
- * constraint, not a hardware lie. The sink's own caps table (pcm-sc6530c.c)
- * stays {8000}; pcm_set_frequency() collapses every request to 8 kHz. */
-#define HW_SAMPR_CAPS (SAMPR_CAP_8 | SAMPR_CAP_44)
+#define HW_SAMPR_CAPS (SAMPR_CAP_96 | SAMPR_CAP_ALL_48)
+#define HAVE_HEADPHONE_DETECTION
+#define HAVE_SPEAKER
+#define DEFAULT_SPEAKER_MODE 2 /* Rockbox Auto: speaker when jack is empty */
 
 /* Battery: SM-B310E packs an 800 mAh Li-ion (BATTERY_CAPACITY_DEFAULT).
  * VBAT is read by the SC6530 internal ADC, channel 5. */

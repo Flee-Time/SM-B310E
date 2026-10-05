@@ -258,6 +258,17 @@ now accepted and tested; voice/output writes still require writable RAM.
 
 ## Audio register contract and remaining work
 
+Rockbox's implementation and stock speaker/headset register measurements
+are documented in [rockbox-audio.md](rockbox-audio.md). Digital EIC0 now
+models the active-low headset input instead of returning zero unconditionally.
+An empty jack is the default; `capture-ringtone.py --headset` reproduces the
+inserted route. The default capture handles the unplugged UI's extra preview
+confirmation. EIC hotplug/debounce IRQs remain unmodeled.
+
+The VBC sample timer is anchored to its prior sample deadline, avoiding a
+stream slowdown from accumulated host callback latency. On stop, PCM that
+already left the DAC drains to the host backend before output deactivates.
+
 | Block | Implemented contract |
 |---|---|
 | DMA `0x20100000` | 32 channels at +0x1000, stride0x40; stock width/length/step fields; IRQ20 |

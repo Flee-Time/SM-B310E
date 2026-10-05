@@ -42,6 +42,20 @@ def main():
     fixture.write_bytes(b"\xff" * 0x800000)
     checksum = hashlib.sha256(fixture.read_bytes()).digest()
     with machine(args, "flash-battery", nor=fixture) as (qt, qmp, out):
+        # Active-low DIGITAL EIC0, separately masked from analog END.
+        eic = 0x8a001000
+        assert qt.read(eic) == 0
+        qt.write(eic + 4, 1)
+        assert qt.read(eic) == 1
+        qt.command("set_irq_in /machine/peripheral/sc6530-aux eic-input 0 0")
+        qt.write(eic, 1)  # guest cannot override the physical level
+        assert qt.read(eic) == 0
+        assert int(qt.command(f"readb {eic:#x}")[0], 16) == 0
+        qmp.command("system_reset")
+        qt.write(eic + 4, 1)
+        assert qt.read(eic) == 0  # external insertion survives reset
+        qt.command("set_irq_in /machine/peripheral/sc6530-aux eic-input 0 1")
+        assert qt.read(eic) == 1
         # External LCD status experiment obeys GPIO mask/direction and is
         # not a writable guest flag. Reset must not disconnect the wire.
         gpio = 0x8a000180

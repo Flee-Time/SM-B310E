@@ -7,6 +7,12 @@ the compressed DSP image is read from NOR `0xcc874` (65300 bytes, expanding
 to 267484 bytes). Older partition/base assumptions below are historical
 research notes and should not override these observed addresses.
 
+For the Rockbox ARM playback driver, see [rockbox-audio.md](rockbox-audio.md).
+Live stock RAM fixes the analog codec base at `0x82001a00`; older tables
+below assumed `0x82001280`. The power-ladder IDs 28..31/2 are regulator IDs,
+not GPIO numbers. DAC_CTL bit14 requests mute and bit15 enables its ramp
+controller. The APB +0x60/+0x64 pair controls reset, not PA power halves.
+
 > Protocol-facts document for the **ARM↔DSP host interface** of the SC6530C.
 > Sources: the **vendor SDK** (leaked internal Samsung/Spreadtrum SDK — **never
 > committed**; read-only reference for register ground truth, semantics only, no
