@@ -208,6 +208,14 @@ int main(void)
         success &= dma_error;
     else
         success &= !dma_error && cursor == FRAMES;
+    struct sc6530_audio_debug info;
+    sc6530_audio_debug(&info);
+    success &= info.initialized && !info.adi_failed &&
+               info.valid == (1u << SC_AUDIO_ANALOG_COUNT) - 1;
+    if (TEST_CASE == 0)
+        success &= info.banks > 0 && info.volume == TEST_VOLUME &&
+                   (TEST_VOLUME == INT_MIN ? info.peak[0] == 0 && info.peak[1] == 0 :
+                    info.peak[0] > 0 && info.peak[1] > 0);
     if (!success)
     {
         diagnostic(pcm_is_playing());

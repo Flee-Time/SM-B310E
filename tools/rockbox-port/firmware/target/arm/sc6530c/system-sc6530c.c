@@ -28,6 +28,7 @@
 #include "font.h"
 #include "file.h"
 #include "pcm-internal.h"
+#include "audio-target.h"
 #include <stdio.h>
 
 /*
@@ -244,25 +245,37 @@ bool dbg_hw_info(void)
         { "ADI FIFO", 0x82000020 },
     };
     uint32_t values[ARRAYLEN(regs)];
+    struct sc6530_audio_debug info;
     bool saved = false;
+    bool analog = false;
     lcd_setfont(FONT_SYSFIXED);
     for (;;)
     {
         lcd_clear_display();
-        lcd_puts(0, 0, "B310E audio");
+        lcd_puts(0, 0, analog ? "B310E analog" : "B310E audio");
         lcd_putsf(0, 1, "Playing: %d", pcm_is_playing());
+        sc6530_audio_debug(&info);
         for (unsigned i = 0; i < ARRAYLEN(regs); i++)
         {
             /* Read only known control/status registers. VBC data ports
              * and unverified DSP shared addresses are deliberately absent. */
             values[i] = REG32(regs[i].addr);
-            lcd_putsf(0, i + 2, "%s %08lx", regs[i].name, (unsigned long)values[i]);
+            if (!analog)
+                lcd_putsf(0, i + 2, "%s %08lx", regs[i].name, (unsigned long)values[i]);
         }
+        if (analog)
+            for (unsigned i = 0; i < SC_AUDIO_ANALOG_COUNT; i++)
+                lcd_putsf(0, i + 2, "%s %04x%s", sc_audio_analog_regs[i].name,
+                          info.analog[i], (info.valid & (1u << i)) ? "" : " ERR");
+        lcd_putsf(0, 17, "PCM %u/%u", info.peak[0], info.peak[1]);
         lcd_puts(0, 18, saved ? "Saved audio log" : "Center: save log");
+        lcd_puts(0, 19, "Menu: change page");
         lcd_update();
         int action = get_action(CONTEXT_STD, HZ / 4);
         if (action == ACTION_STD_CANCEL)
             break;
+        if (action == ACTION_STD_MENU)
+            analog = !analog;
         if (action == ACTION_STD_OK)
         {
             int fd = open(ROCKBOX_DIR "/audio-b310e.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -270,10 +283,18 @@ bool dbg_hw_info(void)
             {
                 saved = fdprintf(fd, "B310E audio tick=%ld playing=%d\n",
                                  current_tick, pcm_is_playing()) >= 0;
+                saved &= fdprintf(fd, "codec_initialized=%d adi_failed=%d speaker=%d volume_tenth_db=%d banks=%lu pcm_peak_L=%u pcm_peak_R=%u\n",
+                                  info.initialized, info.adi_failed, info.speaker,
+                                  info.volume, (unsigned long)info.banks, info.peak[0], info.peak[1]) >= 0;
                 for (unsigned i = 0; i < ARRAYLEN(regs); i++)
                     saved &= fdprintf(fd, "%s %08lx=%08lx\n", regs[i].name,
                                       (unsigned long)regs[i].addr,
                                       (unsigned long)values[i]) >= 0;
+                for (unsigned i = 0; i < SC_AUDIO_ANALOG_COUNT; i++)
+                    saved &= fdprintf(fd, "%s %08lx=%04x valid=%d\n",
+                                      sc_audio_analog_regs[i].name,
+                                      (unsigned long)sc_audio_analog_regs[i].addr,
+                                      info.analog[i], !!(info.valid & (1u << i))) >= 0;
                 saved = (close(fd) == 0) && saved;
             }
         }

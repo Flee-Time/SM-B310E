@@ -182,6 +182,7 @@ struct Sc6530AdiState {
     unsigned pcm_head;
     unsigned pcm_count;
     bool dma_filling;
+    bool analog_audio_clock;
 
     /* Index-echo state: the last ADI_ARM_RD_CMD write (addr & 0xFFF). */
     uint32_t rd_index;
@@ -280,7 +281,8 @@ static void sc6530_audio_tick(void *opaque)
     bool owned = s->dsp && sc6530_dsp_arm_audio_owned(s->dsp);
     /* DAC_CTL bit15 enables the ramp controller; bit14 requests mute.
      * Stock normally plays with 0x8000 set and 0x4000 clear. */
-    bool mute = !owned || ((s->dp_regs[0x0c / 4] & 0xc000) == 0xc000);
+    bool mute = !owned || !s->analog_audio_clock ||
+                ((s->dp_regs[0x0c / 4] & 0xc000) == 0xc000);
 
     if (!(ctl & VBC_ENABLE)) {
         return;
@@ -521,6 +523,13 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
 
     sc6530_adi_regs_write(s->ana_regs, offset, value, size);
     unsigned aligned = offset & ~3;
+    /* Stock 0x81562/0x8153e use write-one SET/CLEAR aliases. The audio
+     * clock is independent of DMA: a missing clock leaves playback
+     * counters advancing while the analog output remains silent. */
+    if ((aligned == 0x440 || aligned == 0x444) &&
+        ((value << ((offset & 3) * 8)) & 4)) {
+        s->analog_audio_clock = aligned == 0x440;
+    }
     if (aligned >= 0x610 && aligned <= 0x61c) {
         /* RTC time update -> counter, acknowledge bits 8..11. Stock
          * 0x36008 updates each field and waits for its ISR to clear ACK. */
@@ -546,6 +555,18 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
     }
     trace_sc6530_ana_write(SC6530_ADI_ANA_BASE + offset, value,
                            sc6530_adi_guest_pc());
+    /* e52q7a's shared ADI write helper saves its caller at SP+20.
+     * Recording that return address distinguishes the live chip-specific
+     * clock/codec routines from unused NOR implementations. */
+    if (trace_event_get_state_backends(TRACE_SC6530_ANA_CALLER) &&
+        current_cpu && sc6530_adi_guest_pc() == 0x3038a) {
+        uint8_t caller[4];
+        uint32_t sp = ARM_CPU(current_cpu)->env.regs[13];
+        if (cpu_memory_rw_debug(current_cpu, sp + 20, caller, 4, false) == 0) {
+            trace_sc6530_ana_caller(SC6530_ADI_ANA_BASE + offset, value,
+                                   ldl_le_p(caller));
+        }
+    }
 }
 
 static const MemoryRegionOps sc6530_adi_ana_ops = {
@@ -684,6 +705,7 @@ static void sc6530_adi_reset(DeviceState *dev)
     memset(s->bank, 0, sizeof(s->bank));
     memset(s->write_pos, 0, sizeof(s->write_pos));
     s->pcm_head = s->pcm_count = s->play_pos = s->play_bank = 0;
+    s->analog_audio_clock = false;
     timer_del(s->audio_timer);
     audio_be_set_active_out(s->audio_be, s->voice, false);
     s->rate = 8000;
