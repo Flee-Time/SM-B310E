@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a partitioned FAT16 SD image with .rockbox and a stereo test WAV.
+"""Create a partitioned FAT16/FAT32 SD image with .rockbox and a stereo test WAV.
 
 Uses only Python's standard library. The output is a generated emulator
 image, never a physical disk. Run the port build first to stage .rockbox.
@@ -68,7 +68,8 @@ def entry(alias, node):
     data = bytearray(32)
     data[:11] = alias
     data[11] = 0x10 if node['children'] is not None else 0x20
-    struct.pack_into('<H', data, 26, node['cluster'])
+    struct.pack_into('<H', data, 20, node['cluster'] >> 16)
+    struct.pack_into('<H', data, 26, node['cluster'] & 0xffff)
     struct.pack_into('<I', data, 28, len(node['data']) if node['data'] is not None else 0)
     return data
 
@@ -97,23 +98,28 @@ def long_entries(name, alias):
     return result
 
 
-def write_image(path, root, size_mib):
+def write_image(path, root, size_mib, fat32=False):
     total = size_mib * 1024 * 1024 // SECTOR
     partition = total - START
-    root_sectors = ROOT_ENTRIES * 32 // SECTOR
+    spc = 1 if fat32 else SPC
+    reserved = 32 if fat32 else 1
+    width = 4 if fat32 else 2
+    end_marker = 0x0fffffff if fat32 else 0xffff
+    root_sectors = 0 if fat32 else ROOT_ENTRIES * 32 // SECTOR
     fat_sectors = 1
     while True:
-        clusters = (partition - 1 - 2 * fat_sectors - root_sectors) // SPC
-        needed = (2 * (clusters + 2) + SECTOR - 1) // SECTOR
+        clusters = (partition - reserved - 2 * fat_sectors - root_sectors) // spc
+        needed = (width * (clusters + 2) + SECTOR - 1) // SECTOR
         if needed <= fat_sectors:
             break
         fat_sectors = needed
-    if not 4085 <= clusters < 65525:
-        raise ValueError('image size is outside this FAT16 layout')
+    if not (65525 <= clusters < 0x0ffffff5 if fat32 else 4085 <= clusters < 65525):
+        raise ValueError('image size is outside this FAT layout')
     image = bytearray(total * SECTOR)
     fat = bytearray(fat_sectors * SECTOR)
-    struct.pack_into('<HH', fat, 0, 0xfff8, 0xffff)
-    data_sector = START + 1 + 2 * fat_sectors + root_sectors
+    struct.pack_into('<II' if fat32 else '<HH', fat, 0,
+                     0x0ffffff8 if fat32 else 0xfff8, end_marker)
+    data_sector = START + reserved + 2 * fat_sectors + root_sectors
     next_cluster = 2
     file_count = 0
 
@@ -131,14 +137,15 @@ def write_image(path, root, size_mib):
             length = 64 + sum(len(long_entries(name, child['alias'])) + 32
                               for name, child in children.items()) + 32
             payload = bytes(length)
-        count = max(1, (len(payload) + SPC * SECTOR - 1) // (SPC * SECTOR))
+        count = max(1, (len(payload) + spc * SECTOR - 1) // (spc * SECTOR))
         first = next_cluster
         node['cluster'] = first
         next_cluster += count
         if next_cluster > clusters + 2:
             raise ValueError('runtime and test audio do not fit in image')
         for c in range(first, first + count):
-            struct.pack_into('<H', fat, c * 2, c + 1 if c + 1 < first + count else 0xffff)
+            struct.pack_into('<I' if fat32 else '<H', fat, c * width,
+                             c + 1 if c + 1 < first + count else end_marker)
         if children is not None:
             payload = entry(b'.          ', node)
             payload += entry(b'..         ', {'children': {}, 'data': None, 'cluster': parent_cluster})
@@ -146,38 +153,57 @@ def write_image(path, root, size_mib):
                 allocate(child, first)
                 payload += long_entries(name, child['alias']) + entry(child['alias'], child)
             payload += bytes(32)
-        offset = (data_sector + (first - 2) * SPC) * SECTOR
+        offset = (data_sector + (first - 2) * spc) * SECTOR
         image[offset:offset + len(payload)] = payload
 
-    used = set()
-    root_data = bytearray()
-    for name, node in sorted(root['children'].items()):
-        alias = short_name(name, used)
-        allocate(node)
-        root_data += long_entries(name, alias) + entry(alias, node)
-    if len(root_data) >= ROOT_ENTRIES * 32:
-        raise ValueError('root directory is full')
-    root_offset = (START + 1 + 2 * fat_sectors) * SECTOR
-    image[root_offset:root_offset + len(root_data)] = root_data
+    if fat32:
+        allocate(root)
+    else:
+        used = set()
+        root_data = bytearray()
+        for name, node in sorted(root['children'].items()):
+            alias = short_name(name, used)
+            allocate(node)
+            root_data += long_entries(name, alias) + entry(alias, node)
+        if len(root_data) >= ROOT_ENTRIES * 32:
+            raise ValueError('root directory is full')
+        root_offset = (START + reserved + 2 * fat_sectors) * SECTOR
+        image[root_offset:root_offset + len(root_data)] = root_data
     for copy in range(2):
-        offset = (START + 1 + copy * fat_sectors) * SECTOR
+        offset = (START + reserved + copy * fat_sectors) * SECTOR
         image[offset:offset + len(fat)] = fat
     # MBR and standard DOS FAT16 BPB, deterministic timestamps/volume ID.
-    struct.pack_into('<B3sB3sII', image, 446, 0x80, b'\xfe\xff\xff', 0x06,
+    struct.pack_into('<B3sB3sII', image, 446, 0x80, b'\xfe\xff\xff', 0x0c if fat32 else 0x06,
                      b'\xfe\xff\xff', START, partition)
     image[510:512] = b'\x55\xaa'
     boot = bytearray(SECTOR)
     boot[:11] = b'\xeb\x3c\x90B310ESD '
-    struct.pack_into('<HBHBHHBHHHII', boot, 11, SECTOR, SPC, 1, 2,
-                     ROOT_ENTRIES, 0, 0xf8, fat_sectors, 63, 255, START, partition)
-    boot[36:39] = b'\x80\x00\x29'
-    struct.pack_into('<I', boot, 39, 0x6530b310)
-    boot[43:54], boot[54:62] = b'B310E AUDIO', b'FAT16   '
+    struct.pack_into('<HBHBHHBHHHII', boot, 11, SECTOR, spc, reserved, 2,
+                     0 if fat32 else ROOT_ENTRIES, 0, 0xf8,
+                     0 if fat32 else fat_sectors, 63, 255, START, partition)
+    if fat32:
+        struct.pack_into('<IHHIHH', boot, 36, fat_sectors, 0, 0, root['cluster'], 1, 6)
+        boot[64:67] = b'\x80\x00\x29'
+        struct.pack_into('<I', boot, 67, 0x6530b310)
+        boot[71:82], boot[82:90] = b'B310E AUDIO', b'FAT32   '
+        fsinfo = bytearray(SECTOR)
+        struct.pack_into('<I', fsinfo, 0, 0x41615252)
+        struct.pack_into('<III', fsinfo, 484, 0x61417272, clusters - (next_cluster - 2), next_cluster)
+        struct.pack_into('<I', fsinfo, 508, 0xaa550000)
+        image[(START+1)*SECTOR:(START+2)*SECTOR] = fsinfo
+        image[(START+7)*SECTOR:(START+8)*SECTOR] = fsinfo
+    else:
+        boot[36:39] = b'\x80\x00\x29'
+        struct.pack_into('<I', boot, 39, 0x6530b310)
+        boot[43:54], boot[54:62] = b'B310E AUDIO', b'FAT16   '
     boot[510:512] = b'\x55\xaa'
     image[START*SECTOR:(START+1)*SECTOR] = boot
+    if fat32:
+        image[(START+6)*SECTOR:(START+7)*SECTOR] = boot
     path.write_bytes(image)
     return {'image': str(path), 'files': file_count, 'size_bytes': len(image),
-            'used_clusters': next_cluster - 2, 'cluster_bytes': SPC * SECTOR}
+            'used_clusters': next_cluster - 2, 'cluster_bytes': spc * SECTOR,
+            'filesystem': 'FAT32' if fat32 else 'FAT16'}
 
 
 def main():
@@ -188,11 +214,17 @@ def main():
     parser.add_argument('--size-mib', type=int, default=64)
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--force', action='store_true', help='replace an existing generated image')
+    parser.add_argument('--fat32', action='store_true', help='also compatible with the fpdoom SD boot menu')
+    parser.add_argument('--fpmain', type=Path, help='include this menu as fpbin/fpmain.bin; requires FAT32')
+    parser.add_argument('--config', type=Path, help='JSON menu configuration; required with --fpmain')
     args = parser.parse_args()
     if not args.runtime.is_dir() or not args.rockbox.is_file():
         parser.error('build Rockbox first to stage the runtime and binary')
     if not 1 <= args.seconds <= 120:
         parser.error('--seconds must be 1..120')
+    if args.fpmain and (not args.fat32 or not args.config or
+                       not args.fpmain.is_file() or not args.config.is_file()):
+        parser.error('--fpmain requires --fat32 and an existing --config')
     if args.output.exists() and not args.force:
         parser.error('output exists; use --force to replace this generated image')
     root = directory()
@@ -201,9 +233,12 @@ def main():
             add_file(root, Path('.rockbox') / path.relative_to(args.runtime), path.read_bytes())
     add_file(root, 'progs/rockbox.bin', args.rockbox.read_bytes())
     add_file(root, 'test.wav', test_audio(args.seconds))
+    if args.fpmain:
+        add_file(root, 'fpbin/fpmain.bin', args.fpmain.read_bytes())
+        add_file(root, 'fpbin/config.json', args.config.read_bytes())
     add_file(root, '.rockbox/config.cfg', b'volume: 0\nstart in screen: files\nstart directory: /\n')
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    print(json.dumps(write_image(args.output, root, args.size_mib), indent=2))
+    print(json.dumps(write_image(args.output, root, args.size_mib, args.fat32), indent=2))
 
 
 if __name__ == '__main__':

@@ -459,7 +459,7 @@ SD_CARD_DIR  := sdcard
 # sources are re-downloaded by the script on first run (network).
 GAMES_STAMP := tools/fpmain/.games-stamp
 
-$(GAMES_STAMP): tools/fpmain/rebuild-games.ps1 tools/fpmain/rebuild-games.sh tools/fpmain/config.json tools/fpmain/config.txt
+$(GAMES_STAMP): tools/fpmain/rebuild-games.ps1 tools/fpmain/rebuild-games.sh tools/fpmain/config.json
 	$(RUN_GAMES)
 	@$(call TOUCH_CMD,$(CURDIR)/$(GAMES_STAMP))
 
@@ -524,17 +524,17 @@ endif
 
 # The PORTED boot menu (tools/fpmain/fpmain.bin) is NOT built by the repo
 # toolchain - it is built in the fpdoom clone (tools/fpmain/build-fpmain.ps1
-# stages our sources over fpdoom's fpmenu app, builds with the fpdoom
-# framework, copies fpmain.bin + configs back here AND onto the card, then
-# restores the clone). `make sdcard` runs it when the binary is missing or
+# stages our sources in a dedicated directory, builds with the fpdoom
+# framework and copies fpmain.bin + JSON back here AND onto the card). `make sdcard` runs it when the binary is missing or
 # the port sources are newer. Prereq: the fpdoom clone at build/fpdoom
 # (auto-cloned by the script; docs/sdboot.md). Rebuilds are timestamp-gated on
 # the port sources, not the clone, so a stale clone cannot silently wedge the
 # card image.
 FPM_SRCS := tools/fpmain/main.c tools/fpmain/menu_stub.s \
             tools/fpmain/font8x16.h tools/fpmain/font5x7.h \
-            tools/fpmain/readconf.h tools/fpmain/jsonconf.h \
-            tools/fpmain/config.json tools/fpmain/config.txt
+            tools/fpmain/launchargs.h tools/fpmain/jsonconf.h \
+            tools/fpmain/config.json tools/fpmain/entry-json.patch \
+            tools/fpmain/build-fpmain.ps1 tools/fpmain/build-fpmain.sh
 
 tools/fpmain/fpmain.bin: $(FPM_SRCS)
 	$(RUN_FPMAIN)
@@ -548,13 +548,6 @@ $(SD_CARD_DIR)/fpbin/config.json: tools/fpmain/config.json
 	@$(call MKDIR_CMD,$(CURDIR)/$(SD_CARD_DIR)/fpbin)
 	@$(call COPY_CMD,$(CURDIR)/tools/fpmain/config.json,$(CURDIR)/$(SD_CARD_DIR)/fpbin/config.json)
 	@$(call MSG,sdcard: staged fpbin/config.json - the PORTS menu (JSON; games need their fpbin/*.bin + games/ dirs))
-
-# config.txt (the legacy line-based PORTS menu) is NOT staged by default -
-# it's a fallback the user can find and copy manually if wanted:
-#   Copy-Item tools/fpmain/config.txt sdcard/fpbin/config.txt
-# $(SD_CARD_DIR)/fpbin/config.txt: tools/fpmain/config.txt
-# 	@powershell -NoProfile -Command "New-Item -ItemType Directory -Force -Path '$(CURDIR)/$(SD_CARD_DIR)/fpbin' | Out-Null; Copy-Item -Force '$(CURDIR)/tools/fpmain/config.txt' '$(CURDIR)/$(SD_CARD_DIR)/fpbin/config.txt'; exit 0"
-# 	@echo sdcard: staged fpbin/config.txt - the PORTS menu (games need their fpbin/*.bin + games/ dirs)
 
 $(SD_CARD_DIR)/progs/os.bin: $(OS_SD_TARGET).bin
 	@$(call MKDIR_CMD,$(CURDIR)/$(SD_CARD_DIR)/progs)
