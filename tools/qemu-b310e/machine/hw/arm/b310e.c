@@ -79,7 +79,11 @@
 #include "hw/core/irq.h"
 #include "hw/core/or-irq.h"
 #include "hw/core/qdev.h"
+#include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "hw/core/sysbus.h"
+#include "hw/sd/sdhci.h"
+#include "hw/sd/sd.h"
 #include "hw/arm/machines-qom.h"
 #include "monitor/qdev.h"
 #include "system/address-spaces.h"
@@ -837,10 +841,10 @@ static void b310e_init(MachineState *machine)
         sysbus_realize_and_unref(lcdc_sbd, &error_fatal);
         /* Stock ARM ISR at 0x27974 dispatches LCDC completion on IRQ14. */
         sysbus_connect_irq(lcdc_sbd, 0, qdev_get_gpio_in(s->intc, 14));
-    }
-    {
         DeviceState *lcm_dev = qdev_new(TYPE_SC6530_LCM);
         SysBusDevice *lcm_sbd = SYS_BUS_DEVICE(lcm_dev);
+
+        object_property_set_link(OBJECT(lcm_dev), "lcdc", OBJECT(lcdc_dev), &error_fatal);
 
         sysbus_mmio_map_overlap(lcm_sbd, 0, B310E_LCM_BASE,
                                 B310E_REGION_PRIORITY);
@@ -928,17 +932,28 @@ static void b310e_init(MachineState *machine)
         sysbus_realize_and_unref(uart_sbd, &error_fatal);
     }
 
-    /* SC6530 SDIO0 (todo 19) @ 0x20700000: log+store no-op - status
-     * reads return 0 = "no card", so the guest's SD init completes
-     * without a card (all SDIO waits are bounded in drivers/sdio.c).
-     * Mapped at B310E_REGION_PRIORITY (inside the catch-all range). */
+    /* SDIO0 uses the SDHCI register layout. Stock 0xb6128 registers IRQ28.
+     * An optional -drive if=none,id=sdcard supplies the real card protocol
+     * and persistent sectors; omitting it keeps an absent card. */
     {
         DeviceState *sdio_dev = qdev_new(TYPE_SC6530_SDIO);
         SysBusDevice *sdio_sbd = SYS_BUS_DEVICE(sdio_dev);
+        BlockBackend *card = blk_by_name("sdcard");
 
+        qdev_prop_set_uint8(sdio_dev, "sd-spec-version", 2);
+        sysbus_realize_and_unref(sdio_sbd, &error_fatal);
         sysbus_mmio_map_overlap(sdio_sbd, 0, B310E_SDIO_BASE,
                                 B310E_REGION_PRIORITY);
-        sysbus_realize_and_unref(sdio_sbd, &error_fatal);
+        sysbus_mmio_map_overlap(sdio_sbd, 1, B310E_SDIO_BASE + 0x1fc,
+                                B310E_REGION_PRIORITY);
+        sysbus_connect_irq(sdio_sbd, 0, qdev_get_gpio_in(s->intc, 28));
+        if (card) {
+            DeviceState *card_dev = qdev_new(TYPE_SD_CARD);
+            qdev_prop_set_drive_err(card_dev, "drive", card, &error_fatal);
+            qdev_realize_and_unref(card_dev,
+                                  qdev_get_child_bus(sdio_dev, "sd-bus"),
+                                  &error_fatal);
+        }
     }
 
     qemu_register_reset(b310e_reset, s);

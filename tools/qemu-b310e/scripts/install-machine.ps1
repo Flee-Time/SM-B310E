@@ -100,7 +100,8 @@ function New-MiscKconfigBlock {
     # device stanza per hw/misc/Kconfig convention; ARM-gated so non-ARM targets skip it
     param([System.IO.FileInfo[]]$Files)
     $stanzas = foreach ($f in $Files) {
-        "config $(ConvertTo-SymbolName $f)`n    bool`n    default y`n    depends on ARM"
+        $dependency = if ($f.BaseName -eq 'sc6530_sdio') { "`n    select SDHCI" } else { '' }
+        "config $(ConvertTo-SymbolName $f)`n    bool`n    default y`n    depends on ARM$dependency"
     }
     return ($stanzas -join "`n`n")
 }

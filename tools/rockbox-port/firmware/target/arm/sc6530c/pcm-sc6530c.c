@@ -187,6 +187,11 @@ static void sink_play(const void *addr, size_t size)
     source_frames = size / 4;
     eof = draining = false;
     fill_plane();
+    /* Stock 0xa7b96: bind VBC DA0/DA1 hardware requests15/16 to
+     * one-based DMA channels4/3. Channel enable and destination address
+     * alone do not connect the peripheral's request to the DMA engine. */
+    SC_AUDIO_REG(0x20102038) = DMA_LEFT + 1;
+    SC_AUDIO_REG(0x2010203c) = DMA_RIGHT + 1;
     arm_stereo();
     running = true;
     audiohw_mute(false);

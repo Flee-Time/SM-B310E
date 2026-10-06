@@ -94,6 +94,9 @@ make_kconfig_misc() {
   for f in "$@"; do
     if [[ $first -eq 1 ]]; then first=0; else block+=$'\n\n'; fi
     block+="config $(sym_of "$f")"$'\n'"    bool"$'\n'"    default y"$'\n'"    depends on ARM"
+    if [[ "$(sym_of "$f")" == SC6530_SDIO ]]; then
+      block+=$'\n'"    select SDHCI"
+    fi
   done
   echo "$block"
 }

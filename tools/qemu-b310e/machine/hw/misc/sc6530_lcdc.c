@@ -1,55 +1,10 @@
-/*
- * Spreadtrum SC6530C LCDC display controller + LCM DBI controller
- * (B310E-OS QEMU machine).
- *
- * Todo 16 of .omo/plans/b310e-qemu-machine.md (Wave 3): a MINIMAL display
- * model - the register banks are store+echo, and the only modeled behavior
- * is the LCDC refresh DMA: when the guest starts a refresh (drivers/lcd.c
- * lcd_show / lcdc_init_regs: `irq.en |= 1; ctrl |= 8; poll irq.raw; irq.clr
- * |= 1`), the framebuffer is copied out of PSRAM and pushed into a
- * QemuConsole, and the refresh-complete flag is set so the guest's poll
- * terminates.
- *
- * Devices (both in this file):
- *
- *   sc6530_lcdc @ 0x20d00000, 0x1000 - the LCDC register bank. Offsets are
- *     LOCKED by the _Static_asserts in drivers/lcd.c (lcdc_t layout, mirror
- *     of fpdoom syscode.h): ctrl @ 0x00 (bit 3 = start refresh), img struct
- *     @ 0x20 with img.y_base_addr @ 0x24 (the DMA source = fb address >> 2),
- *     irq @ 0x110: en / clr / status / raw @ 0x118/0x11c. The model:
- *       - ctrl write with bit 3 SET  -> refresh trigger: copy 128*160*2
- *         bytes from PSRAM at img.y_base_addr << 2 (read via the system
- *         address space, so BOTH the 0x34000000 and 0x04000000 windows
- *         work through the always-on alias), convert RGB565 -> x8r8g8b8
- *         into the console surface, qemu_console_update, then set irq.raw
- *         bit 0 (DMA done) so the guest's poll loop exits on the first
- *         read. Every other ctrl write (bit 0/1 enable, fmark, etc.) is a
- *         plain store+echo.
- *       - irq.raw 0x11c read        -> the pending bits (bit 0 = DMA done).
- *       - irq.status 0x118 read     -> raw & en (masked status).
- *       - irq.clr 0x114 write       -> write-1-to-clear of the raw bits.
- *       - everything else           -> store+echo (RMW chains stay stable).
- *     The copied pixels persist until the next refresh. The stock OS frees
- *     its source buffer after DMA completion; rereading it on gfx_update
- *     displays unrelated allocations and gives misleading UI screenshots.
- *
- *   sc6530_lcm @ 0x20800000, 0x1000 - the parallel DBI controller config
- *     bank (LCM_CR(0)/CR(0x10)/CR(0x14), drivers/lcd.c). Store+echo only:
- *     the panel init table execution (the 0x60000000 data window writes)
- *     is NOT modeled - the framebuffer DMA is what matters, and those
- *     window accesses fall into the todo-12 catch-all (logged, benign).
- *     CR(0) reads return 0 (bit 1 = busy clear), so the guest's
- *     lcm_wait_idle never spins.
- *
- * QemuConsole: created in realize (musicpal's pattern, hw/arm/musicpal.c),
- * 128x160 x8r8g8b8 (qemu_console_resize; the ST7735 panel is RGB565, we
- * convert in the render path). Headless: -display none + HMP screendump
- * <f>.png -f png (needs --enable-png, todo W2-9b).
- *
- * Trace: sc6530_lcdc_refresh(fb, pc) on every refresh trigger (fb = the
- * resolved framebuffer address, pc = the guest PC) - the refresh-detection
- * evidence channel. Enable with --trace "sc6530_lcdc_*".
- *
+/* SC6530C LCDC/DBI and the B310E ST7735 panel.
+ * Refresh composes enabled image/OSD layers over the LCDC background,
+ * using source pitch, position and the LCM crop, then streams the result
+ * into the panel's CASET/RASET window. Panel pixels persist after the
+ * guest frees its source buffers and across partial updates.
+ * Register offsets and RGB565 layout are verified against stock e52q7a.
+ * Unsupported color formats are logged rather than read as RGB565.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -60,6 +15,7 @@
 #include "qemu/bswap.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
 #include "ui/console.h"
@@ -117,6 +73,9 @@ struct Sc6530LcdcState {
     uint32_t irq_raw;         /* pending bits (bit 0 = DMA done) */
     uint8_t pixels[SC6530_LCDC_FB_BYTES]; /* latched RGB565 panel image */
     qemu_irq irq;
+    uint16_t column_start, column_end, row_start, row_end;
+    uint16_t gram_x, gram_y;
+    bool gram_write;
 };
 
 struct Sc6530LcmState {
@@ -129,6 +88,10 @@ struct Sc6530LcmState {
 
     uint32_t regs[SC6530_LCM_SIZE / 4];   /* store+echo bank */
     int rdid_state;
+    Sc6530LcdcState *lcdc;
+    uint8_t command, parameter_count, parameters[4];
+    uint8_t pixel_high;
+    bool have_pixel_high;
 };
 
 /* ---------------------------------------------------------------------- */
@@ -173,6 +136,176 @@ static uint32_t sc6530_lcdc_guest_pc(void)
     return 0;
 }
 
+static void sc6530_panel_pixel(Sc6530LcdcState *s, uint16_t pixel)
+{
+    if (!s->gram_write) {
+        return;
+    }
+    if (s->gram_x < SC6530_LCDC_W && s->gram_y < SC6530_LCDC_H) {
+        stw_le_p(s->pixels + 2 * (s->gram_y * SC6530_LCDC_W + s->gram_x), pixel);
+    }
+    if (++s->gram_x > s->column_end) {
+        s->gram_x = s->column_start;
+        if (++s->gram_y > s->row_end) {
+            s->gram_y = s->row_start;
+        }
+    }
+}
+
+static uint32_t sc6530_rgb565(uint16_t pixel)
+{
+    return ((pixel & 0xf800) << 8) | ((pixel & 0x07e0) << 5) |
+           ((pixel & 0x001f) << 3);
+}
+
+static uint16_t sc6530_to565(uint32_t rgb)
+{
+    return ((rgb >> 8) & 0xf800) | ((rgb >> 5) & 0x07e0) |
+           ((rgb >> 3) & 0x001f);
+}
+
+/* Image and OSD blocks share CTRL/BASE/SIZE/PITCH/POS offsets. A disabled
+ * block must never read its old, potentially freed source allocation. */
+static uint32_t sc6530_layer_pixel(Sc6530LcdcState *s, unsigned base,
+                                   unsigned x, unsigned y, uint32_t under)
+{
+    uint32_t *r = &s->regs[base / 4];
+    uint32_t ctrl = r[0], format = (ctrl >> 4) & 15;
+    unsigned w = r[3] & 0xfff, h = (r[3] >> 16) & 0xfff;
+    unsigned dx = r[5] & 0xfff, dy = (r[5] >> 16) & 0xfff;
+    unsigned pitch = r[4] & 0xfff, endian = (ctrl >> 8) & 3;
+    unsigned alpha = 255, sx, sy;
+    uint32_t rgb;
+    uint8_t bytes[4];
+    hwaddr addr;
+
+    if (!(ctrl & 1) || x < dx || y < dy || x - dx >= w || y - dy >= h || !pitch) {
+        return under;
+    }
+    sx = x - dx;
+    sy = y - dy;
+    if (format != 5 || (ctrl & 0x1c00)) {
+        return under; /* Only stock's unrotated RGB565 path is verified. */
+    }
+    addr = (hwaddr)r[1] << 2;
+    {
+        unsigned index = sy * pitch + sx;
+        uint16_t pixel;
+        /* DMA word order 2 sends low halfword first, MSB byte first:
+         * stock's 0x4251/0x0255 therefore read native little-endian RGB565.
+         * Order 0 sends the high halfword first; order 1 reverses bytes. */
+        addr += 2 * (endian == 0 || endian == 3 ? index ^ 1 : index);
+        address_space_read(&address_space_memory, addr,
+                           MEMTXATTRS_UNSPECIFIED, bytes, 2);
+        pixel = endian == 1 || endian == 3 ? lduw_be_p(bytes) : lduw_le_p(bytes);
+        rgb = sc6530_rgb565(pixel);
+    }
+    if (ctrl & (1 << 15)) {
+        rgb = (rgb & 0x00ff00) | ((rgb & 255) << 16) | (rgb >> 16);
+    }
+    if (base != 0x20) {
+        unsigned select = (ctrl >> 2) & 3;
+        if ((ctrl & 2) && sc6530_to565(rgb) == sc6530_to565(r[8])) {
+            return under;
+        }
+        {
+            /* RGB565 pixel alpha is a separate byte plane. */
+            hwaddr alpha_addr = ((hwaddr)r[2] << 2) + sy * pitch + sx;
+            if (select != 1) {
+                address_space_read(&address_space_memory, alpha_addr,
+                                   MEMTXATTRS_UNSPECIFIED, bytes, 1);
+                alpha = bytes[0];
+            }
+        }
+        if (select == 1) {
+            alpha = r[6] & 255;
+        } else if (select == 2) {
+            alpha = alpha * (r[6] & 255) / 255;
+        }
+        rgb = (((((rgb >> 16) & 255) * alpha + ((under >> 16) & 255) * (255-alpha)) / 255) << 16) |
+              (((((rgb >> 8) & 255) * alpha + ((under >> 8) & 255) * (255-alpha)) / 255) << 8) |
+              (((rgb & 255) * alpha + (under & 255) * (255-alpha)) / 255);
+    }
+    return rgb;
+}
+
+static void sc6530_lcdc_refresh_panel(Sc6530LcdcState *s)
+{
+    uint32_t cap_ctrl = s->regs[0xe0 / 4];
+    bool capture = cap_ctrl & 1;
+    unsigned size_reg = capture ? 0xec / 4 : 3;
+    unsigned start_reg = capture ? 0xe8 / 4 : 2;
+    unsigned width = s->regs[size_reg] & 0xfff;
+    unsigned height = (s->regs[size_reg] >> 16) & 0xfff;
+    unsigned x0 = s->regs[start_reg] & 0xfff;
+    unsigned y0 = (s->regs[start_reg] >> 16) & 0xfff;
+    unsigned disp_w = s->regs[1] & 0xfff, disp_h = (s->regs[1] >> 16) & 0xfff;
+    static const unsigned layers[] = { 0x20, 0xb0, 0x80, 0x50 };
+    uint16_t frame[SC6530_LCDC_W * SC6530_LCDC_H];
+
+    /* The physical output area bounds work even for corrupt guest sizes. */
+    width = MIN(width, SC6530_LCDC_W);
+    height = MIN(height, SC6530_LCDC_H);
+    if (capture && (((cap_ctrl >> 1) & 3) != 2 || (cap_ctrl & 0x700))) {
+        qemu_log_mask(LOG_UNIMP, "sc6530_lcdc: unsupported capture ctrl %x\n", cap_ctrl);
+        return;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(layers); i++) {
+        uint32_t ctrl = s->regs[layers[i] / 4];
+        unsigned format = (ctrl >> 4) & 15;
+        if ((ctrl & 1) && (format != 5 || (ctrl & 0x1c00))) {
+            qemu_log_mask(LOG_UNIMP, "sc6530_lcdc: unsupported layer %x ctrl %x\n",
+                          layers[i], ctrl);
+        }
+    }
+    for (unsigned y = 0; y < height; y++) {
+        for (unsigned x = 0; x < width; x++) {
+            uint32_t rgb = s->regs[4] & 0xffffff;
+            if (x + x0 < disp_w && y + y0 < disp_h) {
+                for (unsigned i = 0; i < ARRAY_SIZE(layers); i++) {
+                    if (capture && (cap_ctrl & (1 << 16)) && layers[i] == 0x20) {
+                        continue;
+                    }
+                    rgb = sc6530_layer_pixel(s, layers[i], x + x0, y + y0, rgb);
+                }
+            }
+            frame[y * width + x] = sc6530_to565(rgb);
+        }
+    }
+    if (capture) {
+        unsigned pitch = s->regs[0xf0 / 4] & 0xfff;
+        unsigned endian = (cap_ctrl >> 3) & 3;
+        hwaddr base = (hwaddr)s->regs[0xe4 / 4] << 2;
+        if (!pitch) {
+            return;
+        }
+        /* Latch the complete source before capture writes: stock composes
+         * into its own OSD buffer, then displays it with IMG disabled. */
+        for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+                unsigned index = y * pitch + x;
+                uint8_t bytes[2];
+                uint16_t pixel = frame[y * width + x];
+                if (cap_ctrl & (1 << 15)) {
+                    pixel = (pixel & 0x07e0) | ((pixel & 31) << 11) | (pixel >> 11);
+                }
+                if (endian == 1 || endian == 3) {
+                    stw_be_p(bytes, pixel);
+                } else {
+                    stw_le_p(bytes, pixel);
+                }
+                address_space_write(&address_space_memory,
+                                    base + 2 * (endian == 0 || endian == 3 ? index ^ 1 : index),
+                                    MEMTXATTRS_UNSPECIFIED, bytes, 2);
+            }
+        }
+    } else {
+        for (unsigned i = 0; i < width * height; i++) {
+            sc6530_panel_pixel(s, frame[i]);
+        }
+    }
+}
+
 /* ---------------------------------------------------------------------- */
 /* LCDC MMIO                                                              */
 /* ---------------------------------------------------------------------- */
@@ -206,19 +339,13 @@ static void sc6530_lcdc_write(void *opaque, hwaddr offset,
     unsigned shift = (offset % 4) * 8;
     uint32_t newv = (word & ~(mask << shift)) |
                     (((uint32_t)value & mask) << shift);
+    trace_sc6530_lcdc_write(SC6530_LCDC_BASE + offset, newv,
+                           sc6530_lcdc_guest_pc());
 
     switch (offset) {
     case SC6530_LCDC_CTRL_OFF:
         if (newv & SC6530_LCDC_CTRL_REFRESH) {
-            /* Start-refresh bit set (lcd_show's `ctrl |= 8`): copy the
-             * framebuffer out of PSRAM and complete the DMA synchronously.
-             * The guest then polls irq.raw bit 0 - set it so the poll
-             * exits on the first read. */
-            hwaddr fb_addr =
-                (hwaddr)s->regs[SC6530_LCDC_IMG_Y_BASE >> 2] << 2;
-            address_space_read(&address_space_memory, fb_addr,
-                               MEMTXATTRS_UNSPECIFIED, s->pixels,
-                               sizeof(s->pixels));
+            sc6530_lcdc_refresh_panel(s);
             sc6530_lcdc_render(s);
             s->irq_raw |= SC6530_LCDC_IRQ_DMA_DONE;
             trace_sc6530_lcdc_refresh(
@@ -316,6 +443,10 @@ static void sc6530_lcdc_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     memset(s->pixels, 0, sizeof(s->pixels));
+    s->column_start = s->row_start = s->gram_x = s->gram_y = 0;
+    s->column_end = SC6530_LCDC_W - 1;
+    s->row_end = SC6530_LCDC_H - 1;
+    s->gram_write = false;
     s->irq_raw = 0;
     qemu_set_irq(s->irq, 0);
 }
@@ -394,13 +525,51 @@ static uint64_t sc6530_lcm_data_read(void *opaque, hwaddr offset, unsigned size)
 static void sc6530_lcm_data_write(void *opaque, hwaddr offset, uint64_t val, unsigned size)
 {
     Sc6530LcmState *s = opaque;
+    Sc6530LcdcState *panel = s->lcdc;
+    trace_sc6530_lcm_command(offset, val, sc6530_lcdc_guest_pc());
     qemu_log_mask(LOG_UNIMP, "sc6530_lcm_data: w addr=0x%lx val=0x%lx\n", (long)offset, (long)val);
 
 
-    if (offset == 0 && val == 0x04) {
-        s->rdid_state = 1;
-    } else {
-        s->rdid_state = 0;
+    if (offset == 0) {
+        s->command = val & 255;
+        s->parameter_count = 0;
+        s->have_pixel_high = false;
+        s->rdid_state = s->command == 4 ? 1 : 0;
+        if (panel) {
+            panel->gram_write = s->command == 0x2c;
+            if (panel->gram_write) {
+                panel->gram_x = panel->column_start;
+                panel->gram_y = panel->row_start;
+            }
+        }
+    } else if (offset == 0x20000 && panel) {
+        if ((s->command == 0x2a || s->command == 0x2b) && s->parameter_count < 4) {
+            s->parameters[s->parameter_count++] = val & 255;
+            if (s->parameter_count == 4) {
+                uint16_t start = (s->parameters[0] << 8) | s->parameters[1];
+                uint16_t end = (s->parameters[2] << 8) | s->parameters[3];
+                /* Invalid windows consume no unbounded host work. */
+                if (end >= start) {
+                    if (s->command == 0x2a) {
+                        panel->column_start = start;
+                        panel->column_end = end;
+                    } else {
+                        panel->row_start = start;
+                        panel->row_end = end;
+                    }
+                }
+            }
+        } else if (s->command == 0x2c) {
+            /* The stock config uses an 8-bit DBI bus. Halfword/word MMIO
+             * writes still put the low byte on that bus. */
+            if (!s->have_pixel_high) {
+                s->pixel_high = val & 255;
+                s->have_pixel_high = true;
+            } else {
+                sc6530_panel_pixel(panel, (s->pixel_high << 8) | (val & 255));
+                s->have_pixel_high = false;
+            }
+        }
     }
 }
 
@@ -418,6 +587,8 @@ static void sc6530_lcm_reset(DeviceState *dev)
 
     memset(s->regs, 0, sizeof(s->regs));
     s->rdid_state = 0;
+    s->command = s->parameter_count = 0;
+    s->have_pixel_high = false;
 }
 
 static void sc6530_lcm_init(Object *obj)
@@ -439,6 +610,11 @@ static void sc6530_lcm_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "Spreadtrum SC6530 LCM DBI controller";
+    static const Property props[] = {
+        DEFINE_PROP_LINK("lcdc", Sc6530LcmState, lcdc, TYPE_SC6530_LCDC,
+                         Sc6530LcdcState *),
+    };
+    device_class_set_props(dc, props);
     device_class_set_legacy_reset(dc, sc6530_lcm_reset);
 }
 

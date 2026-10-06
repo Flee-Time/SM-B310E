@@ -236,6 +236,12 @@ def main():
         qt.write(0x80000008, 1 << 14)
         qt.write(0x20d00110, 1)
         qt.write(0x20d00024, 0x34040000 >> 2)
+        qt.write(0x20d00020, 0x251)
+        qt.write(0x20d00004, 128 | (160 << 16))
+        qt.write(0x20d0000c, 128 | (160 << 16))
+        qt.write(0x20d0002c, 128 | (160 << 16))
+        qt.write(0x20d00030, 128)
+        qt.write(0x60000000, 0x2c)
         qt.write(0x20d00000, 8)
         assert qt.read(0x20d00118) == qt.read(0x20d0011c) == 1
         assert qt.read(0x80000000) == 1 << 14
@@ -265,13 +271,32 @@ def main():
         qt.write(0x8100004c, 9)
         qt.advance(2_000_000)
         assert qt.read(0x8100004c) == 1
+        # Stock uses 780 counts for a 30 us SPI delay. It must expire at
+        # that deadline, and an acknowledged one-shot cannot retrigger.
+        qt.write(0x81000040, 780)
+        qt.write(0x81000048, 0x80)
+        qt.advance(29_000)
+        assert qt.read(0x8100004c) == 1
+        qt.advance(2_000)
+        assert qt.read(0x8100004c) == 7
+        qt.write(0x8100004c, 9)
+        qt.advance(1_000_000)
+        assert qt.read(0x8100004c) == 1
+        qt.write(0x81000040, 26000)
         qt.write(0x2070002c, 0x07000001)
         assert qt.read(0x2070002c) == 3  # reset clears, internal clock stable
-        assert qt.read(0x20700024) == 0  # no card
+        assert not (qt.read(0x20700024) & (1 << 16))  # no card inserted
+        qt.write(0x2070002c, 7)  # enable the SD clock before issuing a command
+        qt.write(0x20700034, 0x00018001)
+        qt.write(0x20700038, 0x00018001)
         qt.write(0x2070000c, 0x081a0000)
-        assert qt.read(0x20700030) == 0x18000  # command timeout
-        qt.write(0x20700030, 0x18000)
+        assert qt.read(0x20700030) & 0x18000 == 0x18000  # command timeout
+        assert qt.read(0x207001fc) & 1  # SC6530C slot IRQ dispatcher alias
+        assert qt.read(0x207001fc) == qt.read(0x207000fc)
+        assert qt.read(0x80000004) & (1 << 28)
+        qt.write(0x20700030, 0xffffffff)
         assert qt.read(0x20700030) == 0
+        assert qt.read(0x207001fc) & 1 == 0
         qt.write(0x81000048, 0xc0)
         qt.advance(2_000_000)
         assert qt.read(0x8100004c) == 7

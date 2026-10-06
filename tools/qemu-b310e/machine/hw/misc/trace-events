@@ -28,6 +28,8 @@ sc6530_ana_write(uint64_t addr, uint64_t val, uint32_t pc) "ANA write addr=0x%" 
 # (y_base_addr << 2), pc = the guest PC. Enable with --trace
 # "sc6530_lcdc_*".
 sc6530_lcdc_refresh(uint64_t fb, uint32_t pc) "LCDC refresh fb=0x%" PRIx64 " pc=0x%08" PRIx32
+sc6530_lcdc_write(uint64_t addr, uint32_t value, uint32_t pc) "LCDC write addr=0x%" PRIx64 " val=0x%08x pc=0x%08x"
+sc6530_lcm_command(uint64_t offset, uint64_t value, uint32_t pc) "LCM offset=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08x"
 
 # sc6530_dsp.c - the DSP fake (docs/audio-dsp-protocol.md "DSP-fake-spec"
 # section 6). Single event with a 12-value id enum (defined in
@@ -52,6 +54,7 @@ sc6530_dsp_cmd(uint32_t id, uint32_t arg, uint32_t pc) "DSP cmd id=%u arg=0x%08"
 # sc6530_uart.c - SC6530 UART1 debug console
 sc6530_uart_tx(uint32_t byte, uint32_t pc) "UART1 TX byte=0x%02x pc=0x%08x"
 sc6530_dma_transfer(unsigned channel, size_t bytes, uint32_t remaining) "DMA ch=%u bytes=%zu remaining=%u"
+sc6530_dma_write(uint64_t addr, uint64_t value, uint32_t pc) "DMA write addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
 sc6530_vbc_bank(unsigned bank, unsigned frames, unsigned queued) "VBC bank=%u frames=%u queued=%u"
 sc6530_vbc_rate(unsigned mode, unsigned rate) "VBC FS mode=%u rate=%u"
 sc6530_timer_tick(uint32_t load, uint32_t ctl) "load=%u ctl=0x%x"

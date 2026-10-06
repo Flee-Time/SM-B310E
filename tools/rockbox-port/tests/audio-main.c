@@ -138,7 +138,9 @@ int main(void)
         !output_matches(!TEST_HEADSET) || !shared_state_preserved())
         finish(false);
     pcm_set_frequency(TEST_RATE);
-    pcm_set_master_volume(TEST_VOLUME, TEST_VOLUME);
+    /* Exercise sound.c's codec hook; calling the scaler directly hid a
+     * silent full-player integration bug in the original driver. */
+    audiohw_set_volume(TEST_VOLUME);
     pcm_sync_pcm_factors();
     for (unsigned i = 0; i < FRAMES; i++)
     {

@@ -14,6 +14,8 @@
 #include "qemu/bswap.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/core/cpu.h"
+#include "target/arm/cpu.h"
 #include "system/address-spaces.h"
 #include "trace.h"
 
@@ -22,7 +24,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530DmaState, SC6530_DMA)
 size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes);
 
 #define DMA_CHANNELS 32
-#define DMA_SIZE 0x2000
+#define DMA_SIZE 0x3000
+#define UID_BASE 0x2000
+#define UID_COUNT 64
 #define CH_BASE 0x1000
 #define CH_STRIDE 0x40
 #define CH_PAUSE 0
@@ -48,6 +52,7 @@ struct Sc6530DmaState {
     MemoryRegion iomem;
     qemu_irq irq;
     uint32_t global[CH_BASE / 4];
+    uint32_t request_map[UID_COUNT]; /* one-based hardware request -> channel */
     Sc6530DmaChannel channel[DMA_CHANNELS];
 };
 
@@ -155,21 +160,29 @@ static size_t sc6530_dma_transfer(Sc6530DmaState *s, unsigned id,
 size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes)
 {
     Sc6530DmaState *s = SC6530_DMA(obj);
-    size_t done = 0;
-
-    for (unsigned i = 0; i < DMA_CHANNELS && done < bytes; i++) {
-        if (s->channel[i].reg[CH_DST] == destination) {
-            done += sc6530_dma_transfer(s, i, bytes - done);
-        }
+    /* Stock 0xa7b96 maps DA0 request15 at +0x2038 to channel4,
+     * DA1 request16 at +0x203c to channel3 (all one-based). A destination
+     * match alone bypasses this routing and lets an incomplete driver play. */
+    unsigned request = destination == 0x82003000 ? 15 :
+                       destination == 0x82003004 ? 16 : 0;
+    if (!request) {
+        return 0;
     }
-    return done;
+    unsigned channel = s->request_map[request - 1];
+    if (!channel || channel > DMA_CHANNELS ||
+        s->channel[channel - 1].reg[CH_DST] != destination) {
+        return 0;
+    }
+    return sc6530_dma_transfer(s, channel - 1, bytes);
 }
 
 static uint64_t sc6530_dma_read(void *opaque, hwaddr offset, unsigned size)
 {
     Sc6530DmaState *s = opaque;
     uint32_t val;
-    if (offset >= CH_BASE) {
+    if (offset >= UID_BASE && offset < UID_BASE + sizeof(s->request_map)) {
+        val = s->request_map[(offset - UID_BASE) / 4];
+    } else if (offset >= CH_BASE && offset < CH_BASE + DMA_CHANNELS * CH_STRIDE) {
         unsigned ch = (offset - CH_BASE) / CH_STRIDE;
         unsigned reg = (offset % CH_STRIDE) / 4;
         val = s->channel[ch].reg[reg];
@@ -178,7 +191,7 @@ static uint64_t sc6530_dma_read(void *opaque, hwaddr offset, unsigned size)
         } else if (reg == CH_INT) {
             val |= (((val >> 8) & val & 0x1f) << 16);
         }
-    } else {
+    } else if (offset < CH_BASE) {
         val = s->global[offset / 4];
         if ((offset & ~3) == 0) {
             val = (val & 1) | ((val & 1) << 16);
@@ -195,6 +208,8 @@ static uint64_t sc6530_dma_read(void *opaque, hwaddr offset, unsigned size)
                 val |= (s->channel[i].reg[CH_CFG] & 1) << i;
             }
         }
+    } else {
+        val = 0; /* reserved gaps must not index past the channel array */
     }
     return (val >> ((offset & 3) * 8)) &
            (size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1);
@@ -208,9 +223,20 @@ static void sc6530_dma_write(void *opaque, hwaddr offset,
     uint32_t mask = size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
     uint32_t *word;
 
+    trace_sc6530_dma_write(0x20100000 + offset, value,
+                          current_cpu ? ARM_CPU(current_cpu)->env.regs[15] : 0);
+    if (offset >= UID_BASE && offset < UID_BASE + sizeof(s->request_map)) {
+        word = &s->request_map[(offset - UID_BASE) / 4];
+        *word = (*word & ~(mask << shift)) | ((value & mask) << shift);
+        return;
+    }
+
     if (offset < CH_BASE) {
         word = &s->global[offset / 4];
         *word = (*word & ~(mask << shift)) | ((value & mask) << shift);
+        return;
+    }
+    if (offset >= CH_BASE + DMA_CHANNELS * CH_STRIDE) {
         return;
     }
     unsigned ch = (offset - CH_BASE) / CH_STRIDE;
@@ -254,6 +280,7 @@ static void sc6530_dma_reset(DeviceState *dev)
 {
     Sc6530DmaState *s = SC6530_DMA(dev);
     memset(s->global, 0, sizeof(s->global));
+    memset(s->request_map, 0, sizeof(s->request_map));
     memset(s->channel, 0, sizeof(s->channel));
     sc6530_dma_irq(s);
 }

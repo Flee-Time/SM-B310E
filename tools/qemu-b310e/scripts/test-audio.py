@@ -158,6 +158,8 @@ def test_dma(args, standard=False):
     with machine(args, "dma-standard" if standard else "dma-full") as (qt, qmp, out):
         configure(qt)
         qt.write(0x80000008, 1 << 20)
+        qt.write(0x20102038, channels[0] + 1)
+        qt.write(0x2010203c, channels[1] + 1)
         for ch, source, destination, sign in [(channels[0], 0x34010000, 0x82003000, 1),
                                                (channels[1], 0x34011000, 0x82003004, -1)]:
             qt.memory(source, struct.pack("<512h", *[sign * (1000 + i) for i in range(512)]))
@@ -213,6 +215,33 @@ def test_copy(args):
     print("PASS software DMA: memory copy, completion, reset")
 
 
+def test_request_route(args):
+    with machine(args, "request-routing") as (qt, qmp, out):
+        configure(qt)
+        base = 0x201010c0  # one-based channel4
+        qt.memory(0x34010000, struct.pack('<64h', *range(1, 65)))
+        for off, val in [(0x10, 0x34010000), (0x14, 0x82003000),
+                         (0x18, 0x50300080), (0x1c, 128), (0x0c, 2), (8, 0x3001)]:
+            qt.write(base + off, val)
+        qt.write(0x82003018, 0xa000)
+        qmp.command('cont')
+        qt.advance(10_000_000)
+        assert qt.read(base + 0x1c) == 128  # destination match is insufficient
+        qt.write(0x20102038, 3)  # wrong channel cannot service DA0
+        qt.advance(10_000_000)
+        assert qt.read(base + 0x1c) == 128
+        qt.write(0x20102038, 4)
+        qt.advance(10_000_000)
+        assert qt.read(base + 0x1c) == 0
+        assert qt.read(0x20100010) == 8
+        # Reserved gaps must not index beyond the 32-channel state array.
+        qt.write(0x20101ffc, 0xffffffff)
+        assert qt.read(0x20101ffc) == 0
+        qmp.command('system_reset')
+        assert qt.read(0x20102038) == 0
+    print('PASS VBC request routing: unmapped/wrong channel stalls, correct UID progresses, reset')
+
+
 def test_standard_fill(args):
     # Actual ringtone initialization encoding observed in stock channel3.
     # A wrong width/fixed-address interpretation writes across VBC controls.
@@ -255,6 +284,7 @@ def main():
     args.qemu = args.qemu.resolve()
     args.output = args.output.resolve()
     test_copy(args)
+    test_request_route(args)
     test_standard_fill(args)
     test_cpu(args)
     test_cpu(args, mode=1, rate=48000)

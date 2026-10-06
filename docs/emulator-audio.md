@@ -1,4 +1,4 @@
-# Stock boot and audio bring-up — 2026-10-04
+# Stock boot and audio bring-up — 2026-10-06
 
 The ARM audio path now produces verified PCM through QEMU's audio backend:
 CPU-filled ping-pong banks and DMA-fed stereo playback both work. The stock
@@ -16,6 +16,15 @@ peak 19106 and no clipped samples. The firmware image is unpatched.
 Full phone operation, exact sound fidelity and DSP-controlled audio remain
 unfinished. Earlier silence captures exposed missing MIDI synthesis, incorrect
 DMA progress reporting and an incorrect mute-enable interpretation.
+
+The current model also fixes short one-shot timer polling, composes the
+stock RGB565 image/OSD layers, handles RAM capture and retains partial panel
+updates. In a controlled comparison, the initial SM-B310E screen remained
+visible for about 20.1 seconds before the timer fix and 3.0 seconds after it.
+The time/date prompt appeared at about 19 seconds in the updated capture.
+A 150-second navigation/idle run remained responsive, including entering
+digits in Contacts and waking the locked keypad after an idle interval.
+This does not establish that every stock freeze is resolved.
 
 ## Inputs and provenance
 
@@ -83,6 +92,7 @@ $qemu = 'D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe'
 & $python tools/qemu-b310e/scripts/test-audio.py --qemu $qemu --output tools/qemu-b310e/logs/tests-audio
 & $python tools/qemu-b310e/scripts/test-midi.py --qemu $qemu --output tools/qemu-b310e/logs/tests-midi
 & $python tools/qemu-b310e/scripts/test-bringup.py --qemu $qemu --output tools/qemu-b310e/logs/tests-bringup
+& $python tools/qemu-b310e/scripts/test-display.py --qemu $qemu --output tools/qemu-b310e/logs/tests-display
 & $python tools/qemu-b310e/scripts/test-lzma.py --qemu $qemu --output tools/qemu-b310e/logs/tests-lzma --firmware D:/floppy/phonefirmware/e52q7a.bin
 ```
 
@@ -95,7 +105,9 @@ Verified checks:
   stock standard-channel halfword FIFO-fill encoding preserves VBC controls
   and produces 160 exact samples. Standard and full channels each produce
   512 exact stereo frames; the standard remaining-byte counter is checked
-  during playback, not only after completion.
+  during playback, not only after completion. Unset/wrong hardware request
+  mappings stall; the correct DA0/DA1 mappings permit progress and reset
+  clears them. Reserved channel gaps cannot index past the channel array.
 - Flash: aligned JEDEC ID, WEL, byte TX writes, native halfwords, 1→0
   programming, erase, stale TX slot clearing and an unchanged input file.
 - Battery conversion, RTC updates/acknowledgements and analog IRQ24, IRQ/FIQ
@@ -104,6 +116,13 @@ Verified checks:
   LCDC completion IRQ14 and retained pixels after the guest reuses the DMA
   buffer, GPIO input/mask/direction/reset, keypad press/release IRQ8 and W1C, DSP download
   IRQ13, absent SD card and reset.
+- Display: disabled/freed image source, OSD2, source pitch/crop, partial
+  CASET/RASET windows, layer placement, color key, block alpha, direct DBI
+  bytes and RGB565 RAM capture followed by display. Panel reset clears pixels.
+- The complete Rockbox application mounts a generated FAT16 image and plays
+  its stereo test track through the WAV codec; see [rockbox-audio.md](rockbox-audio.md).
+  Stock also boots with an attached copy of the image and performs CMD17/18
+  reads and CMD24/25 writes before reaching its time/date prompt.
 - LZMA: exact synthetic output, slices/intermediate buffers, IRQ30/W1C,
   truncated input, buffer bounds, source mapping bounds and reset.
 - MIDI: synthetic RAM/flash samples, 8/16-bit stereo/mono output, two linked
@@ -152,11 +171,11 @@ nonzero stereo output and writes `audio-stats.json`. The per-key screenshots
 make navigation failures reviewable. Increase `--boot-seconds` on a slower
 host; `--play-seconds` controls the final preview duration (15 by default).
 This recipe is specific to the dump hash above and uses no guest RAM patches.
-The automated fresh-boot run passed with `--boot-seconds 65 --play-seconds 10`:
-243970 stereo frames at 44.1 kHz, 469457 nonzero samples, peak 17330, no clipped
-samples and no MIDI DMA errors. Host wall time and emulated audio duration
-differ when the firmware consumes CPU time; this recording is about 5.5 seconds.
-Evidence is in the ignored `logs/stock-ringtone-repro` capture directory.
+The updated fresh-boot run passed with `--boot-seconds 36 --play-seconds 15`:
+657222 stereo frames at 44.1 kHz, 1311560 nonzero samples, peak17325 and no
+clipped samples. Ringtone icons and selection controls render correctly.
+Host wall time and emulated audio duration differ when the firmware consumes
+CPU time. Evidence is in the ignored `logs/stock-ringtone-lcd-timer` directory.
 
 The NOR input opens read-only. Flash writes affect QEMU's private memory copy
 so stock initialization can program its filesystem without modifying the dump.
@@ -189,14 +208,27 @@ Display completion similarly needs IRQ14 to wake the stock LCD task.
 Display pixels persist after the DMA source buffer is freed. Reading live
 guest memory for every screenshot previously displayed unrelated allocations.
 The refresh START strobe clears after completion, so a later controller
-enable does not transfer that freed buffer again. Layer composition and
-partial panel windows remain incomplete; some menu graphics are absent.
+enable does not transfer that freed buffer again. Partial panel windows
+now use the panel's CASET/RASET/RAMWR cursor. Enabled image/OSD layers use
+their source pitch, position and LCM crop. The stock also composes RGB565
+into RAM through CAP +0xe0..+0xf0, then displays that allocation as OSD2
+with IMG disabled. Ignoring capture or reading the disabled image's freed
+source caused missing icons and textbox corruption. Unrotated RGB565 is
+verified; other formats and rotation are logged as unsupported. Panel
+initialization, scaling and blend precision remain partial.
 Stopping timer0/1 preserves the current count: stock stops before measuring
 elapsed time. The system alarm compares an absolute 32-bit millisecond
 deadline; acknowledging it must not turn a past deadline into a 1 ms loop.
 The keypad matrix raises IRQ8 for press/release latches. Stock's key table at
 NOR `0xc6e70` indexes `column * 8 + row`, with positions matching the host
 key map (F1/F2 soft keys, Return centre, arrows and digits).
+
+Stock PSRAM `0x040109ba` polls timer2's 780-count one-shot for a 30 µs SPI
+delay. Waiting only for the host's timer callback stretches thousands of
+these delays during boot. Status reads now observe the real 26 MHz virtual
+countdown: when it reaches zero, they latch completion and cancel the delayed
+callback. No earlier completion or guest clock jump is introduced. Tests
+check pending remains clear at 29 µs, sets at 31 µs, and stays clear after ACK.
 
 The ARM LCD wrapper at `0x15520` repeatedly reads GPIO49 and re-enters the
 panel sleep/wake callback while it reads low. GPIO49 maps to DATA
@@ -272,6 +304,8 @@ already left the DAC drains to the host backend before output deactivates.
 | Block | Implemented contract |
 |---|---|
 | DMA `0x20100000` | 32 channels at +0x1000, stride0x40; stock width/length/step fields; IRQ20 |
+| DMA request map | +0x2000, stride4; one-based request15/16 select one-based channel4/3 for DA0/DA1 |
+| SDIO `0x20700000` | SDHCI command/data/card model; IRQ28; slot-status alias +0x1fc; optional backend `id=sdcard` |
 | MIDI `0x20b00000` | +0 start/busy; +4 stereo/8-or-16-bit/block/polyphony config; +8 IRQ control; +0xc result; +0x10 voice list; +0x14 32-bit mixer output; shared IRQ30 |
 | VBC `0x82003000` | left/right DAC ports +0/+4; size−1 at +0x10 bits15:8; two banks of up to160 frames |
 | VBC control +0x18 | bank bit9, RAM access bit10, DAC DMA bits13/14, playback bit15 |
@@ -291,4 +325,4 @@ The wavetable model does not yet apply the voice filter, and its exponential
 pitch/gain math, noise generator, boundary interpolation and completion timing
 are not bit-exact hardware claims. Recording, analog gain/PA behaviour, DMA
 linked lists/wrapping/swapping, other hardware DMA requests, high-speed
-timers3..5, SD storage, modem operation and complete migration are unmodeled.
+timers3..5, modem operation and complete migration are unmodeled.

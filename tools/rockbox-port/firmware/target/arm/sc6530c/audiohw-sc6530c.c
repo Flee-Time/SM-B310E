@@ -6,6 +6,7 @@
 #include "system.h"
 #include "audiohw.h"
 #include "pcm_sampr.h"
+#include "pcm_sw_volume.h"
 #include "audio-target.h"
 
 /* The running stock codec pointer at 0x042354b0 contains 0x82001a00.
@@ -278,7 +279,9 @@ void audiohw_close(void)
 
 void audiohw_set_volume(int val)
 {
-    /* Rockbox's software volume scales the interleaved samples once,
-     * before they reach this sink. Analog gains retain the stock values. */
-    (void)val;
+    /* sound.c supplies tenths of a dB. The software PCM scaler starts
+     * muted until this hook sets its master factors. Keep the captured
+     * analog gains fixed and apply the user's volume before deinterleave. */
+    pcm_set_master_volume(val <= -1000 ? INT_MIN : val,
+                          val <= -1000 ? INT_MIN : val);
 }

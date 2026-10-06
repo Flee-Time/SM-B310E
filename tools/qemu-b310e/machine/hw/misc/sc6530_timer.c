@@ -62,6 +62,7 @@ struct Sc6530TimerState {
     bool int_enable;     /* SYS_TIMER2_INT bit0: IRQ output enabled */
     bool pending;        /* SYS_TIMER2_INT bit2: tick fired, not cleared */
 
+    bool oneshot_running;
     uint32_t sys_ctl;    /* sys-timer +0x8: last written value (echo) */
     uint32_t sys_ms_b0;  /* sys-timer +0xc: bit-0 write echo */
 };
@@ -118,12 +119,14 @@ static void sc6530_timer_tick(void *opaque)
      * line stays up until the guest clears the source (write-9 to +0xc).
      * The ptimer keeps running periodically from its load value. */
     s->pending = true;
+    s->oneshot_running = false;
     trace_sc6530_timer_tick(s->load, s->ctl);
     sc6530_timer_update_irq(s);
 }
 
 static void sc6530_timer2_run(Sc6530TimerState *s)
 {
+    s->oneshot_running = !(s->ctl & 0x40);
     /* Reload the countdown at 26 MHz; CTL selects one-shot or periodic. */
     ptimer_transaction_begin(s->ptimer);
     ptimer_set_limit(s->ptimer,
@@ -137,6 +140,7 @@ static void sc6530_timer2_run(Sc6530TimerState *s)
 
 static void sc6530_timer2_stop(Sc6530TimerState *s)
 {
+    s->oneshot_running = false;
     ptimer_transaction_begin(s->ptimer);
     ptimer_stop(s->ptimer);
     ptimer_transaction_commit(s->ptimer);
@@ -152,9 +156,21 @@ static uint64_t sc6530_timer2_read(void *opaque, hwaddr offset,
     Sc6530TimerState *s = opaque;
     uint64_t val = 0;
 
+    /* The stock SPI delay polls a 780-count (30 us) one-shot at PSRAM
+     * 0x040109ba. Host event-loop wakeups can arrive much later than its
+     * deadline. Observe the actual virtual countdown on a status read,
+     * then cancel the delayed callback so ACK cannot get a second tick. */
+    if (s->oneshot_running && ptimer_get_count(s->ptimer) == 0) {
+        sc6530_timer2_stop(s);
+        sc6530_timer_tick(s);
+    }
+
     switch (offset) {
     case SC6530_TIMER2_LOAD:
         val = s->load;
+        break;
+    case 0x44:
+        val = ptimer_get_count(s->ptimer);
         break;
     case SC6530_TIMER2_CTL:
         val = s->ctl;
@@ -357,7 +373,7 @@ static void sc6530_timer_finalize(Object *obj)
 
 static const VMStateDescription sc6530_timer_vmsd = {
     .name = "sc6530_timer",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 1,
     .fields = (const VMStateField[]) {
         VMSTATE_PTIMER(ptimer, Sc6530TimerState),
@@ -370,6 +386,7 @@ static const VMStateDescription sc6530_timer_vmsd = {
         VMSTATE_UINT32_V(sys_alarm, Sc6530TimerState, 2),
         VMSTATE_BOOL_V(sys_pending, Sc6530TimerState, 2),
         VMSTATE_TIMER_PTR_V(sys_alarm_timer, Sc6530TimerState, 2),
+        VMSTATE_BOOL_V(oneshot_running, Sc6530TimerState, 3),
         VMSTATE_END_OF_LIST()
     }
 };
