@@ -107,13 +107,13 @@ sleep timer or emergency low-voltage shutdown.
 
 ## Validation
 
-`tools/rockbox-port/tests/test-audio.py` runs the real ARM startup, interrupt
+`ports/rockbox/tests/test-audio.py` runs the real ARM startup, interrupt
 dispatcher, PCM core, codec, keypad driver and DMA sink. Its waits now use
 the same masked-IRQ `core_sleep()` sequence as `core_idle()`, rather than
 a separate assembly sleep instruction. The 39 playback/rate/gain/hotplug
 cases pass with timer and DMA wakeups.
 
-`tools/rockbox-port/tests/test-idle-power.py` boots the complete player with
+`ports/rockbox/tests/test-idle-power.py` boots the complete player with
 a private FAT32 image, a two-second backlight timeout and the stereo test
 WAV. It checks the linked idle instruction, advancing kernel ticks, IRQ8
 key delivery without stray IRQs, LCDC disable, stopped display transfers,
@@ -122,13 +122,13 @@ asleep and paused sleep/resume. It observes registers and uses normal keypad inp
 not replace guest code or write guest RAM. Example:
 
 ```powershell
-python tools/rockbox-port/tests/test-idle-power.py `
+python ports/rockbox/tests/test-idle-power.py `
   --qemu /path/to/qemu-system-arm.exe `
   --rockbox sdcard/progs/rockbox.bin `
   --elf build/rockbox/build-b310e/rockbox.elf `
   --toolchain /path/to/arm-toolchain/bin `
   --runtime sdcard/.rockbox `
-  --output tools/qemu-b310e/logs/idle-power
+  --output emulator/qemu/logs/idle-power
 ```
 
 Repeat with `--headset` to cover the other output. QEMU also retains panel

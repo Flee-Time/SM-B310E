@@ -24,6 +24,6 @@ SOFTWARE.
 
 NOTICE: this repository is a mixed-license work. The B310E-OS original code is
 MIT (above). The fpdoom-derived portions (drivers, boot stubs, and the
-tools/fpmain port tooling) are Unlicense / public domain per fpdoom's own
-license. The Rockbox port in tools/rockbox-port/ is GPLv2 (Rockbox's license).
-See README.md and tools/rockbox-port/patches/PATCHES.md for the component map.
+ports/fpmain port tooling) are Unlicense / public domain per fpdoom's own
+license. The Rockbox port in ports/rockbox/ is GPLv2 (Rockbox's license).
+See README.md and ports/rockbox/patches/PATCHES.md for the component map.

@@ -60,16 +60,16 @@ the compiler directories. Windows uses MSYS2 bash through the PS wrapper.
 ```powershell
 $env:B310E_TOOLCHAIN = '/d/floppy/.tools/arm-toolchain/bin'
 $env:B310E_HOST_CC = '/c/msys64/mingw64/bin'
-& tools/fpmain/build-fpmain.ps1
+& ./build.ps1 fpmain
 # Host tests of the exact parser and argument packing:
-& C:/msys64/mingw64/bin/python.exe tools/fpmain/tests/test-config.py `
+& C:/msys64/mingw64/bin/python.exe ports/fpmain/tests/test-config.py `
   --cc C:/msys64/mingw64/bin/gcc.exe
 # ARM startup, directory filtering, ROM selection and actual launch args:
-& C:/msys64/mingw64/bin/python.exe tools/fpmain/tests/test-boot.py `
+& C:/msys64/mingw64/bin/python.exe ports/fpmain/tests/test-boot.py `
   --qemu D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe `
   --firmware D:/floppy/phonefirmware/e52q7a.bin `
   --toolchain D:/floppy/.tools/arm-toolchain/bin `
-  --output tools/qemu-b310e/logs/fpmain-boot
+  --output emulator/qemu/logs/fpmain-boot
 ```
 
 The ARM test uses generated FAT32 cards and an original tiny launcher/ROM
@@ -83,7 +83,7 @@ boot still needs a retest. Copy the built `sdcard/fpbin/fpmain.bin` and
 For a shared Rockbox/menu emulator card, generate FAT32 (fpdoom requires it):
 
 ```powershell
-& C:/msys64/mingw64/bin/python.exe tools/rockbox-port/tests/make-sd-image.py `
+& C:/msys64/mingw64/bin/python.exe ports/rockbox/tests/make-sd-image.py `
   --fat32 --fpmain sdcard/fpbin/fpmain.bin --config sdcard/fpbin/config.json --force
 ```
 
@@ -126,7 +126,7 @@ format (verified against the stock build):
   `sys_init` (LCD/keypad from the firmware-dump scan) → `main()`.
 
 **The port is DONE (2026-08-23): the current `fpmain.bin` (30252 B, built by
-`tools/fpmain/build-fpmain.ps1`) is the fpmenu skeleton with OUR boot menu**
+`build.ps1 fpmain`) is the fpmenu skeleton with OUR boot menu**
 — **BOOT STOCK** + the card's **progs/** (OS-like / single apps, no args) +
 the **fpbin/config.json ports and discovered ROMs**, launched with their
 configured arguments.
@@ -144,14 +144,14 @@ avoids the SC6531E-only target computed by the original fpmenu.
 via the readbin (diff 0), or self-relocates to `0x34000000` when USB-loaded
 (`spd_dump fdl os.bin ram` — the SC6530 ram_addr, spd_dump.c:1319). The old
 remap-cascade stub (`menu_stub.s`) is retired (gc'd out). The stock fpmenu is
-kept as `tools/fpmain/fpmain.bin.stock-backup`.
+kept as `ports/fpmain/fpmain.bin.stock-backup`.
 
 The old `make fpmain` target (our `menu.bin` built as the payload) is
 **obsolete**: it assumed sdboot loads the payload to `0x34000000`, but the
 real loader copies to `0x04000000` (MEM_REMAP=0), where our menu cannot run.
 Both `make menu`/`menu.bin` (the merged-boot menu) and `make fpmain` were
 **removed from the Makefile 2026-08-28** — the boot menu is exclusively the
-ported fpmain from `tools/fpmain/` (below).
+ported fpmain from `ports/fpmain/` (below).
 
 ## History — why "our menu.bin as fpmain.bin" never loaded
 
@@ -178,7 +178,7 @@ SC6530.
 
 ```
 fpbin/fpmain.bin   the sdboot payload = OUR boot menu (the ported fpmain,
-                   built by tools/fpmain/build-fpmain.ps1)
+                   built by build.ps1 fpmain)
 fpbin/config.txt   the PORTS menu (fpdoom format: |Name| path args ...) —
                    the games listed here launch with their args
 fpbin/*.bin        the fpdoom game binaries (fpdoom.bin, infones.bin, ...)
@@ -197,7 +197,7 @@ generates there (entries with missing binaries are skipped).
 ## Build (the ported fpmain menu + the card)
 
 The fpdoom clone lives at `build\fpdoom` (cloned automatically by
-`tools/fpmain/build-fpmain.ps1` on first use; pinned revision above). The
+`build.ps1 fpmain` on first use; pinned revision above). The
 loader itself is **not** built — we use the stock prebuilt `sdboot3.bin`
 from the fpdoom release.
 
@@ -206,9 +206,9 @@ from the fpdoom release.
 $env:Path = "C:\Program Files\Git\usr\bin;" + $env:Path
 
 # 1. the PORTED fpmain app (our boot menu on the fpmenu skeleton) — stages
-#    sources into fpdoom\fpmenu, builds, copies to tools\fpmain\fpmain.bin +
+#    sources into fpdoom\fpmenu, builds, copies to ports\fpmain\fpmain.bin +
 #    sdcard\fpbin\fpmain.bin, restores the clone.
-powershell -ExecutionPolicy Bypass -File tools\fpmain\build-fpmain.ps1
+powershell -ExecutionPolicy Bypass -File build.ps1 fpmain
 
 # 2. os.bin / os-sd.bin — RELOCATABLE (linked 0x14000000, -pie, .rel appended
 #    by the vendored pack_reloc; start.s applies it). Run WITHOUT git bash on

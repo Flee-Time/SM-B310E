@@ -69,7 +69,7 @@ pacman -S --needed base-devel git mingw-w64-x86_64-gcc mingw-w64-x86_64-glib2 mi
 From the repository in PowerShell:
 
 ```powershell
-& tools/qemu-b310e/scripts/build-local.ps1 -QemuSrc D:/floppy/.tools/qemu-b310e-src
+& ./build.ps1 qemu --qemu-source D:/floppy/.tools/qemu-b310e-src
 ```
 
 This clones QEMU if the destination is absent, verifies the pin, installs the
@@ -89,11 +89,11 @@ RAM/NOR data. Only the optional LZMA stock check reads the phone dump.
 ```powershell
 $python = 'C:/msys64/mingw64/bin/python.exe'
 $qemu = 'D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe'
-& $python tools/qemu-b310e/scripts/test-audio.py --qemu $qemu --output tools/qemu-b310e/logs/tests-audio
-& $python tools/qemu-b310e/scripts/test-midi.py --qemu $qemu --output tools/qemu-b310e/logs/tests-midi
-& $python tools/qemu-b310e/scripts/test-bringup.py --qemu $qemu --output tools/qemu-b310e/logs/tests-bringup
-& $python tools/qemu-b310e/scripts/test-display.py --qemu $qemu --output tools/qemu-b310e/logs/tests-display
-& $python tools/qemu-b310e/scripts/test-lzma.py --qemu $qemu --output tools/qemu-b310e/logs/tests-lzma --firmware D:/floppy/phonefirmware/e52q7a.bin
+& $python emulator/qemu/scripts/test-audio.py --qemu $qemu --output emulator/qemu/logs/tests-audio
+& $python emulator/qemu/scripts/test-midi.py --qemu $qemu --output emulator/qemu/logs/tests-midi
+& $python emulator/qemu/scripts/test-bringup.py --qemu $qemu --output emulator/qemu/logs/tests-bringup
+& $python emulator/qemu/scripts/test-display.py --qemu $qemu --output emulator/qemu/logs/tests-display
+& $python emulator/qemu/scripts/test-lzma.py --qemu $qemu --output emulator/qemu/logs/tests-lzma --firmware D:/floppy/phonefirmware/e52q7a.bin
 ```
 
 Verified checks:
@@ -143,9 +143,9 @@ The separate stock ringtone capture below provides that integration evidence.
 ## Capture the stock OS
 
 ```powershell
-& $python tools/qemu-b310e/scripts/capture-stock.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output tools/qemu-b310e/logs/stock-current --no-overlays --hold-end --audio --seconds 90
-& $python tools/qemu-b310e/scripts/capture-asserts.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output tools/qemu-b310e/logs/stock-asserts --no-overlays --hold-end --count 1 --timeout 120
-& $python tools/qemu-b310e/scripts/capture-ringtone.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output tools/qemu-b310e/logs/stock-ringtone
+& $python emulator/qemu/scripts/capture-stock.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output emulator/qemu/logs/stock-current --no-overlays --hold-end --audio --seconds 90
+& $python emulator/qemu/scripts/capture-asserts.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output emulator/qemu/logs/stock-asserts --no-overlays --hold-end --count 1 --timeout 120
+& $python emulator/qemu/scripts/capture-ringtone.py --qemu $qemu --firmware D:/floppy/phonefirmware/e52q7a.bin --output emulator/qemu/logs/stock-ringtone
 ```
 
 The first saves `screen.png`, `state.json`, PSRAM, traces and `audio.wav`.

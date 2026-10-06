@@ -1,4 +1,8 @@
-# The Windows build invokes this shell script and applies this source patch.
-tools/fpmain/build-fpmain.sh text eol=lf
-# Unified diff context uses a mandatory space before tabs and blank lines.
-tools/fpmain/entry-json.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
+* text=auto eol=lf
+*.exe binary
+*.dll binary
+*.bin binary
+*.sh text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+ports/fpmain/entry-json.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab

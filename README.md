@@ -34,7 +34,7 @@ download mode with `spd_dump`, and can also boot from an SD card.
 - **Ports on the SD card**: fpdoom + chocolate-doom/heretic/hexen, gnuboy,
   retris, infones, fpsw, fpduke3d, snes9x — and a working **Rockbox port**
   for the SC6530C.
-- **A QEMU machine** (`tools/qemu-b310e/`) for stock firmware bring-up and
+- **A QEMU machine** (`emulator/qemu/`) for stock firmware bring-up and
   this OS on the PC. Stock boot reaches time/date setup; an experimental
   external display input allows navigation into its home screen and menus.
   Built-in stock ringtone playback now produces verified stereo audio through
@@ -45,51 +45,48 @@ download mode with `spd_dump`, and can also boot from an SD card.
 ## Repository map
 
 ```
-arch/         startup asm, C entry, SC6530C chip init, boot stubs
-kernel/       scheduler, queues, module framework, bump allocator, printk, IRQ
-drivers/      LCD, keypad, USB debug, SD/SDIO, FAT32, audio, LED, battery, RTC
-app/          demo tasks (banner, keypad echo, SD probe)
-include/      shared public headers (os.h, arch.h, kernel.h)
-link/         linker scripts (os.ld, menu.ld)
-tests/        host-side unit tests (run on the PC, not the phone)
-tools/        host tools (spd_dump, libc_server, fpdoom port build, rockbox port,
-              stock-ram shim, stock-spy, QEMU machine, DSP analysis scripts)
-docs/         boot, stock-firmware analysis, audio/DSP protocol, QEMU usage
-Makefile      build + test targets
+firmware/     bare-metal OS: arch, kernel, drivers, app, include, link, tests
+ports/        fpmain JSON boot menu and Rockbox target overlays/tests
+emulator/     QEMU machine models and emulator capture/regression tools
+scripts/      shared build dispatcher and canonical target implementations
+tools/        flashing/debug tools, DSP analysis and stock-firmware research
+docs/         build, boot, controls, power and reverse-engineering notes
+build/        ignored generated outputs, upstream caches and build logs
+sdcard/       ignored card staging, local music, ROMs and settings
+build.ps1     Windows build entry point
+build.sh      Linux build entry point
+Makefile      optional aliases to the shared dispatcher
 ```
 
 ## Build
 
-Windows 10/11, three winget packages (Arm GNU Toolchain 14.2, GNU Make,
-WinLibs gcc) — no Linux, no WSL, no MSYS2 for the core build. Full toolchain
-install + PATH notes in [BUILD.md](BUILD.md).
+Start with [the build guide](docs/build.md) for dependencies and tool detection.
 
 ```powershell
-make            # os.bin (main firmware) -> build/bin/os.bin
-make os-sd      # os-sd.bin (USB-free SD-boot OS variant)
-make debug      # all diag images -> build/bin/ (LCD/rot/SD/MMU/NOR/DSP tests)
-make sdcard     # stage the COMPLETE SD card (boot menu + games + os + rockbox)
-make hosttest   # 182 PC-side unit checks
-make check      # host tests + ELF assertions (entry 0x14000010, .text 0x14000000)
-make clean      # remove build artifacts + clones (build/)
+.\build.ps1 doctor
+.\build.ps1 sdcard      # OS + JSON menu + games + Rockbox runtime
+.\build.ps1 sd-image    # FAT32 emulator image with stereo test audio
+.\build.ps1 qemu        # pinned headless emulator
+.\build.ps1 check       # host tests and ARM boot-address checks
+.\build.ps1 clean       # preserves card data and downloaded caches
 ```
 
-`make sdcard` builds everything (it auto-clones fpdoom/rockbox into `build/`
-on first use, rebuilds the game ports, fetches the prebuilt game binaries,
-and stages the card: `fpbin/` boot menu + games, `progs/os.bin`,
-`progs/rockbox.bin`, `.rockbox/` runtime data). Game *data files* (WADs,
-ROMs, GRPs) are **not** shipped — see `sdcard/games/README.md` after staging.
+On Linux use `bash build.sh <target>`. Individual targets include `firmware`,
+`os-sd`, `fpmain`, `games`, `rockbox`, `debug` and `hosttest`. All generated
+build files stay under `build/`; the scripts stage phone files in `sdcard/`.
+Bring your own game data files (WADs/ROMs/GRPs); the generated game README
+explains where they go. Normal builds need no private DSP dump.
 
 ## Hardware test (RAM load — zero brick risk)
 
-Five-step procedure in [FLASH.md](FLASH.md): enter download mode (D-pad
+Five-step procedure in [flashing guide](docs/flashing.md): enter download mode (D-pad
 CENTER held while plugging USB), load `os.bin` with `spd_dump`, watch the
 kernel log in `libc_server`, check the LCD. Nothing writes NOR.
 
 ## Documentation
 
-- [BUILD.md](BUILD.md) — toolchain install + build from scratch
-- [FLASH.md](FLASH.md) — hardware boot test (RAM load) + sdboot3.bin NOR install
+- [build guide](docs/build.md) — toolchain install + build from scratch
+- [flashing guide](docs/flashing.md) — hardware boot test (RAM load) + sdboot3.bin NOR install
 - [docs/sdboot.md](docs/sdboot.md) — SD-card boot chain (sdboot → boot menu → progs)
 - [docs/stockram.md](docs/stockram.md) — booting the *stock* Samsung firmware from RAM
 - [docs/b310e-qemu.md](docs/b310e-qemu.md) — the SC6530C QEMU machine
@@ -102,7 +99,7 @@ kernel log in `libc_server`, check the LCD. Nothing writes NOR.
 This project is released under the [MIT license](LICENSE). The fpdoom-derived
 portions are Unlicense/public domain (fpdoom itself is Unlicense). The
 Rockbox port is GPLv2 (Rockbox's license) — see
-`tools/rockbox-port/patches/PATCHES.md`.
+`ports/rockbox/patches/PATCHES.md`.
 
 **Provenance notes** (important):
 

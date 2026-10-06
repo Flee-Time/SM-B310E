@@ -160,7 +160,7 @@ show a stuck FIFO. The driver waits only on the proven empty/full flags.
 
 ## Reproduce the build and tests
 
-`tools/rockbox-port/build.sh` pins official Rockbox to
+`scripts/targets/rockbox.sh` pins official Rockbox to
 `ecdeb02dda6dbb94c1c3b01b8406203eda225f9f` under `build/rockbox`.
 It refuses a different existing HEAD without resetting files. The build
 requires the ARM bare-metal toolchain, a host C compiler, make, Perl and zip.
@@ -169,12 +169,12 @@ On this Windows workspace:
 ```powershell
 $env:B310E_TOOLCHAIN='/d/floppy/.tools/arm-toolchain/bin'
 $env:B310E_HOST_CC='/c/msys64/mingw64/bin'
-& tools/rockbox-port/build.ps1
+& ./build.ps1 rockbox
 
-& C:/msys64/mingw64/bin/python.exe tools/rockbox-port/tests/test-audio.py `
+& C:/msys64/mingw64/bin/python.exe ports/rockbox/tests/test-audio.py `
   --qemu D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe `
   --toolchain D:/floppy/.tools/arm-toolchain/bin `
-  --output tools/qemu-b310e/logs/rockbox-audio-final
+  --output emulator/qemu/logs/rockbox-audio-final
 ```
 
 The build stages `sdcard/progs/rockbox.bin` and the `.rockbox` runtime tree
@@ -208,10 +208,10 @@ updates at `0x80821/0x80845`, independently confirming the register paths.
 Stock regression, with no guest patches:
 
 ```powershell
-& C:/msys64/mingw64/bin/python.exe tools/qemu-b310e/scripts/capture-ringtone.py `
+& C:/msys64/mingw64/bin/python.exe emulator/qemu/scripts/capture-ringtone.py `
   --qemu D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe `
   --firmware D:/floppy/phonefirmware/e52q7a.bin `
-  --output tools/qemu-b310e/logs/stock-speaker-route --boot-seconds 65 --play-seconds 10
+  --output emulator/qemu/logs/stock-speaker-route --boot-seconds 65 --play-seconds 10
 # Repeat with --headset and a separate output folder for the headset path.
 ```
 
@@ -235,11 +235,11 @@ After building the port, create the image and run the full application:
 ```powershell
 $python = 'C:/msys64/mingw64/bin/python.exe'
 $qemu = 'D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe'
-& $python tools/rockbox-port/tests/make-sd-image.py --force
-& $python tools/qemu-b310e/scripts/capture-rockbox.py `
+& $python ports/rockbox/tests/make-sd-image.py --force
+& $python emulator/qemu/scripts/capture-rockbox.py `
   --qemu $qemu --rockbox sdcard/progs/rockbox.bin `
   --sdcard sdcard/emulator-sd.img `
-  --output tools/qemu-b310e/logs/rockbox-player --seconds 24 `
+  --output emulator/qemu/logs/rockbox-player --seconds 24 `
   --key 6:down --key 8:ret --verify-test-tone
 ```
 

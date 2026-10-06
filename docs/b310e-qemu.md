@@ -13,70 +13,26 @@
 The SC6530C QEMU machine (Wave 5) runs the stock Samsung SM-B310E firmware
 (`tools/spd_dump/full-backup.bin`, 8 MiB NOR) and our own `os.bin` on the PC.
 This document is the usage + boot-path reference. The machine sources live in
-`tools/qemu-b310e/machine/` (copied into the qemu-src tree by
-`tools/qemu-b310e/scripts/install-machine.ps1`; the build is the pinned
-`qemu-src` clone at `<home>\qemu-b310e\qemu-src`). The work plan is
+`emulator/qemu/machine/` (copied into the qemu-src tree by
+`emulator/qemu/scripts/install-machine.ps1`; the build is the pinned
+`qemu-src` clone at `build/qemu`). The work plan is
 `.omo/plans/b310e-qemu-machine.md`; the append-only session log is
 `.omo/notepads/b310e-qemu-machine/learnings.md` (READ FIRST for the root
 causes behind every recipe below).
 
 ## Build
 
-The full recipe is `tools/qemu-b310e/scripts/build-qemu.ps1` - idempotent,
-runs from plain PowerShell 5.1:
-
-1. **Clone-or-pin** - if `<home>\qemu-b310e\qemu-src` is missing,
-   shallow-clone `https://gitlab.com/qemu-project/qemu` at tag `v11.1.0`
-   (pin log `tools/qemu-b310e/logs/qemu-pin.txt`; commit
-   `84f07211cc5b4fc6a371559bf8a5de4fb068e648`); if present, verify
-   `git describe --tags` pins `v11.1.0*` (a wrong tree aborts instead of
-   clobbering).
-2. **Install the machine** - runs `install-machine.ps1`, which copies
-   `machine/hw/arm/*.c` -> `qemu-src/hw/arm/` and `machine/hw/misc/*.c` ->
-   `qemu-src/hw/misc/` and appends marker-guarded meson.build/Kconfig wiring
-   (generated from the files actually present - dropping a new `.c` file and
-   re-running the script wires it automatically; a re-run is a no-op).
-3. **Configure** - `./configure --target-list=arm-softmmu --enable-png
-   --disable-werror` (PNG is REQUIRED for `screendump`; the libpng package is
-   MSYS2 `mingw-w64-x86_64-libpng`). Fingerprint-gated: skipped when the
-   build dir matches the recorded args.
-4. **Build** - `make -j<N>` inside the MSYS2 MINGW64 shell.
-5. **Sanity** - the exe prints `QEMU emulator version 11.1.0` and
-   `CONFIG_PNG=y` is confirmed.
+Use the repository root entry point: `.\build.ps1 qemu` or
+`bash build.sh qemu`. See [build.md](build.md) for dependencies.
+The default clone is `build/qemu`; `--qemu-source` can select an existing
+local QEMU tree. The exact v11.1.0 commit is verified before installing the
+machine overlay. Build files are headless with PNG support, use Ninja, and
+do not require GTK, SDL or administrator privileges.
 
 ```powershell
-# full build (elevated PowerShell, or add -AutoElevate):
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\qemu-b310e\scripts\build-qemu.ps1
-# partial / dry runs:
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\qemu-b310e\scripts\build-qemu.ps1 -WhatIf
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\qemu-b310e\scripts\build-qemu.ps1 -SkipConfigure -SkipBuild
+.\build.ps1 qemu --jobs 8
+.\build.ps1 qemu --qemu-source D:/toolchains/qemu --dry-run
 ```
-
-The exe ends up at `<home>\qemu-b310e\qemu-src\build\qemu-system-arm.exe`,
-self-contained (the 15 MSYS2 runtime DLLs are copied next to it - no PATH
-surgery needed).
-
-**Elevation is mandatory for the build** (the todo-8 lesson, WinError 1314):
-meson's postconf `symlink-install-tree.py` calls `os.symlink()`, which fails
-with `OSError: [WinError 1314]` unless the token has
-SeCreateSymbolicLinkPrivilege (run elevated / UAC via `-AutoElevate`). Two
-sub-lessons:
-- `msys2_shell.cmd` FAILS when launched elevated - bypass it with
-  `set MSYSTEM=MINGW64` + `C:\msys64\usr\bin\bash.exe -lc "..."` inside a
-  `.cmd` wrapper launched `Start-Process -Verb RunAs -Wait` (the build
-  script does this automatically).
-- **The non-elevated incremental trick**: a `.c`-only change in the machine
-  sources rebuilds NON-elevated (`make -j8` from the MINGW64 shell directly,
-  MAKE_EXIT=0). Elevation is only needed when meson regenerates (new
-  files/Kconfig). Every wave session after Wave 3 rebuilt this way; the
-  elevation is the configure/relink exception, not the rule.
-
-MSYS2 package set (`base-devel binutils bison diffutils flex git grep make
-sed mingw-w64-x86_64-toolchain mingw-w64-x86_64-glib2
-mingw-w64-x86_64-pixman mingw-w64-x86_64-pkgconf mingw-w64-x86_64-ninja
-mingw-w64-x86_64-python mingw-w64-x86_64-libpng`; SDL2/gtk3 NOT needed -
-headless via screendump). Windows Developer Mode ON (os.symlink
-privilege). Package list evidence: `tools/qemu-b310e/logs/msys2-packages.txt`.
 
 **Run-time contract learned the hard way**: the guest's IRQ delivery and the
 model's `qemu_log` evidence BOTH depend on `-D <logfile>` - without `-D`,
@@ -166,8 +122,8 @@ iteration of the 10M-budget poll logs a ~1.1 KB register dump (~4 min wall
 per budget, ~11 GB) - the full boot to banner takes ~8 min / ~20 GB.
 
 The reusable run drivers (evidence-proven, fix the sleeps only):
-`tools/qemu-b310e/logs/w7/run-w7-ours.ps1` (boot=ours banner + keys) and
-`tools/qemu-b310e/logs/w6/run-w6-stock-sound.ps1` (boot=warm audio capture).
+`emulator/qemu/logs/w7/run-w7-ours.ps1` (boot=ours banner + keys) and
+`emulator/qemu/logs/w6/run-w6-stock-sound.ps1` (boot=warm audio capture).
 
 ## Memory map
 
@@ -447,9 +403,9 @@ We investigated why the stock firmware on the `warm` and `stock` boot paths neve
 **How to verify**: Users with the original `dump_firmware.bin` that matches the machine's `sc6530_aux` overlays can run the following test locally:
 
 ```bash
-./tools/qemu-b310e/scripts/run-b310e.sh -Boot stock -D tools/qemu-b310e/logs/stock.log
+./emulator/qemu/scripts/run-b310e.sh -Boot stock -D emulator/qemu/logs/stock.log
 # Or on Windows:
-# powershell -File tools/qemu-b310e/scripts/run-b310e.ps1 -Boot stock -D tools/qemu-b310e/logs/stock.log
+# powershell -File emulator/qemu/scripts/run-b310e.ps1 -Boot stock -D emulator/qemu/logs/stock.log
 ```
 
 Look for writes to `0x20d00024` in the `stock.log` or examine the final screendump PNG. If the RDID response satisfies the original panel driver, the UI/key phase should start and `0x20d00024` should be configured.
@@ -460,7 +416,7 @@ Look for writes to `0x20d00024` in the `stock.log` or examine the final screendu
 - The display RENDERS: the LCDC refresh fires (`sc6530_lcdc_refresh LCDC
   refresh fb=0x4076e00 pc=0x00027dbc` - the img base is set and the
   display-update code triggers the DMA refresh). Screendumps:
-  `tools/qemu-b310e/logs/w5/screen-warm.png` and `screen-stock.png` (both
+  `emulator/qemu/logs/w5/screen-warm.png` and `screen-stock.png` (both
   128x160, non-black - a green framebuffer fill).
 - Known residual (Milestone D, documented not chased): ~34 recoverable
   "AST_BLUESCREEN" assert headers (~1 per 2 s; the guest recovers + continues -
@@ -479,7 +435,7 @@ Look for writes to `0x20d00024` in the `stock.log` or examine the final screendu
   gap).
 - boot=ours (Wave 7) is the durable testbed: banner, ~950 IRQ/s tick, all
   mapped keys edge-acknowledged, zero UNMODELED lines, zero aborts - evidence
-  in `tools/qemu-b310e/logs/w7/`.
+  in `emulator/qemu/logs/w7/`.
 
 ## Known model conventions
 
