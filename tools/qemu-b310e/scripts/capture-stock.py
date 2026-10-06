@@ -50,6 +50,11 @@ def main():
     parser.add_argument("--mode", choices=["stock", "warm"], default="stock")
     parser.add_argument("--seconds", type=float, default=30)
     parser.add_argument("--audio", action="store_true")
+    parser.add_argument("--sample-every", type=float, default=0,
+                        help="Record boot/idle PC, clocks and LCD registers at this wall interval")
+    parser.add_argument("--icount-shift", type=int, choices=range(0, 11),
+                        help="Optional deterministic instruction timing; sleep disabled")
+    parser.add_argument("--sdcard", type=Path, help="Optional writable raw SD card image")
     parser.add_argument("--headset", action="store_true",
                         help="Start with a headset inserted (active-low digital EIC0)")
     parser.add_argument("--no-overlays", action="store_true")
@@ -73,9 +78,12 @@ def main():
                "-display", "none", "-serial", "none", "-d", "guest_errors", "-D",
                str(args.output / "trace.log"),
                "--trace", "sc6530_ana_write", "--trace", "sc6530_lcdc_refresh",
+               "--trace", "sc6530_lcdc_write", "--trace", "sc6530_lcm_command",
                "--trace", "sc6530_vbc_*", "--trace", "sc6530_dma_*",
                "--trace", "sc6530_midi_render",
                "--trace", "sc6530_gpt_write",
+               "--trace", "sdhci_send_command", "--trace", "sdhci_error",
+               "--trace", "sdhci_access",
                "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off",
                "-drive", f"file={args.firmware.resolve().as_posix()},format=raw,if=none,id=nor,readonly=on"]
     if args.headset:
@@ -83,6 +91,10 @@ def main():
     if args.audio:
         command += ["-audiodev", f"wav,id=audio0,path={(args.output / 'audio.wav').as_posix()}",
                     "-global", "sc6530_adi.audiodev=audio0"]
+    if args.sdcard:
+        command += ["-drive", f"file={args.sdcard.resolve().as_posix()},format=raw,if=none,id=sdcard"]
+    if args.icount_shift is not None:
+        command += ["-icount", f"shift={args.icount_shift},sleep=off"]
     (args.output / "command.json").write_text(json.dumps(command, indent=2))
     env = os.environ.copy()
     if os.name == "nt":
@@ -102,6 +114,23 @@ def main():
             if qmp is None:
                 raise RuntimeError("QMP startup timed out")
             started = time.monotonic()
+            interaction_states = []
+            timeline = []
+            next_sample = 0
+            def wait_until(deadline):
+                nonlocal next_sample
+                while time.monotonic() - started < deadline:
+                    elapsed = time.monotonic() - started
+                    if args.sample_every > 0 and elapsed >= next_sample:
+                        timeline.append({"wall_seconds": elapsed,
+                                         "registers": qmp.hmp("info registers"),
+                                         "lcdc": qmp.hmp("xp /64wx 0x20d00000"),
+                                         "timer": qmp.hmp("xp /4wx 0x81003000"),
+                                         "intc": qmp.hmp("xp /12wx 0x80000000")})
+                        qmp.command("screendump", {"filename": str(args.output / f"sample-{len(timeline):03}.png"),
+                                                  "format": "png"})
+                        next_sample = elapsed + args.sample_every
+                    time.sleep(min(.1, max(0, deadline - (time.monotonic() - started))))
             keys = []
             for item in args.key:
                 fields = item.split(":")
@@ -114,12 +143,17 @@ def main():
                     raise ValueError("--key requires a valid time, key and 1..10000 ms hold")
                 keys.append((when, key, hold))
             for index, (when, key, hold) in enumerate(sorted(keys)):
-                time.sleep(max(0, when - (time.monotonic() - started)))
+                wait_until(when)
                 qmp.hmp(f"sendkey {key} {hold}")
                 time.sleep(max(1, hold / 1000 + 0.05))
                 qmp.command("screendump", {"filename": str(args.output / f"key-{index}-{key}.png"),
                                           "format": "png"})
-            time.sleep(max(0, args.seconds - (time.monotonic() - started)))
+                interaction_states.append({"key": key, "wall_seconds": time.monotonic() - started,
+                                           "registers": qmp.hmp("info registers"),
+                                           "lcdc": qmp.hmp("xp /64wx 0x20d00000"),
+                                           "intc": qmp.hmp("xp /4wx 0x80000000"),
+                                           "timer": qmp.hmp("xp /4wx 0x81003000")})
+            wait_until(args.seconds)
             qmp.command("stop")
             snapshot = {"status": qmp.command("query-status"),
                         "registers": qmp.hmp("info registers"),
@@ -128,12 +162,16 @@ def main():
                         "codec": qmp.hmp("xp /16wx 0x8a002000"),
                         "midi": qmp.hmp("xp /10wx 0x20b00000"),
                         "dma": qmp.hmp("xp /8wx 0x20100000"),
+                        "sdio": qmp.hmp("xp /8wx 0x20700028"),
                         "intc": qmp.hmp("xp /12wx 0x80000000"),
                         "timers": qmp.hmp("xp /20wx 0x81000000"),
                         "alarm": qmp.hmp("xp /4wx 0x81003000"),
                         "rtc": qmp.hmp("xp /16wx 0x82001600"),
                         "dsp_control": qmp.hmp("xp /8wx 0x10000fe0")}
             snapshot["lcdc_interrupts"] = qmp.hmp("xp /4wx 0x20d00110")
+            snapshot["lcdc_layers"] = qmp.hmp("xp /64wx 0x20d00000")
+            snapshot["interactions"] = interaction_states
+            snapshot["timeline"] = timeline
             snapshot["keypad"] = qmp.hmp("xp /12wx 0x87000000")
             sp = int(re.search(r"R13=([0-9a-fA-F]+)", snapshot["registers"])[1], 16)
             snapshot["stack"] = qmp.hmp(f"xp /32wx {sp:#x}")

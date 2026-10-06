@@ -23,6 +23,12 @@
 #include "panic.h"
 #include "cpu.h"
 #include "gcc_extensions.h"
+#include "action.h"
+#include "lcd.h"
+#include "font.h"
+#include "file.h"
+#include "pcm-internal.h"
+#include <stdio.h>
 
 /*
  * B310E-OS Rockbox port — b310e/target/arm/sc6530c/system-sc6530c.c
@@ -219,7 +225,7 @@ int system_memory_guard(int newmode)
     return 0;
 }
 
-/* Debug menu hooks (system.h): return false = "no extra info to show". */
+/* Debug menu hooks (system.h). */
 bool dbg_ports(void)
 {
     return false;
@@ -227,6 +233,52 @@ bool dbg_ports(void)
 
 bool dbg_hw_info(void)
 {
+    static const struct { const char *name; uint32_t addr; } regs[] = {
+        { "UID15", 0x20102038 }, { "UID16", 0x2010203c },
+        { "L CFG", 0x201010c8 }, { "R CFG", 0x20101088 },
+        { "L IRQ", 0x201010cc }, { "R IRQ", 0x2010108c },
+        { "L SRC", 0x201010d0 }, { "R SRC", 0x20101090 },
+        { "DMA IRQ", 0x20100010 }, { "INT MASK", 0x80000008 },
+        { "VBC", 0x82003018 }, { "DAC", 0x8a00200c },
+        { "DA GATE", 0x8a002000 }, { "OWNER", 0x8b0001c4 },
+        { "ADI FIFO", 0x82000020 },
+    };
+    uint32_t values[ARRAYLEN(regs)];
+    bool saved = false;
+    lcd_setfont(FONT_SYSFIXED);
+    for (;;)
+    {
+        lcd_clear_display();
+        lcd_puts(0, 0, "B310E audio");
+        lcd_putsf(0, 1, "Playing: %d", pcm_is_playing());
+        for (unsigned i = 0; i < ARRAYLEN(regs); i++)
+        {
+            /* Read only known control/status registers. VBC data ports
+             * and unverified DSP shared addresses are deliberately absent. */
+            values[i] = REG32(regs[i].addr);
+            lcd_putsf(0, i + 2, "%s %08lx", regs[i].name, (unsigned long)values[i]);
+        }
+        lcd_puts(0, 18, saved ? "Saved audio log" : "Center: save log");
+        lcd_update();
+        int action = get_action(CONTEXT_STD, HZ / 4);
+        if (action == ACTION_STD_CANCEL)
+            break;
+        if (action == ACTION_STD_OK)
+        {
+            int fd = open(ROCKBOX_DIR "/audio-b310e.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+            if (fd >= 0)
+            {
+                saved = fdprintf(fd, "B310E audio tick=%ld playing=%d\n",
+                                 current_tick, pcm_is_playing()) >= 0;
+                for (unsigned i = 0; i < ARRAYLEN(regs); i++)
+                    saved &= fdprintf(fd, "%s %08lx=%08lx\n", regs[i].name,
+                                      (unsigned long)regs[i].addr,
+                                      (unsigned long)values[i]) >= 0;
+                saved = (close(fd) == 0) && saved;
+            }
+        }
+    }
+    lcd_setfont(FONT_UI);
     return false;
 }
 

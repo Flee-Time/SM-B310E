@@ -13,6 +13,9 @@ Wave 5/7 - do NOT add a `docs/` subdir here).
 Current boot/audio evidence and the reproducible Windows headless workflow
 are in [emulator-audio.md](../../docs/emulator-audio.md). Built-in stock MIDI
 ringtone output is verified; the full DSP and phone model are still incomplete.
+An optional SD image now supplies the complete Rockbox runtime and a stereo
+test WAV. The full player mounts it and produces verified 440/660 Hz output;
+see [Rockbox playback and SD image instructions](../../docs/rockbox-audio.md).
 
 ## Layout
 

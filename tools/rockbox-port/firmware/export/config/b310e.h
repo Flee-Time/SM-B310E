@@ -43,6 +43,7 @@
 #define HAVE_FLASH_STORAGE
 /* define the storage type */
 #define CONFIG_STORAGE STORAGE_SD
+#define HAVE_FAT16SUPPORT /* small SD cards and the generated emulator image */
 
 #define HAVE_MULTIVOLUME
 #define HAVE_HOTSWAP

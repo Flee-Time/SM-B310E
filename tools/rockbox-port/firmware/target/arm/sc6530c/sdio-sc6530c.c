@@ -359,10 +359,13 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
 }
 
 /* ---- CSD parsing (standard SD) ------------------------------------------
- * CMD9's 128-bit CSD arrives in resp[0..3] = CSD[127:96]..[31:0]. */
+ * SDHCI stores R2 least-significant word first and strips the CRC byte.
+ * Restore the CSD bit positions before parsing either card version. */
 static void sdio_parse_csd(uint32_t *resp)
 {
-    uint32_t csd0 = resp[0], csd1 = resp[1], csd2 = resp[2];
+    uint32_t csd0 = (resp[3] << 8) | (resp[2] >> 24);
+    uint32_t csd1 = (resp[2] << 8) | (resp[1] >> 24);
+    uint32_t csd2 = (resp[1] << 8) | (resp[0] >> 24);
     unsigned csd_ver = (csd0 >> 30) & 3;    /* CSD[127:126] */
 
     if (csd_ver == 0) {
@@ -429,7 +432,9 @@ int sdcard_init(void)
     return 2;
 
 acmd51_done:
-    sdio_shl = (sd_ver == 1) ? 0 : 9;
+    /* CMD8 support describes protocol version, not capacity/addressing.
+     * OCR CCS decides block addressing; small v2 cards still use bytes. */
+    sdio_shl = (resp[0] & (1u << 30)) ? 0 : 9;
 
     sd_int = sdio_cmd(SDIO_CMD2_TR, 0, SDIO_CMD2_INT, NULL, 0, resp);
     if (!(sd_int & SDIO_INT_CMD_COMPLETE)) return 3;
@@ -470,7 +475,7 @@ int sdio_read_block(uint32_t idx, uint8_t *buf)
 
     idx <<= sdio_shl;
     sd_int = sdio_cmd(SDIO_CMD17_TR, idx, SDIO_CMD17_INT, buf, 512, NULL);
-    return (sd_int & SDIO_INT_CMD_COMPLETE) ? 0 : -1;
+    return !(sd_int & SDIO_INT_ERR) && (sd_int & SDIO_INT_TR_COMPLETE) ? 0 : -1;
 }
 
 int sdio_write_block(uint32_t idx, uint8_t *buf)
@@ -479,5 +484,5 @@ int sdio_write_block(uint32_t idx, uint8_t *buf)
 
     idx <<= sdio_shl;
     sd_int = sdio_cmd(SDIO_CMD24_TR, idx, SDIO_CMD24_INT, buf, 512, NULL);
-    return (sd_int & SDIO_INT_CMD_COMPLETE) ? 0 : -1;
+    return !(sd_int & SDIO_INT_ERR) && (sd_int & SDIO_INT_TR_COMPLETE) ? 0 : -1;
 }

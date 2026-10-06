@@ -40,8 +40,8 @@
 
 #include "config.h"
 
-/* Mono volume only — the sink's software volume (PCM_SINK_SWVOL) does the
- * real scaling; this entry just keeps the settings table honest. */
+/* One master volume; audiohw_set_volume forwards tenths of a dB to the
+ * core PCM scaler before the stereo samples reach the DMA sink. */
 #define AUDIOHW_CAPS (MONO_VOL_CAP)
 
 AUDIOHW_SETTING(VOLUME, "dB", 0, 1, -100, 0, -30)

@@ -2,8 +2,10 @@
 
 The port implements ARM-owned stereo DMA playback into the on-die DAC,
 software volume, mute, stop/restart, and the stock speaker/headset output
-sequences. Rockbox's software codecs and DSP produce PCM; this route does
-not need the vendor DSP firmware or hardware MIDI renderer.
+sequences. Rockbox decodes and processes PCM on the ARM CPU and selects
+ARM ownership of VBC. The port currently has no vendor DSP firmware loader;
+whether this route needs additional DSP-side initialization on the physical
+phone has not been established by listening tests.
 
 This is playback support, not a claim that the entire phone audio system
 has been implemented. Microphone recording, telephony, Bluetooth/FM routes,
@@ -30,6 +32,7 @@ vendor code, sound bank, firmware dump or reference archive is included.
 | APB +0x60/+0x64 are reset SET/CLEAR | NOR `0x81516` | Pulse only audio/VBC reset bits21/18; preserve keypad/EIC |
 | INTC +8 is a full R/W enable mask | NOR `0x1b920` and device tests | Audio uses read/OR/write to preserve timer/other enables |
 | Standard DMA channels use different fields from the older controller | Stock DMA trace, consumption at NOR `0x32e3c` | Halfword, fixed DAC destination, 320-byte bank, IRQ20 |
+| Hardware requests must be routed to DMA channels | NOR `0xa7b96`; stock writes `0x20102038=4`, `0x2010203c=3` | Map DA0/DA1 requests15/16 to one-based channels4/3 before playback |
 | Headset detection is digital EIC0, active low | Product GPIO ID17 in RAM table `0x0423c8dc`; NOR EIC table `0xca92c` | Poll `0x8a001000` bit0 after unmasking +4; separate from analog END at `0x82001900` |
 | Headset output enable is physical GPIO0 | Product ID34 at `0x0423cafc`; stock GPIO0 rises during headset preview | Preserve other pins while setting mask/direction and output |
 | Speaker PA is controlled internally | Product ID33 callback `0x24d24` → `0x69d00` | Apply the captured codec PA sequence; no GPIO18/39 probing |
@@ -46,6 +49,7 @@ EIC debounce and hotplug interrupts are not modeled.
 | Block | Registers and fields |
 |---|---|
 | DMA | `0x20100000`; channels at +0x1000, stride0x40; zero-based left3/right2 |
+| DMA request map | +0x2000, one register per one-based request; request15/+0x2038=4, request16/+0x203c=3 |
 | DMA channel | CFG+8=`0x3001`; source+0x10; destination+0x14; FRAG+0x18=`0x50300140`; BLOCK+0x1c=320 |
 | DMA IRQ | Channel +0xc: enable bits4:0, raw12:8, masked20:16, W1C28:24; block bit1, error bit4; global masked +0x10 |
 | VBC | `0x82003000` left +0/right +4; size−1 at +0x10 bits15:8; 160-frame banks |
@@ -89,6 +93,10 @@ enables the new one and restores mute state. Rockbox's speaker setting
 defaults to Auto; its existing jack debounce/events select speaker or
 headphones. On explicitly selects speaker; Off selects the headset path.
 Software volume scales PCM once; analog gains stay at the stock values.
+The target `audiohw_set_volume` hook sets the software PCM master factors
+using the tenths-of-a-dB value supplied by Rockbox. A no-op here leaves those
+factors at their initial zero, even when the DMA engine advances normally.
+The minimum setting, −100 dB, requests exact software mute.
 Close mutes, stops VBC, disables output gates/PA and powers down the audio
 rails while preserving unrelated pins, regulators and power-button clocks.
 
@@ -120,7 +128,7 @@ driver. Only outer scheduler/application
 hooks are replaced. Fixed instruction-count timing and an idle/tick loop
 avoid host scheduling affecting the gap checks.
 
-All 23 cases pass: ten rates with 4093 exact contiguous stereo frames;
+All 23 cases pass using the target's actual volume hook: ten rates with 4093 exact contiguous stereo frames;
 −6 dB and software mute; stop/restart; DMA error; nested lock; headset
 playback; both route transitions during playback; codec close/reinit;
 and 1/13/159/160-frame clips. Register assertions check the captured routes,
@@ -145,13 +153,71 @@ Capture durations vary with host load. Device audio, MIDI, bring-up and
 LZMA regression suites also pass, including independent stock DSP/page
 decompression hashes.
 
-## Validation boundary
+## Complete player and SD image
 
-The full Rockbox image builds and reaches its storage initialization in
-QEMU. The current SD device models an absent card, so it reports
-"No partition found"; playing a filesystem music file through the complete
-Rockbox UI still needs SD emulation or a physical phone. The ARM audio tests
-exercise the real core/driver directly and do not substitute for that test.
+QEMU now attaches an optional raw SD image through its SDHCI/card model.
+The Rockbox driver restores SDHCI's CSD word order/CRC shift, selects byte
+or block addressing from the OCR CCS bit, and requires data-transfer
+completion with no error. CMD8 support alone does not make a small card
+SDHC. FAT16 support is enabled for the generated 64 MiB card.
+
+After building the port, create the image and run the full application:
+
+```powershell
+$python = 'C:/msys64/mingw64/bin/python.exe'
+$qemu = 'D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe'
+& $python tools/rockbox-port/tests/make-sd-image.py --force
+& $python tools/qemu-b310e/scripts/capture-rockbox.py `
+  --qemu $qemu --rockbox sdcard/progs/rockbox.bin `
+  --sdcard sdcard/emulator-sd.img `
+  --output tools/qemu-b310e/logs/rockbox-player --seconds 24 `
+  --key 6:down --key 8:ret --verify-test-tone
+```
+
+The image contains `.rockbox`, `progs/rockbox.bin` and `/test.wav`, a
+30-second signed-16-bit stereo track at 44.1 kHz. Left is 440 Hz, right
+is 660 Hz, with peak4096 and short fades. Its configuration selects the
+file browser and 0 dB software volume. `--force` replaces the generated
+image; no physical disk is accessed. Build/image outputs remain ignored.
+
+The complete Rockbox file browser mounts the image, loads its WAV codec,
+plays `/test.wav` and advances the elapsed-time display. A 24-second run
+captured 688044 stereo frames, peak4096, with the expected 440/660 Hz
+channels and less than 1% cross-channel tone leakage. The capture script
+checks those tones and saves UI screenshots, register snapshots and traces.
+This covers filesystem, codec, application, software volume, IRQ and DMA
+integration in addition to the smaller ARM driver tests.
+
+To attach a card in another QEMU launch, add
+`-drive file=sdcard/emulator-sd.img,format=raw,if=none,id=sdcard`.
+Card writes persist in that image. Omitting the backend models an absent card.
+
+## Phone validation and DSP boundary
+
+Copy the newly built `sdcard/progs/rockbox.bin` and `.rockbox` tree to the
+phone's existing card layout and launch it through the existing loader.
+Use a short track to check elapsed time, speaker output and headphones.
+The DMA request fix addresses the observed playing-but-stuck timer; it
+still needs confirmation on real hardware.
+
+System → Debug → View HW info shows the playback control registers. Center
+saves them to `/.rockbox/audio-b310e.txt`; Back returns to the menu.
+It reads known control/status registers, avoiding VBC data ports and
+unverified DSP shared-memory addresses. A log captured while a track is
+stalled helps distinguish missing DMA progress from a codec/output issue.
+Opening this screen and saving its log through the complete application
+was verified; the saved text was read back from the FAT16 image afterward.
+
+The supplied `dsp/Untitled.png` shows a boot-ROM READY response and a
+completed 66-block download, followed by no runtime message response.
+Changing shared words alone does not identify a valid DSP service reply.
+The stock download also wraps its 16-bit block offset after 64K words, so
+that wrap in the old diagnostic is not sufficient evidence of a bug.
+QEMU acknowledges the download and selected runtime status exchanges;
+it does not copy those blocks into executable DSP program memory or run
+TeakLite instructions. Its acknowledgements cannot validate the old
+diagnostic's runtime handoff or prove DSP independence on the phone.
+
 QEMU does not emulate analog gain, PA electrical behavior or DAC ramps.
 Speaker and jack listening tests, maximum safe gain, pop suppression and
 hardware timing remain to be measured on the phone. No microphone/recording
