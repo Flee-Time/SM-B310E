@@ -16,10 +16,12 @@
 #define ADI_CMD SC_AUDIO_REG(0x82000018)
 #define ADI_DATA SC_AUDIO_REG(0x8200001c)
 #define ADI_BUDGET 100000u
+#define EIC_CLOCKS ((1u << 25) | (1u << 26))
 static bool initialized, adi_failed;
 static bool speaker_enabled;
 static unsigned current_fsel = HW_FREQ_DEFAULT;
 static int current_volume = -1000;
+static int digital_volume = -1000;
 
 static bool adi_wait(uint32_t mask, bool set)
 {
@@ -116,9 +118,41 @@ void audiohw_set_frequency(int fsel)
 bool headphones_inserted(void)
 {
     /* Stock product GPIO ID17: active-low logical EIC0. NOR 0xca92c
-     * maps it to the DIGITAL bank, not the analog END-button bank. */
+     * maps it to the DIGITAL bank, not the analog END-button bank.
+     * EIC_D open at NOR 0x673c0 enables both APB and RTC sampling clocks.
+     * The SD loader only enables analog EIC for END; an unclocked digital
+     * input reads zero and falsely reports an inserted headset. Keep the
+     * clocks on even when playback closes so Rockbox can poll hotplug. */
+    int old = disable_irq_save();
+    SC_AUDIO_REG(0x8b0000a0) = EIC_CLOCKS;
     SC_AUDIO_REG(0x8a001004) |= 1;
-    return !(SC_AUDIO_REG(0x8a001000) & 1);
+    bool inserted = !(SC_AUDIO_REG(0x8a001000) & 1);
+    restore_irq(old);
+    return inserted;
+}
+
+static unsigned headphone_gain(void)
+{
+    /* Stock 0x80a70 programs independent 4-bit gains at CODEC+0x94.
+     * Codec codes 1..12 are -33..0 dB in 3 dB steps; 0 mutes. The captured
+     * ringtone's code4 is -24 dB, not the maximum. Extend the existing
+     * volume scale above 0 using codes5..12 and software attenuation for
+     * the intermediate 1 dB steps. No positive digital gain is needed. */
+    return 4 + (current_volume > 0 ? (current_volume + 29) / 30 : 0);
+}
+
+static void apply_volume(bool speaker)
+{
+    int gain = speaker ? 0 : (headphone_gain() - 4) * 30;
+    digital_volume = current_volume - gain;
+    /* The speaker stays at its proven stock PA gain. Positive headphone
+     * volume settings saturate at the speaker's existing maximum. */
+    if (digital_volume > 0)
+        digital_volume = 0;
+    int pcm_volume = digital_volume <= -1000 ? INT_MIN : digital_volume;
+    pcm_set_master_volume(pcm_volume, pcm_volume);
+    if (!speaker)
+        adi_update(CODEC + 0x94, 0xff, headphone_gain() * 0x11);
 }
 
 static void headset_output(bool enable)
@@ -159,15 +193,16 @@ static void select_output(bool speaker)
     else
     {
         /* Inserted stock ringtone: separate DAC L/R to headphone L/R,
-         * analog gain 0x44 and external output enable GPIO0 high. */
+         * with independent stereo gain and output enable GPIO0 high. */
         adi_update(CODEC + 0x88, 0xf0, 0);
         adi_update(CODEC + 0x8c, 0x80, 0);
         adi_update(CODEC + 0x7c, 0xff, 0x84);
         adi_update(CODEC + 0x84, 0xfc, 0xc4);
-        adi_update(CODEC + 0x94, 0xff, 0x44);
-        headset_output(true);
     }
     speaker_enabled = speaker;
+    apply_volume(speaker);
+    if (!speaker)
+        headset_output(true);
     if (!muted)
         audiohw_mute(false);
 }
@@ -286,12 +321,29 @@ void audiohw_close(void)
 
 void audiohw_set_volume(int val)
 {
+    /* sound.c supplies tenths of a dB. Preserve the old range/default;
+     * additional headphone headroom ends at codec unity, code12. */
+    if (val < -1000)
+        val = -1000;
+    if (val > 240)
+        val = 240;
+    unsigned previous_gain = headphone_gain();
     current_volume = val;
-    /* sound.c supplies tenths of a dB. The software PCM scaler starts
-     * muted until this hook sets its master factors. Keep the captured
-     * analog gains fixed and apply the user's volume before deinterleave. */
-    pcm_set_master_volume(val <= -1000 ? INT_MIN : val,
-                          val <= -1000 ? INT_MIN : val);
+    if (!initialized)
+    {
+        /* No analog access before the codec has power/clocks. */
+        digital_volume = val > 0 ? 0 : val;
+        int pcm_volume = val <= -1000 ? INT_MIN : digital_volume;
+        pcm_set_master_volume(pcm_volume, pcm_volume);
+        return;
+    }
+    bool change_gain = !speaker_enabled && previous_gain != headphone_gain();
+    bool muted = (SC_CODEC_DP_CTL & SC_CODEC_MUTE) == SC_CODEC_MUTE;
+    if (change_gain)
+        audiohw_mute(true);
+    apply_volume(speaker_enabled);
+    if (change_gain && !muted)
+        audiohw_mute(false);
 }
 
 void sc6530_audio_debug(struct sc6530_audio_debug *info)
@@ -306,5 +358,9 @@ void sc6530_audio_debug(struct sc6530_audio_debug *info)
     info->adi_failed = adi_failed;
     info->speaker = speaker_enabled;
     info->volume = current_volume;
+    info->digital_volume = digital_volume;
+    info->headset_data = SC_AUDIO_REG(0x8a001000);
+    info->headset_mask = SC_AUDIO_REG(0x8a001004);
+    info->headset_clocks = SC_AUDIO_REG(0x8b0000a8);
     sc6530_pcm_debug(&info->banks, info->peak);
 }

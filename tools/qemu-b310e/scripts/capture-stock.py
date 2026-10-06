@@ -79,6 +79,7 @@ def main():
                str(args.output / "trace.log"),
                "--trace", "sc6530_ana_write", "--trace", "sc6530_lcdc_refresh",
                "--trace", "sc6530_ana_caller",
+               "--trace", "sc6530_aux_write",
                "--trace", "sc6530_lcdc_write", "--trace", "sc6530_lcm_command",
                "--trace", "sc6530_vbc_*", "--trace", "sc6530_dma_*",
                "--trace", "sc6530_midi_render",

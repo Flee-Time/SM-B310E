@@ -247,12 +247,12 @@ bool dbg_hw_info(void)
     uint32_t values[ARRAYLEN(regs)];
     struct sc6530_audio_debug info;
     bool saved = false;
-    bool analog = false;
+    unsigned page = 0;
     lcd_setfont(FONT_SYSFIXED);
     for (;;)
     {
         lcd_clear_display();
-        lcd_puts(0, 0, analog ? "B310E analog" : "B310E audio");
+        lcd_puts(0, 0, page == 1 ? "B310E analog" : page == 2 ? "B310E jack/gain" : "B310E audio");
         lcd_putsf(0, 1, "Playing: %d", pcm_is_playing());
         sc6530_audio_debug(&info);
         for (unsigned i = 0; i < ARRAYLEN(regs); i++)
@@ -260,13 +260,24 @@ bool dbg_hw_info(void)
             /* Read only known control/status registers. VBC data ports
              * and unverified DSP shared addresses are deliberately absent. */
             values[i] = REG32(regs[i].addr);
-            if (!analog)
+            if (page == 0)
                 lcd_putsf(0, i + 2, "%s %08lx", regs[i].name, (unsigned long)values[i]);
         }
-        if (analog)
+        if (page == 1)
             for (unsigned i = 0; i < SC_AUDIO_ANALOG_COUNT; i++)
                 lcd_putsf(0, i + 2, "%s %04x%s", sc_audio_analog_regs[i].name,
                           info.analog[i], (info.valid & (1u << i)) ? "" : " ERR");
+        if (page == 2)
+        {
+            lcd_putsf(0, 3, "EIC DATA %08lx", (unsigned long)info.headset_data);
+            lcd_putsf(0, 4, "EIC MASK %08lx", (unsigned long)info.headset_mask);
+            lcd_putsf(0, 5, "APB CLK  %08lx", (unsigned long)info.headset_clocks);
+            lcd_putsf(0, 7, "Headset: %d", !(info.headset_data & 1));
+            lcd_putsf(0, 8, "Speaker: %d", info.speaker);
+            lcd_putsf(0, 10, "Volume: %d/10 dB", info.volume);
+            lcd_putsf(0, 11, "PCM: %d/10 dB", info.digital_volume);
+            lcd_putsf(0, 12, "HP GAIN: %04x", info.analog[12]);
+        }
         lcd_putsf(0, 17, "PCM %u/%u", info.peak[0], info.peak[1]);
         lcd_puts(0, 18, saved ? "Saved audio log" : "Center: save log");
         lcd_puts(0, 19, "Menu: change page");
@@ -275,7 +286,7 @@ bool dbg_hw_info(void)
         if (action == ACTION_STD_CANCEL)
             break;
         if (action == ACTION_STD_MENU)
-            analog = !analog;
+            page = (page + 1) % 3;
         if (action == ACTION_STD_OK)
         {
             int fd = open(ROCKBOX_DIR "/audio-b310e.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -286,6 +297,9 @@ bool dbg_hw_info(void)
                 saved &= fdprintf(fd, "codec_initialized=%d adi_failed=%d speaker=%d volume_tenth_db=%d banks=%lu pcm_peak_L=%u pcm_peak_R=%u\n",
                                   info.initialized, info.adi_failed, info.speaker,
                                   info.volume, (unsigned long)info.banks, info.peak[0], info.peak[1]) >= 0;
+                saved &= fdprintf(fd, "pcm_volume_tenth_db=%d headset_data=%08lx headset_mask=%08lx apb_clocks=%08lx\n",
+                                  info.digital_volume, (unsigned long)info.headset_data,
+                                  (unsigned long)info.headset_mask, (unsigned long)info.headset_clocks) >= 0;
                 for (unsigned i = 0; i < ARRAYLEN(regs); i++)
                     saved &= fdprintf(fd, "%s %08lx=%08lx\n", regs[i].name,
                                       (unsigned long)regs[i].addr,

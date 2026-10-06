@@ -28,6 +28,8 @@
 static int16_t data[FRAMES * 2] __attribute__((aligned(32)));
 static unsigned cursor, packet;
 static volatile bool dma_error;
+static bool repeat_audio;
+static int test_volume = -1000;
 volatile long current_tick;
 
 static void host_call(unsigned op, const void *args)
@@ -78,6 +80,8 @@ void reserved_handler(void) { finish(false); }
 static void more(const void **addr, size_t *size)
 {
     static const unsigned packets[] = {13, 333, 1024, 1, 159, 321, 640, 160};
+    if (repeat_audio && cursor == FRAMES)
+        cursor = 0;
     unsigned n = packets[packet++ % 8];
     if (n > FRAMES - cursor)
         n = FRAMES - cursor;
@@ -95,12 +99,13 @@ static enum pcm_dma_status status(enum pcm_dma_status s)
 
 static bool output_matches(bool speaker)
 {
+    unsigned hp_gain = 4 + (test_volume > 0 ? (test_volume + 29) / 30 : 0);
     return (SC_AUDIO_REG(0x82001a7c) & 0xff) == (speaker ? 0x33u : 0x84u) &&
            (SC_AUDIO_REG(0x82001a84) & 0xfc) == (speaker ? 0x10u : 0xc4u) &&
            (SC_AUDIO_REG(0x82001a44) & 0xa8) == (speaker ? 0x88u : 0u) &&
            (SC_AUDIO_REG(0x82001a88) & 0xf0) == (speaker ? 0x30u : 0u) &&
            (SC_AUDIO_REG(0x82001a8c) & 0x80) == (speaker ? 0x80u : 0u) &&
-           (SC_AUDIO_REG(0x82001a94) & 0xff) == (speaker ? 0u : 0x44u) &&
+           (SC_AUDIO_REG(0x82001a94) & 0xff) == (speaker ? 0u : hp_gain * 0x11) &&
            (SC_AUDIO_REG(0x82001a9c) & 0xff) == (speaker ? 0x70u : 0u) &&
            (SC_AUDIO_REG(0x8a000000) & 1) == !speaker &&
            (SC_AUDIO_REG(0x82001164) & 0x31f0) == 0x3000 &&
@@ -115,7 +120,9 @@ static bool shared_state_preserved(void)
            (SC_AUDIO_REG(0x8a000018) & 0x40) &&
            SC_AUDIO_REG(0x82001904) == 8 &&
            SC_AUDIO_REG(0x820010e4) == 0x20 &&
-           SC_AUDIO_REG(0x820010e0) == 0x80;
+           SC_AUDIO_REG(0x820010e0) == 0x80 &&
+           (SC_AUDIO_REG(0x8a001004) & 0x81) == 0x81 &&
+           (SC_AUDIO_REG(0x8b0000a8) & (7u << 24)) == (7u << 24);
 }
 
 int main(void)
@@ -131,6 +138,11 @@ int main(void)
     SC_AUDIO_REG(0x82001904) = 8;
     SC_AUDIO_REG(0x820010e4) = 0x20;
     SC_AUDIO_REG(0x820010e0) = 0x80;
+    SC_AUDIO_REG(0x8b0000a0) = 1u << 24; /* unrelated ADI clock */
+    SC_AUDIO_REG(0x8a001004) = 0x80;     /* another digital EIC input */
+    /* Reproduce the old false insertion with sampling clocks off. */
+    if (SC_AUDIO_REG(0x8a001000) & 1)
+        finish(false);
     pcm_init();
     pcm_postinit();
     audio_enable_speaker(2); /* real Rockbox Auto/jack policy */
@@ -141,6 +153,9 @@ int main(void)
     /* Exercise sound.c's codec hook; calling the scaler directly hid a
      * silent full-player integration bug in the original driver. */
     audiohw_set_volume(TEST_VOLUME);
+    test_volume = TEST_VOLUME < -1000 ? -1000 : TEST_VOLUME > 240 ? 240 : TEST_VOLUME;
+    if (!output_matches(!TEST_HEADSET))
+        finish(false);
     pcm_sync_pcm_factors();
     for (unsigned i = 0; i < FRAMES; i++)
     {
@@ -153,6 +168,7 @@ int main(void)
     SC_AUDIO_REG(0x8100004c) = 1;
     SC_AUDIO_REG(0x81000048) = 0xc0;
     SC_AUDIO_REG(0x80000008) = 1u << 23;
+    repeat_audio = TEST_CASE == 6;
     pcm_play_data(more, status, NULL, 0);
     if (TEST_CASE == 1 || TEST_CASE == 5)
     {
@@ -199,6 +215,27 @@ int main(void)
         if (!output_matches(!TEST_HEADSET))
             finish(false);
     }
+    else if (TEST_CASE == 6)
+    {
+        /* Host changes only the physical EIC input through QTest.
+         * Exercise the real Auto output policy with playback in progress. */
+        host_call(4, "HOTPLUG INSERT\n");
+        while (!headphones_inserted())
+            wait_ms(1);
+        audio_enable_speaker(2);
+        if (!pcm_is_playing() || !output_matches(false))
+            finish(false);
+        host_call(4, "HOTPLUG REMOVE\n");
+        while (headphones_inserted())
+            wait_ms(1);
+        audio_enable_speaker(2);
+        if (!pcm_is_playing() || !output_matches(true))
+            finish(false);
+        pcm_play_stop();
+        repeat_audio = false;
+        cursor = packet = 0;
+        pcm_play_data(more, status, NULL, 0);
+    }
     /* Includes the final partial bank and the FIFO drain after core stop. */
     wait_ms(FRAMES * 1000 / TEST_RATE + 200);
     bool success = !pcm_is_playing() && !(SC_VBC_CTRL & SC_VBC_PLAY) &&
@@ -213,9 +250,12 @@ int main(void)
     success &= info.initialized && !info.adi_failed &&
                info.valid == (1u << SC_AUDIO_ANALOG_COUNT) - 1;
     if (TEST_CASE == 0)
-        success &= info.banks > 0 && info.volume == TEST_VOLUME &&
+        success &= info.banks > 0 && info.volume == test_volume &&
                    (TEST_VOLUME == INT_MIN ? info.peak[0] == 0 && info.peak[1] == 0 :
                     info.peak[0] > 0 && info.peak[1] > 0);
+    success &= info.digital_volume <= 0 &&
+               (info.headset_clocks & (3u << 25)) == (3u << 25) &&
+               (info.headset_mask & 0x81) == 0x81;
     if (!success)
     {
         diagnostic(pcm_is_playing());

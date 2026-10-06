@@ -3,9 +3,9 @@
 The port implements ARM-owned stereo DMA playback into the on-die DAC,
 software volume, mute, stop/restart, and the stock speaker/headset output
 sequences. Rockbox decodes and processes PCM on the ARM CPU and selects
-ARM ownership of VBC. The port currently has no vendor DSP firmware loader;
-whether this route needs additional DSP-side initialization on the physical
-phone has not been established by listening tests.
+ARM ownership of VBC. The phone owner confirmed audible playback through
+both headphones and the speaker after the analog-clock fix (6 October 2026).
+This playback route works on the phone without a vendor DSP firmware loader.
 
 This is playback support, not a claim that the entire phone audio system
 has been implemented. Microphone recording, telephony, Bluetooth/FM routes,
@@ -34,7 +34,9 @@ vendor code, sound bank, firmware dump or reference archive is included.
 | INTC +8 is a full R/W enable mask | NOR `0x1b920` and device tests | Audio uses read/OR/write to preserve timer/other enables |
 | Standard DMA channels use different fields from the older controller | Stock DMA trace, consumption at NOR `0x32e3c` | Halfword, fixed DAC destination, 320-byte bank, IRQ20 |
 | Hardware requests must be routed to DMA channels | NOR `0xa7b96`; stock writes `0x20102038=4`, `0x2010203c=3` | Map DA0/DA1 requests15/16 to one-based channels4/3 before playback |
-| Headset detection is digital EIC0, active low | Product GPIO ID17 in RAM table `0x0423c8dc`; NOR EIC table `0xca92c` | Poll `0x8a001000` bit0 after unmasking +4; separate from analog END at `0x82001900` |
+| Headset detection is digital EIC0, active low | Product GPIO ID17 in RAM table `0x0423c8dc`; NOR EIC table `0xca92c` | Enable both digital EIC clocks, then poll `0x8a001000` bit0 after unmasking +4; separate from analog END at `0x82001900` |
+| Digital EIC needs APB and RTC clocks | `EIC_D` device descriptor at NOR `0xc9b54`, open/close callbacks `0x673c0/0x673da` | Write bits25/26 to APB clock SET `0x8b0000a0`; keep them enabled for jack polling when audio closes |
+| Headphone gain has two independent nibbles | Stock setter `0x80a70` passes `0x0f/0xf0`, shifts0/4 to `0x807ea`, using live codec +0x94 | Code4 is the captured ringtone level, not the codec maximum; use equal gains for stereo |
 | Headset output enable is physical GPIO0 | Product ID34 at `0x0423cafc`; stock GPIO0 rises during headset preview | Preserve other pins while setting mask/direction and output |
 | Speaker PA is controlled internally | Product ID33 callback `0x24d24` → `0x69d00` | Apply the captured codec PA sequence; no GPIO18/39 probing |
 
@@ -43,7 +45,13 @@ the stock headset icon. Explicit inserted/unplugged captures now distinguish
 the two routes. QEMU defaults to an empty jack; use
 `-global sc6530_aux.headset-present=on` for an inserted headset. Its named
 `eic-input` pin0 also accepts an active-low external level for polling tests.
-EIC debounce and hotplug interrupts are not modeled.
+The input mask alone is insufficient: both APB clock bits25/26 must be on.
+Clock SET/CLEAR aliases accumulate into status `0x8b0000a8`; a disabled
+sampling path reads zero in QEMU. This catches the port's missing clock
+setup, which otherwise falsely indicates insertion. Rockbox's SD-loader
+environment enables the analog END-key EIC but omits these digital clocks.
+The correction is tested in QEMU; physical jack switching needs a phone test.
+EIC debounce and hotplug interrupts are not modeled; polled level changes are.
 
 ## Playback and output contract
 
@@ -85,7 +93,7 @@ live analog base):
 | DCR1 +0x84 | `0xc4` | `0x10` |
 | DCR2 +0x88 | `0x00` | `0x30` |
 | DCR3 +0x8c | `0x00` | `0x80` |
-| Headphone gain +0x94 | `0x44` | `0x00` |
+| Headphone gain +0x94 | `0x44` at 0 dB; up to `0xcc` at +24 dB | `0x00` |
 | PA gain +0x9c | `0x00` | `0x70` |
 | GPIO0 output | High | Low |
 
@@ -93,11 +101,38 @@ The port mutes while changing routes, disables the previous output, then
 enables the new one and restores mute state. Rockbox's speaker setting
 defaults to Auto; its existing jack debounce/events select speaker or
 headphones. On explicitly selects speaker; Off selects the headset path.
-Software volume scales PCM once; analog gains stay at the stock values.
+Software volume scales PCM once. At settings of 0 dB or below, analog gains
+stay at the stock values and the existing loudness/default remain unchanged.
 The target `audiohw_set_volume` hook sets the software PCM master factors
 using the tenths-of-a-dB value supplied by Rockbox. A no-op here leaves those
 factors at their initial zero, even when the DMA engine advances normally.
 The minimum setting, −100 dB, requests exact software mute.
+
+The headphone maximum now extends to +24 dB relative to the old maximum.
+The reference codec gain definitions describe codes1..15 as −33..+9 dB
+in 3 dB steps (code0 mutes); their register fields match the stock setter.
+The port uses only codes4..12, ending at codec unity instead of boosting
+the digital samples or changing PA/bias/current-limit controls. For each
+positive setting, it rounds analog gain upward to a 3 dB step and applies
+the remaining attenuation in software:
+
+| Rockbox setting | Headphone register | PCM attenuation |
+|---|---:|---:|
+| 0 dB | `0x44` | 0 dB |
+| +1 dB | `0x55` | −2 dB |
+| +3 dB | `0x55` | 0 dB |
+| +12 dB | `0x88` | 0 dB |
+| +24 dB | `0xcc` | 0 dB |
+
+Values are bounded to −100..+24 dB. Route changes and codec reinitialization
+restore the current volume/gain. The speaker retains its captured PA gain
+`0x70`; positive settings saturate at its previous maximum. The electrical
+gain, distortion and noise at the new headphone levels need measurement on
+the phone: QEMU captures PCM before the analog gain stage.
+
+An existing `volume limit: 0` saved setting still limits volume to 0 dB.
+Raise **Sound Settings → Maximum Volume Limit** to +24 dB to unlock the
+additional range, then increase playback volume above 0 dB as needed.
 Close mutes, stops VBC, disables output gates/PA and powers down the audio
 rails while preserving unrelated pins, regulators and power-button clocks.
 
@@ -151,13 +186,24 @@ driver. Only outer scheduler/application
 hooks are replaced. Fixed instruction-count timing and an idle/tick loop
 avoid host scheduling affecting the gap checks.
 
-All 23 cases pass using the target's actual volume hook: ten rates with 4093 exact contiguous stereo frames;
+The ARM suite exercises the target's actual volume hook: ten rates with 4093 exact contiguous stereo frames;
 −6 dB and software mute; stop/restart; DMA error; nested lock; headset
 playback; both route transitions during playback; codec close/reinit;
 and 1/13/159/160-frame clips. Register assertions check the captured routes,
 power-off state, and preservation of another GPIO, nonaudio regulators,
 analog END EIC and its clock controls. WAVs, traces, commands and
 `results.json` remain in the ignored output directory.
+All 39 cases pass. Additional cases cover every extended analog gain step, the +1/+2/+4 dB
+software residuals, upper-bound clamping, speaker saturation, route changes
+and close/reinitialization at +24 dB. A host-driven hotplug case toggles only
+the physical active-low EIC input while real ARM playback runs, then verifies
+both Auto routes and uninterrupted DMA progress. Clock tests check separate
+SET writes, byte accesses, missing-clock behavior, CLEAR and reset.
+Both stock ringtone captures also pass with the clock-gated input model:
+435926 headset frames (peak19106) and 436522 speaker frames (peak17325),
+both at 44.1 kHz with no clipped samples. The caller trace records the
+digital EIC SET writes at `0x673d2/0x673d6` and stereo headphone gain
+updates at `0x80821/0x80845`, independently confirming the register paths.
 
 Stock regression, with no guest patches:
 
@@ -220,21 +266,32 @@ Card writes persist in that image. Omitting the backend models an absent card.
 Copy the newly built `sdcard/progs/rockbox.bin` and `.rockbox` tree to the
 phone's existing card layout and launch it through the existing loader.
 Use a short track to check elapsed time, speaker output and headphones.
-The phone now reports an advancing timer. The analog-clock correction
-still needs a speaker/headphone listening test on the phone.
+The phone now reports an advancing timer and audible sound through both
+outputs. Test jack insertion/removal with **Speaker → Auto**, including
+booting with the jack empty and with headphones already inserted. Test
+the extended volume range on headphones; the speaker maximum is unchanged.
 
-System → Debug → View HW info shows digital and analog pages; Menu switches
-pages. Center saves both to `/.rockbox/audio-b310e.txt`; Back returns.
+System → Debug → View HW info shows digital, analog and jack/gain pages;
+Menu switches pages. Center saves all values to
+`/.rockbox/audio-b310e.txt`; Back returns.
 The log includes codec initialization/ADI failure state, route, software
 volume, completed stereo banks and peak post-volume PCM per channel since
 the last playback start. Nonzero peaks plus progressing banks distinguish
 silent source/volume from an output-path problem. Analog values are read
 through the bounded ADI mailbox and carry individual validity flags.
+The jack/gain page and saved log include raw digital EIC data/mask, APB
+clock status and the residual PCM volume. With clocks25/26 enabled and
+mask bit0 set, data bit0 should be 1 with an empty jack and 0 when inserted.
 It reads known control/status registers, avoiding VBC data ports and
 unverified DSP shared-memory addresses. A log captured while a track is
 stalled helps distinguish missing DMA progress from a codec/output issue.
 Opening this screen and saving its log through the complete application
-was verified; the saved text was read back from the FAT16 image afterward.
+was verified; the saved text was read back from the FAT32 image afterward.
+The complete player was also booted at +24 dB with a virtual headset:
+its log reports `volume_tenth_db=240`, `pcm_volume_tenth_db=0`, headphone
+gain `0x00cc`, valid analog reads and nonzero PCM peaks. Changing only
+the external jack level causes the application's existing debounce/event
+policy to switch automatically to the speaker and back, restoring `0xcc`.
 
 The supplied `dsp/Untitled.png` shows a boot-ROM READY response and a
 completed 66-block download, followed by no runtime message response.
@@ -244,9 +301,11 @@ that wrap in the old diagnostic is not sufficient evidence of a bug.
 QEMU acknowledges the download and selected runtime status exchanges;
 it does not copy those blocks into executable DSP program memory or run
 TeakLite instructions. Its acknowledgements cannot validate the old
-diagnostic's runtime handoff or prove DSP independence on the phone.
+diagnostic's runtime handoff. The subsequent hardware listening report
+establishes that this ARM-owned Rockbox playback route produces sound
+without that loader; it does not validate DSP-controlled phone services.
 
 QEMU does not emulate analog gain, PA electrical behavior or DAC ramps.
-Speaker and jack listening tests, maximum safe gain, pop suppression and
-hardware timing remain to be measured on the phone. No microphone/recording
+Jack hotplug, extended gain fidelity, pop suppression and hardware timing
+remain to be measured on the phone. No microphone/recording
 capability is advertised by this port. Vendor DSP execution is unimplemented.

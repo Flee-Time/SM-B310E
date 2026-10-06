@@ -293,6 +293,11 @@ now accepted and tested; voice/output writes still require writable RAM.
 Rockbox's implementation and stock speaker/headset register measurements
 are documented in [rockbox-audio.md](rockbox-audio.md). Digital EIC0 now
 models the active-low headset input instead of returning zero unconditionally.
+Polling requires both digital EIC clocks (APB SET `0x8b0000a0` bits25/26)
+and data-mask bit0. SET/CLEAR update status at `0x8b0000a8`; a clock-disabled
+sampling path returns zero. The regression tests cover independent/byte
+clock writes, clearing and reset, plus physical input transitions during
+the real ARM Rockbox playback tests.
 An empty jack is the default; `capture-ringtone.py --headset` reproduces the
 inserted route. The default capture handles the unplugged UI's extra preview
 confirmation. EIC hotplug/debounce IRQs remain unmodeled.
