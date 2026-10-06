@@ -33,6 +33,8 @@ def main():
     args.output = args.output.resolve()
     with machine(args, "partial-layers") as (qt, qmp, out):
         image = out / "panel.ppm"
+        qt.write(0x60000000, 0x11)
+        qt.write(0x60000000, 0x29)
         qt.memory(0x34040000, b"\x00\xf8" * (128*160))
         for offset, value in [(4,128|(160<<16)), (8,0), (12,128|(160<<16)),
                               (0x20,0x251), (0x24,0x34040000>>2),
@@ -124,9 +126,22 @@ def main():
         qt.write(LCD,8)
         actual = pixels(qmp,image)
         assert actual[(80*128+70)*3:(80*128+70)*3+6] == b"\0\0\xf8\0\xfc\0"
+        retained = actual
+        qt.write(0x60000000, 0x28)
+        assert pixels(qmp, image) == b"\0" * (128*160*3)
+        qt.write(0x60000000, 0x10)
+        qt.write(0x60000000, 0x29)
+        assert pixels(qmp, image) == b"\0" * (128*160*3), "display on while asleep"
+        qt.write(0x60000000, 0x11)
+        assert pixels(qmp, image) == retained, "sleep must retain GRAM"
+        qt.write(0x60000000, 0x28)
+        qt.write(0x60000000, 0x11)
+        assert pixels(qmp, image) == b"\0" * (128*160*3), "sleep out with display off"
+        qt.write(0x60000000, 0x29)
+        assert pixels(qmp, image) == retained
         qmp.command("system_reset")
         assert pixels(qmp,image) == b"\0" * (128*160*3)
-    print("PASS LCD disabled image, OSD2, pitch, crop, panel window, color key, alpha, RAM capture, DBI and reset")
+    print("PASS LCD layers, crop, RAM capture, DBI, sleep/wake retention and reset")
 
 
 if __name__ == "__main__":

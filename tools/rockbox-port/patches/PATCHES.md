@@ -7,9 +7,25 @@ describe the original integration and are historical. Current playback
 implementation and validation are documented in [rockbox-audio.md](../../../docs/rockbox-audio.md).
 
 The current build also includes generic `apps/audio_path.c` for this
-speaker-only target, guards its input-routing code when `INPUT_SRC_CAPS=0`,
+target with a speaker, guards its input-routing code when `INPUT_SRC_CAPS=0`,
 and permits the target's `DEFAULT_SPEAKER_MODE=2` (Auto). These changes keep
 Rockbox's existing settings and jack-event policy connected to the driver.
+
+`system-arm-classic.h` also selects the generic ARM wait-for-interrupt
+`core_sleep()` for `CONFIG_CPU == SC6530C`. Without this integration the
+scheduler falls through to the no-sleep implementation and busy-spins
+whenever no threads are runnable. See [rockbox-power.md](../../../docs/rockbox-power.md)
+for validation and the remaining power-management gaps.
+
+`disk_cache.c` computes buffer indices from integer byte addresses. FAT
+passes pointers inside sectors to `dc_dirty_buf()`; subtracting strided
+array pointers let GCC optimize its bounds check to exclude interior
+entries in the final cache buffer, losing directory writes. The full
+player regression covers directory growth, paused settings saves and
+shutdown with intact playlist/resume files.
+
+`apps/menu.c` also lets B310E's Cancel action leave the root menu for its
+previous screen; the upstream root menu ordinarily ignores Cancel.
 
 These are the 5+ integration edits the build task (T2.2) applies BEFORE
 running `tools/configure`. Each is documented with exact context + the

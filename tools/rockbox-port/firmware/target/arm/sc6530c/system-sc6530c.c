@@ -98,20 +98,21 @@ static void watchdog_stop(void)
 
 /* ---- IRQ dispatch -------------------------------------------------------
  * Read masked status at 0x80000000 and dispatch only owned lines: tick 23,
- * playback DMA 20 (normal firmware), then user timer 4. Raw status at +4
- * includes disabled lines and must not dispatch DMA while the PCM lock
+ * playback DMA 20 (normal firmware), keypad 8, then user timer 4. Raw
+ * status at +4 includes disabled lines and must not dispatch DMA while the PCM lock
  * masks it. Each handler acknowledges its own peripheral, preserving
  * unrelated interrupt enables. INT_ENABLE +8 is a full R/W mask and
  * INT_DISABLE +12 clears selected enables; neither acknowledges a source.
  */
-void TIMER23(void);   /* kernel-sc6530c.c (strong, the 1 ms tick) */
+void TIMER23(void);   /* kernel-sc6530c.c (strong, the kernel tick) */
 void TIMER0(void);    /* timer-sc6530c.c (strong, the user timer) */
+void KEYPAD(void);    /* button-sc6530c.c, capture/ack matrix edges */
 #ifndef BOOTLOADER
 void DMA(void);       /* pcm-sc6530c.c, paced stereo bank completion */
 #endif
 
 /* Stray-IRQ counter: incremented by irq_handler whenever pending holds bits
- * that have no registered handler (23, 20 or 4). Read from a
+ * that have no registered handler (23, 20, 8 or 4). Read from a
  * debugger / the debug menu to confirm the stray-line source after a
  * session (a non-zero count = stray edges were seen and safely skipped). */
 volatile uint32_t s_stray_irq_count = 0;
@@ -135,6 +136,9 @@ void irq_handler(void)
         "ldrne  r1, =DMA              \r\n"
         "bne    2f                    \r\n"
 #endif
+        "tst    r0, #0x00000100       \r\n" /* keypad IRQ8 */
+        "ldrne  r1, =KEYPAD           \r\n"
+        "bne    2f                    \r\n"
         "ldr    r1, =0x00000010       \r\n" /* TIMER0_MASK (1<<4) */
         "tst    r0, r1                \r\n"
         "ldrne  r1, =TIMER0           \r\n"
@@ -160,7 +164,12 @@ void system_reboot(void)
 {
     /* Disarm IRQs, then arm the SC6530 watchdog for a 0.5 s reset
      * (B310E-OS menu_reboot, arch/diag_menu_main.c). */
+    disable_interrupt(IRQ_FIQ_STATUS);
     REG32(INT_DISABLE_REG) = 0xFFFFFFFF;
+    /* SC6530 analog and RTC watchdog clock SET aliases; fpdoom's
+     * SC6530 reset path and stock clock code use these, not 0x1040. */
+    adi_write(0x820010e0, 4);
+    adi_write(0x820010e4, 2);
     adi_write(WDG_BASE + 0x20, 0xe551);
     {
         uint32_t ctrl = adi_read(WDG_BASE + 8);

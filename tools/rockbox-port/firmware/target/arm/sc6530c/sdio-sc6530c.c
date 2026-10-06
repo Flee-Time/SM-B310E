@@ -217,9 +217,9 @@ void sdio_init(void)
     /* The pinmux writes are atomic w.r.t. IRQs (the tick must not
      * interrupt them — HW hang). Rockbox runs with IRQs on; mask here. */
     logf("sdio: 3 pinmux");
-    disable_irq();
+    int oldlevel = disable_irq_save();
     sdio_pin_init(0);
-    enable_irq();
+    restore_irq(oldlevel);
 
     logf("sdio: 4 ldo");
     /* SD power LDOs: adi_write 0x82001184 &= ~1 ; 0x820011a4 |= 1 (bounded

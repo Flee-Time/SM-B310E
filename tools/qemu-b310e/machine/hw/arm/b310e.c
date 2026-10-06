@@ -836,6 +836,9 @@ static void b310e_init(MachineState *machine)
         DeviceState *lcdc_dev = qdev_new(TYPE_SC6530_LCDC);
         SysBusDevice *lcdc_sbd = SYS_BUS_DEVICE(lcdc_dev);
 
+        /* All board boot modes enter after the loader's panel setup.
+         * Stock starts at 0xbf1b0 and initially sends windows/RAMWR only. */
+        qdev_prop_set_bit(lcdc_dev, "panel-initialized", true);
         sysbus_mmio_map_overlap(lcdc_sbd, 0, B310E_LCDC_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(lcdc_sbd, &error_fatal);

@@ -89,6 +89,7 @@
 #include "hw/core/cpu.h"
 #include "qapi/error.h"
 #include "system/system.h"
+#include "system/runstate.h"
 #include "target/arm/cpu.h"
 #include "trace.h"
 
@@ -566,6 +567,14 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
             trace_sc6530_ana_caller(SC6530_ADI_ANA_BASE + offset, value,
                                    ldl_le_p(caller));
         }
+    }
+    /* Stock NOR 0x1a448..52 shuts down all supplies with SET1=0x1f,
+     * SET0=0x3fff. Recognize that complete request, rather than treating
+     * ordinary per-device LDO writes as a board power-off. Individual
+     * rails, their delays and USB charger restart are not modeled. */
+    if (aligned == 0x180 && (s->ana_regs[0x180 / 4] & 0x3fff) == 0x3fff &&
+        (s->ana_regs[0x184 / 4] & 0x1f) == 0x1f) {
+        qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
     }
 }
 

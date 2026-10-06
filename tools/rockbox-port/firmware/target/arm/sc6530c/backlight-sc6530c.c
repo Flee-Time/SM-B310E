@@ -152,6 +152,8 @@ bool backlight_hw_init(void)
 
 void backlight_hw_on(void)
 {
+    /* Restore the panel and current framebuffer before illuminating it. */
+    lcd_awake();
     /* The navigation/wake path (backlight_update_state, the no-fade
      * #else branch) calls backlight_hw_on() ALONE — our config has no
      * CONFIG_BACKLIGHT_FADING, so BACKLIGHT_FADE_IN_THREAD is 0 and

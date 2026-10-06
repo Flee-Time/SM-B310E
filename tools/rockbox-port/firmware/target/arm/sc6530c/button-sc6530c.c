@@ -40,7 +40,8 @@
  *
  * Rockbox's button framework (firmware/drivers/button.c) polls
  * button_read_device() and synthesizes BUTTON_REL/BUTTON_REPEAT from the
- * returned mask — we only return the physical held state.
+ * returned mask. IRQ8 also captures matrix edges and wakes CPU idle;
+ * the tick poll retains the normal debounce/repeat and END-key policy.
  *
  * SAFETY: no 0x8c pinmux writes; ADI mailbox accesses are bounded.
  */
@@ -137,7 +138,8 @@ static int button_code(uint8_t code)
 }
 
 /* Accumulated held-button mask. */
-static int held_mask;
+static volatile int held_mask;
+volatile uint32_t s_keypad_irq_count;
 
 void button_init_device(void)
 {
@@ -177,30 +179,30 @@ void button_init_device(void)
               adi_read(KEYPAD_EIC_DBNC_DMSK) | (1u << KEYPAD_EIC_PB_CH));
 
     held_mask = 0;
+    s_keypad_irq_count = 0;
+    /* Stock keypad ISR 0x351de is on INTC line8. Preserve timer/DMA
+     * enables: INT_ENABLE is a full R/W mask, not a write-one alias. */
+    int old = disable_irq_save();
+    REG32(0x80000008) |= 1u << 8;
+    restore_irq(old);
 }
 
-int button_read_device(int *data)
+static void capture_matrix_edges(void)
 {
     keypad_base_t *kpd = (keypad_base_t *)KEYPAD_BASE_ADDR;
-    uint32_t event, status;
+    uint32_t raw, event, status;
     int i;
 
-    *data = 0;
-
-    /* EIC power/END level (1 = held). */
-    if ((adi_read(KEYPAD_EIC_DBNC_DATA) >> KEYPAD_EIC_PB_CH) & 1u)
-        held_mask |= BUTTON_POWER;
-    else
-        held_mask &= ~BUTTON_POWER;
-
     /* Matrix edge frame. */
-    event = kpd->int_raw & 0xffu;
+    raw = kpd->int_raw;
+    event = raw & 0xffu;
     status = kpd->key_status;
-    if (event != 0)
+    /* Clear long-press flags too; otherwise an IRQ can stay asserted. */
+    if (raw != 0)
         kpd->int_clr = KEYPAD_INT_ALL;  /* ack + re-arm */
 
     if (status & 8u)
-        return held_mask;               /* fpdoom: status bit 3 = bad frame */
+        return;                        /* fpdoom: status bit 3 = bad frame */
 
     for (i = 0; i < 8; i++) {
         uint32_t byte, k;
@@ -222,5 +224,34 @@ int button_read_device(int *data)
         else
             held_mask &= ~b;            /* release edge */
     }
-    return held_mask;
+}
+
+void KEYPAD(void)
+{
+    s_keypad_irq_count++;
+    capture_matrix_edges();
+}
+
+/* SDIO pauses matrix scanning around a DMA block. Preserve any edge
+ * pending at resume instead of discarding it with an unconditional ACK. */
+void sc6530_keypad_capture(void)
+{
+    int old = disable_irq_save();
+    capture_matrix_edges();
+    restore_irq(old);
+}
+
+int button_read_device(int *data)
+{
+    int old = disable_irq_save();
+    *data = 0;
+    /* END remains an analog EIC level, sampled by the 100 Hz tick. */
+    if ((adi_read(KEYPAD_EIC_DBNC_DATA) >> KEYPAD_EIC_PB_CH) & 1u)
+        held_mask |= BUTTON_POWER;
+    else
+        held_mask &= ~BUTTON_POWER;
+    capture_matrix_edges();
+    int result = held_mask;
+    restore_irq(old);
+    return result;
 }
