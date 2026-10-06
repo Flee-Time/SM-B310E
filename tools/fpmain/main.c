@@ -7,20 +7,19 @@
  *
  * MENU: the first entry reboots into the stock NOR firmware (BOOT STOCK),
  * then the card's progs/ (OS-like / single apps — os.bin etc.), then the
- * fpdoom games from fpbin/config.txt (the config-driven PORTS section,
+ * fpdoom games from fpbin/config.json (the config-driven PORTS section,
  * launched with their args — --dir games/doom1 doom etc.).
  *
  * LAUNCH — the fpdoom readbin mechanism (part2's readbin.c, copied to
- * IRAM 0x40004000): the file is read DIRECTLY to its final address
- * 0x14000000 (the fpdoom app window — os.bin is now linked there too and
- * self-relocates via its appended .rel table), caches flushed, jump.
+ * IRAM 0x40004000): the file is read DIRECTLY to the NOR-boot PSRAM window
+ * 0x04000000. Apps linked at 0x14000000 self-relocate there via their
+ * appended .rel table; caches are flushed before the jump.
  * NOTE: the stock fpmenu computes the load target as
  * `__image_start & 0xfc000000`, which only yields 0x14000000 on the
  * SC6531E (its ram_addr); on the SC6530 NOR boot it computes 0 — the
  * stock game launch is SC6531E-only. Here the target is explicit.
- * No MEM_REMAP, no SMC re-init, no LCDC handling — the file overwrites
- * the framework's own PSRAM (same physical memory via the 0x14000000
- * alias), and the readbin runs from IRAM so it survives.
+ * No MEM_REMAP or SMC re-init — the file overwrites the framework's own
+ * PSRAM, and the readbin runs from IRAM so it survives.
  *
  * SAFETY: no 0x8c pinmux writes; no USB (the block is unpowered on a card
  * boot — fpdoom LIBC_SDIO=3 guards it out); all waits bounded.
@@ -33,7 +32,7 @@
 #include "sdio.h"
 #include "microfat.h"
 #include "fatfile.h"
-#include "readconf.h"
+#include "launchargs.h"
 #include "jsonconf.h"
 
 #define LCD_W 128
@@ -42,9 +41,9 @@
 #include "font5x7.h"
 
 #define MENU_MAX_ENTRIES 20u        /* progs/ entries collected          */
-#define MENU_MAX_GAMES   20u        /* total config.txt games (all cats)  */
-#define MENU_MAX_CATS    8u         /* config.txt sections (=== Name ===) */
-#define MENU_MAX_CAT_ITEMS 20u      /* games per category                 */
+#define MENU_MAX_GAMES   JC_TOTAL
+#define MENU_MAX_CATS    JC_CATEGORIES
+#define MENU_MAX_CAT_ITEMS JC_ITEMS
 #define MENU_MAX_VISIBLE 17u        /* rows between title and footer     */
 #define READBIN_DST      (0x40000000u + 0x4000u)  /* IRAM copy of the
                                                      readbin loader        */
@@ -136,19 +135,14 @@ static int menu_enum_cb(void *cbdata, fat_entry_t *p, const char *name)
     char *out;
 
     (void)cbdata;
-    if (attr & (FAT_ATTR_DIR | FAT_ATTR_VOL | FAT_ATTR_LFN))
+    if (attr & (FAT_ATTR_DIR | FAT_ATTR_VOL))
         return 0;
     if (s_pcount >= (int)MENU_MAX_ENTRIES)
         return 1;                   /* list full — stop */
 
     out = s_item[1 + s_pcount].name;
-    /* fat_enum_name already hands us a dotted, null-terminated name
-     * ("OS.BIN", or the long name when the entry has one) — copy it as-is,
-     * truncated to the 13-byte buffer. The old code re-compacted the raw
-     * space-padded 8.3 form here, but the name is NOT raw anymore: the
-     * `i = 8` jump read past the null terminator of the short dotted
-     * string into garbage ("OS.B.I.N" / "OS.B.IN" on the menu). */
-    while (j < 12 && name[j] && name[j] != ' ') {
+    /* Keep the dotted/LFN spelling and spaces; truncate the display label. */
+    while (j < sizeof(s_item[0].name) - 1 && name[j]) {
         out[j] = name[j];
         j++;
     }
@@ -166,18 +160,9 @@ static int menu_enum_cb(void *cbdata, fat_entry_t *p, const char *name)
     return 0;
 }
 
-/* ---- config.txt games (readconf.h parse) -------------------------------- */
+/* ---- JSON games and ROM discovery ------------------------------------- */
 
 static int s_gcount;                /* total games collected (all cats)   */
-
-/* parse_config emits each `|name| args` line as one item; a section header
- * `|=== Name ===|` parses to a name starting with '=' and empty args. We
- * treat those as CATEGORY boundaries: the name between the '='s becomes the
- * category title, and every following game item lands in that category. */
-static int is_section_header(const char *name)
-{
-    return name[0] == '=';
-}
 
 static void cat_name_from_header(const char *name, char *out, unsigned n)
 {
@@ -192,28 +177,40 @@ static void cat_name_from_header(const char *name, char *out, unsigned n)
     out[j] = '\0';
 }
 
+struct rom_enum_context { int (*emit)(void *, const char *); void *data; };
+
+static int rom_enum_cb(void *opaque, fat_entry_t *entry, const char *name)
+{
+    struct rom_enum_context *context = opaque;
+    if (entry->entry.attr & (FAT_ATTR_DIR | FAT_ATTR_VOL | FAT_ATTR_HID))
+        return 0;
+    return context->emit(context->data, name);
+}
+
+static int rom_scan(void *opaque, const char *directory,
+                    int (*emit)(void *, const char *), void *data)
+{
+    (void)opaque;
+    unsigned clust = fat_dir_clust(&fatdata_glob, directory);
+    if (!clust) return 0;
+    struct rom_enum_context context = { emit, data };
+    return fat_enum_name(&fatdata_glob, clust, rom_enum_cb, &context);
+}
+
 static int games_init(void)
 {
     FILE *fi;
     char *menu, *p;
     int cur = -1;                   /* current category index, -1 = none yet */
 
-    /* config.json first (robust JSON parser), config.txt legacy fallback */
+    /* JSON is the only configuration format. An absent or invalid file
+     * leaves BOOT STOCK and progs/ available. */
     fi = fopen(FPBIN_DIR "config.json", "rb");
-    menu = NULL;
-    if (fi) {
-        menu = json_parse(fi, 0x10000);
-        fclose(fi);
-    }
-    if (!menu) {
-        fi = fopen(FPBIN_DIR "config.txt", "rb");
-        if (!fi)
-            return 0;               /* no config at all - progs only */
-        menu = parse_config(fi, 0x10000);
-        fclose(fi);
-    }
+    if (!fi) return 0;
+    menu = json_parse(fi, 0x10000, rom_scan, NULL);
+    fclose(fi);
     if (!menu)
-        return 0;
+        return -1;
 
     p = menu;
     while (s_gcount < (int)MENU_MAX_GAMES) {
@@ -227,7 +224,7 @@ static int games_init(void)
         name = (char *)(p + 4);
         args = name + strlen(name) + 1;
 
-        if (is_section_header(name)) {
+        if (!get_first_arg(args)) {
             if (s_ncat < (int)MENU_MAX_CATS) {
                 cat_name_from_header(name, s_cat[s_ncat].name,
                                      sizeof(s_cat[s_ncat].name));
@@ -595,8 +592,8 @@ static void launch_bin(uint32_t clust, uint32_t size, const char *name)
     memcpy(dst, readbin, p2size - 8);
     clean_dcache();                 /* flush the memcpy'd stub + stale I-lines */
     invalidate_icache();
-    /* The readbin (from IRAM) reads the file DIRECTLY to 0x14000000 —
-     * overwriting our own PSRAM (same physical memory via the alias) —
+    /* The readbin (from IRAM) reads the file DIRECTLY to 0x04000000 —
+     * overwriting our own PSRAM —
      * then flushes and jumps. No remap, no SMC, no LCDC handling. A read
      * failure parks silently inside the readbin (its for(;;)). */
     ((readbin_t)dst)(clust, size, ram, &fatdata_glob);
@@ -615,10 +612,13 @@ static void launch_item(const menu_item_t *it)
         char *d = (char *)CHIPRAM_ADDR;
         extract_args_t x = { 0, 1, d + 0x1000 };
 
-        if (extract_args(0, &x, it->args, d + 6))
+        if (extract_args(&x, it->args, d + 6))
             *(short *)(d + 4) = (short)x.argc;
-        else
-            *(short *)(d + 4) = 0;  /* too many args — run without them */
+        else {
+            menu_status("ARGS TOO LONG", "Check config.json", COL_ERR);
+            sys_wait_ms(1500);
+            return;
+        }
     } else {
         *(short *)(CHIPRAM_ADDR + 4) = 0;   /* progs: no args */
     }
@@ -638,6 +638,7 @@ int main(int argc, char **argv)
     (void)argv;
 
     mem = malloc(LCD_W * LCD_H * 2 + 31);
+    if (!mem) for (;;) ;
     s_fb = (uint16_t *)(((intptr_t)mem + 31) & ~31);
     sys_framebuffer(s_fb);
     sys_start();
@@ -655,9 +656,12 @@ int main(int argc, char **argv)
     if (rc)
         fat_enum_name(&fatdata_glob, rc, menu_enum_cb, 0);
 
-    /* the config.txt games (ports, in categories) */
+    /* JSON ports and discovered ROMs */
     s_nitem = 1 + s_pcount;
-    games_init();
+    if (games_init() < 0) {
+        menu_status("CONFIG ERROR", "Check config.json", COL_ERR);
+        sys_wait_ms(1500);
+    }
 
     if (s_nitem == 1)
         err = 1;                    /* nothing to run except BOOT STOCK */
@@ -666,7 +670,7 @@ int main(int argc, char **argv)
     for (;;) {
         if (redraw) {
             if (err) {
-                menu_status("NOTHING TO RUN", "progs/ or fpbin/config.txt",
+                menu_status("NOTHING TO RUN", "progs/ or config.json",
                             COL_ERR);
             } else if (s_cur_cat >= 0) {
                 menu_draw_cat_list(sel, top);
@@ -736,9 +740,8 @@ int main(int argc, char **argv)
                 }
             }
         }
-        /* END (EIC power button, SC6530: adi_read(0x190) bit 3, active
-         * high) press -> reboot into the stock firmware. */
-        pb = (adi_read(0x190) >> 3) & 1u;
+        /* SC6530 EIC bank; adi_read masks the full address to 0x900. */
+        pb = (adi_read(0x82001900) >> 3) & 1u;
         if (pb && !pb_prev)
             menu_reboot();
         pb_prev = pb;

@@ -1,5 +1,97 @@
 # SD-card boot — B310E-OS (fpdoom sdboot as the NOR loader)
 
+## JSON menu and automatic ROM discovery (current)
+
+`fpbin/config.json` is the only menu configuration. `config.txt` and its
+variable parser are removed from our menu. The staged fpdoom startup code
+also reads the JSON `system` array before display/keypad initialization.
+Previously it exited when `config.txt` was missing, before our JSON menu
+loader could run. A missing/empty config now leaves BOOT STOCK and progs/
+available; malformed JSON briefly shows CONFIG ERROR, then opens that menu.
+
+Ported games stay explicitly listed in `categories[].items`. Emulator ROMs
+are discovered from `emulators[].directory` each boot. Defaults scan:
+
+| Emulator | Folder | Extensions | Binary |
+|---|---|---|---|
+| SNES | `games/snes` | `.sfc`, `.smc` | `fpbin/snes9x_16bit.bin` |
+| Game Boy | `games/gameboy` | `.gb`, `.gbc` | `fpbin/gnuboy.bin` |
+| NES | `games/nes` | `.nes` | `fpbin/infones.bin` |
+
+Extensions are case insensitive. Files retain their complete FAT filename
+in launch arguments, including spaces; the narrow display truncates labels.
+Subdirectories, hidden files and nonmatching extensions are skipped. Scanning
+is limited to the named folder, with 64 ROMs per category and 256 total
+game entries across at most eight categories. Empty/missing folders and
+missing emulator binaries produce no visible category. The 64 KiB parser
+input/output limits, 2048 tokens, 16 nesting levels, 255 bytes per string
+and 48 launch arguments bound memory use. Malformed, duplicate-key and
+truncated JSON is rejected; UTF-8 BOMs and Unicode escapes are supported.
+
+An emulator definition is written once; adding another ROM needs no edit:
+
+```json
+{
+  "system": ["--bright", "50", "--rotate", "2,0"],
+  "categories": [],
+  "emulators": [{
+    "name": "NES",
+    "bin": "fpbin/infones.bin",
+    "directory": "games/nes",
+    "extensions": [".nes"],
+    "args": ["--scaler", "99", "--dir", "games/nes", "infones"]
+  }]
+}
+```
+
+Arguments are `[bin, ...system, ...args, ROM filename]`. Keep the `--dir`
+argument consistent with `directory`; paths remain relative to the card
+root. Manual port entries use `[bin, ...system, ...args]`. Only their binary
+presence is checked; supply the configured WAD/GRP resources yourself.
+
+The build pins fpdoom to `04f19d6d54430693d00029970c51cd988c083b05`,
+stages sources under `build/fpdoom/fpmain-b310e`, applies `entry-json.patch`
+to a private framework copy, and forces a full SC6530 (`CHIP=3`), SD-only
+(`LIBC_SDIO=3`) rebuild. It never resets or overwrites the upstream app.
+An existing clone at another revision is rejected; `FPDOOM_DIR` can select
+a separate clone. Set `B310E_TOOLCHAIN` and, if needed, `B310E_HOST_CC` to
+the compiler directories. Windows uses MSYS2 bash through the PS wrapper.
+
+```powershell
+$env:B310E_TOOLCHAIN = '/d/floppy/.tools/arm-toolchain/bin'
+$env:B310E_HOST_CC = '/c/msys64/mingw64/bin'
+& tools/fpmain/build-fpmain.ps1
+# Host tests of the exact parser and argument packing:
+& C:/msys64/mingw64/bin/python.exe tools/fpmain/tests/test-config.py `
+  --cc C:/msys64/mingw64/bin/gcc.exe
+# ARM startup, directory filtering, ROM selection and actual launch args:
+& C:/msys64/mingw64/bin/python.exe tools/fpmain/tests/test-boot.py `
+  --qemu D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe `
+  --firmware D:/floppy/phonefirmware/e52q7a.bin `
+  --toolchain D:/floppy/.tools/arm-toolchain/bin `
+  --output tools/qemu-b310e/logs/fpmain-boot
+```
+
+The ARM test uses generated FAT32 cards and an original tiny launcher/ROM
+fixture. It verifies JSON-only, empty, invalid and missing configurations,
+then selects a spaced ROM filename through the keypad and checks the actual
+arguments at the launched program. It supplies the loader's initial card
+state/entry PC; it does not test NOR loader installation. Real-phone menu
+boot still needs a retest. Copy the built `sdcard/fpbin/fpmain.bin` and
+`config.json` to the card; the existing NOR loader need not change.
+
+For a shared Rockbox/menu emulator card, generate FAT32 (fpdoom requires it):
+
+```powershell
+& C:/msys64/mingw64/bin/python.exe tools/rockbox-port/tests/make-sd-image.py `
+  --fat32 --fpmain sdcard/fpbin/fpmain.bin --config sdcard/fpbin/config.json --force
+```
+
+This includes the menu, JSON config, `.rockbox`, `progs/rockbox.bin` and
+`test.wav`; it does not package your games. The original default FAT16
+image remains available for standalone Rockbox testing.
+
+
 This documents how the B310E boots **from an SD card** — no USB cable, no PC:
 the NOR loader checks the keypad, reads `fpbin/fpmain.bin` from a FAT32 card
 and runs it.
@@ -36,17 +128,15 @@ format (verified against the stock build):
 **The port is DONE (2026-08-23): the current `fpmain.bin` (30252 B, built by
 `tools/fpmain/build-fpmain.ps1`) is the fpmenu skeleton with OUR boot menu**
 — **BOOT STOCK** + the card's **progs/** (OS-like / single apps, no args) +
-the **fpbin/config.txt games** (the PORTS section, launched with their
-`--dir`/game args via `readconf.h`).
+the **fpbin/config.json ports and discovered ROMs**, launched with their
+configured arguments.
 
-**LAUNCH = the stock fpdoom readbin mechanism** (OPTION B, learnings #32):
-part2's readbin is copied to IRAM `0x40004000`, then it reads the selected
-file **directly to `0x14000000`** (the fpdoom app window) and jumps. No
-MEM_REMAP, no SMC re-init, no LCDC handling — the file overwrites the
-framework's own PSRAM (0x14000000 aliases the same physical memory), and the
-readbin survives from IRAM. (The stock's `__image_start & 0xfc000000` load
-target is SC6531E-only — it computes 0 on the SC6530 NOR boot; our menu uses
-the explicit `0x14000000`.)
+**LAUNCH uses the fpdoom readbin mechanism:** part2's readbin is copied
+to IRAM `0x40004000`, then reads the selected binary directly to the
+NOR-boot PSRAM window `0x04000000` and jumps. A fpdoom app linked at
+`0x14000000` applies its appended relocation table for that runtime base.
+No memory remap or SMC reinitialization is needed. The explicit load target
+avoids the SC6531E-only target computed by the original fpmenu.
 
 **os.bin is now RELOCATABLE** (the fpdoom mechanism, `make os-sd`): linked at
 `0x14000000`, built `-pie`, a pack_reloc `.rel` table appended, and
@@ -102,12 +192,12 @@ boot menu, 32968 B) + `progs/os.bin` (= `os-sd.bin`, the relocatable USB-free
 OS) + `progs/rockbox.bin` + `.rockbox/` + the game binaries and empty
 `games/` folders. Copy the whole `sdcard/` folder onto a FAT32 card root,
 then copy your own game data files into `sdcard/games/` per the README it
-generates there (items whose files are missing are skipped).
+generates there (entries with missing binaries are skipped).
 
 ## Build (the ported fpmain menu + the card)
 
 The fpdoom clone lives at `build\fpdoom` (cloned automatically by
-`tools/fpmain/build-fpmain.ps1` on first use; clean, commit d87f762). The
+`tools/fpmain/build-fpmain.ps1` on first use; pinned revision above). The
 loader itself is **not** built — we use the stock prebuilt `sdboot3.bin`
 from the fpdoom release.
 

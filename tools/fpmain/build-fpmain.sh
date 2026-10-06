@@ -1,86 +1,39 @@
 #!/usr/bin/env bash
-# B310E-OS - tools/fpmain/build-fpmain.sh
-#
-# Builds the PORTED fpmain.bin: our boot menu (main.c + menu_stub.s +
-# font8x16.h from this directory) staged into the clean fpdoom clone's
-# fpmenu/ app, built with the fpdoom framework, then copied back here and
-# staged on the card (sdcard/fpbin/fpmain.bin). The clone is restored to
-# pristine after the build (git checkout), so the reference stays clean.
-#
-# Linux port of tools/fpmain/build-fpmain.ps1. Prereqs: arm-none-eabi-gcc,
-# make, git, gcc and sh on PATH (the toolchain bin dir is prepended to PATH
-# automatically; override with B310E_TOOLCHAIN). pack_reloc is built once in
-# fpdoom/pack_reloc/ (the clone's Makefile needs inc/elf.h, vendored in the
-# repo at tools/pack_reloc/inc/elf.h).
-#
-# Usage:  tools/fpmain/build-fpmain.sh
-
+# Build in a dedicated directory; never overwrite or reset the fpdoom sources.
 set -euo pipefail
-
-fail() { echo "error: $*" >&2; exit 1; }
-
 Repo="$(cd "$(dirname "$0")/../.." && pwd)"
-# The fpdoom clone lives in the repo's build/ tree (gitignored, removed by
-# `make clean`) - cloned here automatically if missing. Override the location
-# with FPDOOM_DIR.
+ScriptDir="$Repo/tools/fpmain"
 Fpdoom="${FPDOOM_DIR:-$Repo/build/fpdoom}"
-Fpmenu="$Fpdoom/fpmenu"
-ScriptDir="$(cd "$(dirname "$0")" && pwd)"
-
+Ref=04f19d6d54430693d00029970c51cd988c083b05
+if [ -n "${B310E_TOOLCHAIN:-}" ]; then PATH="$B310E_TOOLCHAIN:$PATH"; fi
+if [ -n "${B310E_HOST_CC:-}" ]; then PATH="$B310E_HOST_CC:$PATH"; fi
+export PATH
+command -v arm-none-eabi-gcc >/dev/null || { echo "arm-none-eabi-gcc missing; set B310E_TOOLCHAIN" >&2; exit 1; }
 if [ ! -d "$Fpdoom/.git" ]; then
-    echo "cloning fpdoom -> $Fpdoom"
     mkdir -p "$(dirname "$Fpdoom")"
-    git clone https://github.com/ilyakurdyukov/fpdoom "$Fpdoom" || fail "fpdoom clone failed"
+    git clone https://github.com/ilyakurdyukov/fpdoom "$Fpdoom"
+    git -C "$Fpdoom" checkout --detach "$Ref"
 fi
-if [ ! -x "$Fpdoom/pack_reloc/pack_reloc" ]; then
-    echo "building fpdoom pack_reloc"
-    # the clone's pack_reloc needs inc/elf.h (the build host may lack it) -
-    # vendored in the repo at tools/pack_reloc/inc/elf.h
-    mkdir -p "$Fpdoom/pack_reloc/inc"
-    cp "$Repo/tools/pack_reloc/inc/elf.h" "$Fpdoom/pack_reloc/inc/elf.h"
-    ( cd "$Fpdoom/pack_reloc" && make CC=gcc "CFLAGS=-O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused -I inc" ) \
-        || fail "pack_reloc build failed"
+if [ "$(git -c safe.directory="$(cd "$Fpdoom" && pwd)" -C "$Fpdoom" rev-parse HEAD)" != "$Ref" ]; then
+    echo "fpdoom revision differs from $Ref; set FPDOOM_DIR to a clone at that revision" >&2
+    exit 1
 fi
-if [ ! -f "$Fpmenu/Makefile" ]; then
-    fail "fpdoom clone incomplete at $Fpdoom - missing fpmenu/Makefile"
-fi
-
-# 1. stage our sources over the stock fpmenu app sources
-cp "$ScriptDir/main.c"      "$Fpmenu/main.c"
-cp "$ScriptDir/menu_stub.s" "$Fpmenu/menu_stub.s"
-cp "$ScriptDir/font8x16.h"  "$Fpmenu/font8x16.h"
-cp "$ScriptDir/font5x7.h"   "$Fpmenu/font5x7.h"
-cp "$ScriptDir/readconf.h"  "$Fpmenu/readconf.h"
-cp "$ScriptDir/jsonconf.h"  "$Fpmenu/jsonconf.h"
-
-# 2. add menu_stub to the part1 app sources (stub symbols then get the
-#    part1 relocations, so main.c's memcpy sees the runtime addresses)
-mk="$Fpmenu/Makefile"
-sed -i 's/^APP_SRCS = main[[:space:]]*$/APP_SRCS = main menu_stub/' "$mk"
-
-# 3. build (sh on PATH provides the Makefile's mkdir -p/cat)
-( cd "$Fpmenu" && make NAME=fpmain LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi ) \
-    || fail "make failed (exit $?)"
-
-# 4. copy the result back + stage on the card
-Out="$ScriptDir/fpmain.bin"
-cp "$Fpmenu/fpmain.bin" "$Out"
+Fpmenu="$Fpdoom/fpmain-b310e"
+mkdir -p "$Fpmenu/sys" "$Fpdoom/pack_reloc/inc"
+cp "$Repo/tools/pack_reloc/inc/elf.h" "$Fpdoom/pack_reloc/inc/elf.h"
+make -C "$Fpdoom/pack_reloc" CC=gcc "CFLAGS=-O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused -I inc"
+for name in Makefile start3.s start3_t117.s readbin.c; do cp "$Fpdoom/fpmenu/$name" "$Fpmenu/$name"; done
+for name in main.c menu_stub.s font5x7.h launchargs.h jsonconf.h; do cp "$ScriptDir/$name" "$Fpmenu/$name"; done
+cp -R "$Fpdoom/fpdoom/." "$Fpmenu/sys/"
+cp "$ScriptDir/jsonconf.h" "$Fpmenu/sys/jsonconf.h"
+git apply --ignore-space-change --unsafe-paths --directory="$Fpmenu/sys" "$ScriptDir/entry-json.patch"
+sed -i 's/^APP_SRCS = main[[:space:]]*$/APP_SRCS = main menu_stub/' "$Fpmenu/Makefile"
+# Force a full rebuild: neither stale objects nor a previous LIBC_SDIO value
+# can enter the card build. CHIP=3 explicitly selects the B310E SC6530 path.
+make -B -C "$Fpmenu" NAME=fpmain CHIP=3 LIBC_SDIO=3 SYSDIR=sys TOOLCHAIN=arm-none-eabi NM=arm-none-eabi-nm
+cp "$Fpmenu/fpmain.bin" "$ScriptDir/fpmain.bin"
 Card="$Repo/sdcard/fpbin"
 mkdir -p "$Card"
-cp "$Out" "$Card/fpmain.bin"
-# stage the menu configs too (config.json is the primary, config.txt legacy)
+cp "$Fpmenu/fpmain.bin" "$Card/fpmain.bin"
 cp "$ScriptDir/config.json" "$Card/config.json"
-# config.txt (the legacy line-based PORTS menu) is NOT staged by default -
-# a fallback the user can find and copy manually if wanted.
-# if [ -f "$ScriptDir/config.txt" ]; then
-#     cp "$ScriptDir/config.txt" "$Card/config.txt"
-# fi
-echo "built: $Out"
-
-# 5. restore the clone (tracked files) + drop build artifacts
-( cd "$Fpdoom" && git checkout -- fpmenu ) || fail "clone restore (git checkout) failed"
-rm -rf "$Fpmenu/obj0"
-rm -f  "$Fpmenu/fpmain.bin" "$Fpmenu/menu_stub.s" "$Fpmenu/font5x7.h"
-# NOTE: readconf.h is NOT removed here - it is a TRACKED file in the
-# fpdoom repo (git checkout -- fpmenu above restored it).
-echo "clone restored; card staged: $Card/fpmain.bin"
+echo "built and staged: $Card/fpmain.bin (JSON only, SC6530, SD boot)"

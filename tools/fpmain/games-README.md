@@ -2,8 +2,9 @@
 
 This folder holds the **game data files** (WADs, ROMs, GRPs). The game
 **programs** (.bin launchers) live in `fpbin/` — this folder only carries the
-content the programs load. The boot menu shows each game only when its files
-are present, so a game whose files are missing simply doesn't appear.
+content the programs load. The menu scans emulator ROM folders automatically;
+ported games remain explicitly configured in `fpbin/config.json`. An entry
+requires its program binary; manual port resources are checked by that game.
 
 ## How to use
 
@@ -25,6 +26,6 @@ and `doom.wad` are the same file. Subfolders must keep their exact names.
 | `games/heretic` | `HERETIC1.WAD` | `heretic/HERETIC1.WAD` |
 | `games/hexen` | `HEXEN.WAD` | `hexen/HEXEN.WAD` |
 | `games/retris` | (none — self-contained) | — |
-| `games/snes` | `Super Metroid.sfc`, `F-Zero.sfc`, `EarthBound.sfc`, `Super Mario All-Stars.sfc`, `A Link to the Past.sfc` | `snes/` (currently only `Super Metroid.sfc`) |
-| `games/gameboy` | `Pokemon Silver.gbc` | `gameboy/Pokemon Silver.gbc` |
-| `games/nes` | `SMB.NES`, `Super Mario Bros. 3.nes`, `The Legend of Zelda.nes` | `nes/` (currently only `SMB.NES`) |
+| `games/snes` | Any `.sfc` or `.smc` ROM | `snes/` (currently only `Super Metroid.sfc`) |
+| `games/gameboy` | Any `.gb` or `.gbc` ROM | `gameboy/Pokemon Silver.gbc` |
+| `games/nes` | Any `.nes` ROM | `nes/` (currently only `SMB.NES`) |
