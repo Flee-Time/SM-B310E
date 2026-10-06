@@ -102,6 +102,9 @@ def machine(args, name, rate=8000, nor=None):
 
 
 def configure(qt, mode=10, owned=True):
+    qt.write(0x82001440, 4)
+    qt.write(0x82001440, 1)
+    qt.write(0x82001440, 2)  # SET aliases retain the audio clock
     qt.write(0x8b0001c4, 4 if owned else 0)
     qt.write(0x8a002000, 5)
     qt.write(0x8a00200c, mode | 0x8000)  # mute controller enabled, mute request clear
@@ -153,10 +156,14 @@ def test_cpu(args, mode=10, rate=8000, muted=False, owned=True):
     print(f"PASS {name}: {len(pcm)} stereo frames")
 
 
-def test_dma(args, standard=False):
+def test_dma(args, standard=False, clocked=True):
     channels = [2, 3] if standard else [24, 25]
-    with machine(args, "dma-standard" if standard else "dma-full") as (qt, qmp, out):
+    name = "dma-no-analog-clock" if not clocked else "dma-standard" if standard else "dma-full"
+    with machine(args, name) as (qt, qmp, out):
         configure(qt)
+        if not clocked:
+            qt.write(0x82001444, 4)
+            qt.write(0x82001440, 3)  # enabling DAC paths cannot re-enable clock
         qt.write(0x80000008, 1 << 20)
         qt.write(0x20102038, channels[0] + 1)
         qt.write(0x2010203c, channels[1] + 1)
@@ -192,8 +199,8 @@ def test_dma(args, standard=False):
         qt.advance(20_000_000)
     _, pcm = samples(out / "audio.wav")
     nonzero = [(l, r) for l, r in pcm if l or r]
-    assert nonzero == [(1000 + i, -1000 - i) for i in range(512)], nonzero[:12]
-    print(f"PASS {'standard' if standard else 'full'} DMA: 512 exact frames, source progress, completion and IRQ clear")
+    assert nonzero == ([(1000 + i, -1000 - i) for i in range(512)] if clocked else []), nonzero[:12]
+    print(f"PASS {name}: source progress, completion, IRQ clear, {'512 exact frames' if clocked else 'silent output'}")
 
 
 def test_copy(args):
@@ -292,6 +299,7 @@ def main():
     test_cpu(args, owned=False)
     test_dma(args)
     test_dma(args, standard=True)
+    test_dma(args, standard=True, clocked=False)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ vendor code, sound bank, firmware dump or reference archive is included.
 | DAC mode selects the sample clock | NOR `0x8123e`; stock playing `DAC_CTL=0x8005` | Ten Rockbox rates, 8–96 kHz; mode9 is 9.6 kHz, mode10 is 8 kHz |
 | DAC_CTL bit15 enables mute control, bit14 requests mute | NOR `0x8131e`, playing trace | `0x8000` is unmuted; `0xc000` requests mute |
 | APB +0x60/+0x64 are reset SET/CLEAR | NOR `0x81516` | Pulse only audio/VBC reset bits21/18; preserve keypad/EIC |
+| Analog audio needs a separate clock enable | NOR `0x81562`; live ADI caller `0x81587` writes `0x82001440=4` | Enable it before codec reset; later SET writes of 1/2 preserve bit2 |
 | INTC +8 is a full R/W enable mask | NOR `0x1b920` and device tests | Audio uses read/OR/write to preserve timer/other enables |
 | Standard DMA channels use different fields from the older controller | Stock DMA trace, consumption at NOR `0x32e3c` | Halfword, fixed DAC destination, 320-byte bank, IRQ20 |
 | Hardware requests must be routed to DMA channels | NOR `0xa7b96`; stock writes `0x20102038=4`, `0x2010203c=3` | Map DA0/DA1 requests15/16 to one-based channels4/3 before playback |
@@ -99,6 +100,28 @@ factors at their initial zero, even when the DMA engine advances normally.
 The minimum setting, −100 dB, requests exact software mute.
 Close mutes, stops VBC, disables output gates/PA and powers down the audio
 rails while preserving unrelated pins, regulators and power-button clocks.
+
+The phone subsequently reported an advancing timer with both outputs silent.
+Its log shows the expected request mappings, DMA configuration and unmuted
+DAC control, but those digital registers do not establish analog readiness.
+Rockbox omitted the analog clock SET write at `0x82001440=4`. Stock helper
+`0x81562` pairs it with APB SET `0x8b0000a0=1<<28`; disabling uses analog
+CLEAR `0x82001444=4` and APB CLEAR `0x8b0000a4=1<<28`. Separate stock helper
+`0x8153e` writes 1 and 2 to the same SET/CLEAR aliases for the DAC paths.
+Recording only the final SET value (2) had hidden the earlier clock enable.
+The new caller trace reads the return address saved by stock's shared ADI
+write helper at `SP+20`; it does not modify stock RAM or NOR.
+
+The port now enables this clock and disables the audio clock/DAC paths on
+close. It removes regulator/interface writes inferred from unused NOR
+helpers `0x6a14c/0x6a2a4`; they were absent from the running chip's audio
+calls. QEMU gates audible samples on the analog clock while DMA/bank
+progress remains independent. A regression case clears the clock, checks
+normal source progress/completion/IRQ clearing, and verifies a silent WAV.
+
+The reported ADI FIFO values `0x3150`, `0x31a0` and `0x31f0` all have FIFO
+empty bit8 set and full bit9 clear. Variation in other bits does not itself
+show a stuck FIFO. The driver waits only on the proven empty/full flags.
 
 ## Reproduce the build and tests
 
@@ -197,11 +220,16 @@ Card writes persist in that image. Omitting the backend models an absent card.
 Copy the newly built `sdcard/progs/rockbox.bin` and `.rockbox` tree to the
 phone's existing card layout and launch it through the existing loader.
 Use a short track to check elapsed time, speaker output and headphones.
-The DMA request fix addresses the observed playing-but-stuck timer; it
-still needs confirmation on real hardware.
+The phone now reports an advancing timer. The analog-clock correction
+still needs a speaker/headphone listening test on the phone.
 
-System → Debug → View HW info shows the playback control registers. Center
-saves them to `/.rockbox/audio-b310e.txt`; Back returns to the menu.
+System → Debug → View HW info shows digital and analog pages; Menu switches
+pages. Center saves both to `/.rockbox/audio-b310e.txt`; Back returns.
+The log includes codec initialization/ADI failure state, route, software
+volume, completed stereo banks and peak post-volume PCM per channel since
+the last playback start. Nonzero peaks plus progressing banks distinguish
+silent source/volume from an output-path problem. Analog values are read
+through the bounded ADI mailbox and carry individual validity flags.
 It reads known control/status registers, avoiding VBC data ports and
 unverified DSP shared-memory addresses. A log captured while a track is
 stalled helps distinguish missing DMA progress from a codec/output issue.

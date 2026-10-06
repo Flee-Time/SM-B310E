@@ -311,6 +311,7 @@ already left the DAC drains to the host backend before output deactivates.
 | VBC control +0x18 | bank bit9, RAM access bit10, DAC DMA bits13/14, playback bit15 |
 | Digital codec `0x8a002000` | left/right gates at +0 bits0/2; sample mode +0x0c bits3:0; mute controller bit15 / request bit14 |
 | DSP `0x8b0001c4` | bit2 gives ARM access to VBC; DSP-owned playback produces silence |
+| Analog clock SET/CLEAR `0x82001440/0x82001444` | write-one bit2 enables/disables audible output; DAC path SET writes of 1/2 retain the clock |
 
 Sample modes0..10 are 96000, 48000, 44100, 32000, 24000, 22050, 16000, 12000,
 11025, 9600, 8000 Hz. Samples are signed16-bit little-endian stereo. A QEMU

@@ -20,6 +20,7 @@ sc6530_aux_write(uint64_t addr, uint64_t val, uint32_t pc) "APB write addr=0x%" 
 # addresses. Enable at runtime with --trace "sc6530_ana_*".
 sc6530_ana_read(uint64_t addr, uint64_t val, uint32_t pc) "ANA read  addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
 sc6530_ana_write(uint64_t addr, uint64_t val, uint32_t pc) "ANA write addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
+sc6530_ana_caller(uint64_t addr, uint64_t val, uint32_t caller) "stock ADI addr=0x%" PRIx64 " val=0x%" PRIx64 " caller=0x%08" PRIx32
 
 # sc6530_lcdc.c - LCDC refresh trigger: emitted when the guest starts a
 # refresh (LCDC ctrl bit 3 write, drivers/lcd.c lcd_show `ctrl |= 8`) -

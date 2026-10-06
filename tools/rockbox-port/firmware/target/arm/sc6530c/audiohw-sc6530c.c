@@ -19,6 +19,7 @@
 static bool initialized, adi_failed;
 static bool speaker_enabled;
 static unsigned current_fsel = HW_FREQ_DEFAULT;
+static int current_volume = -1000;
 
 static bool adi_wait(uint32_t mask, bool set)
 {
@@ -32,11 +33,12 @@ static bool adi_wait(uint32_t mask, bool set)
     return true;
 }
 
-static uint16_t adi_read(uint32_t addr)
+static bool adi_read_checked(uint32_t addr, uint16_t *value)
 {
     int old = disable_irq_save();
     uint32_t data = 0;
     unsigned budget = ADI_BUDGET;
+    bool valid = false;
     if (!adi_wait(1u << 8, true))
         goto done;
     ADI_CMD = addr & 0xfff;
@@ -51,9 +53,19 @@ static uint16_t adi_read(uint32_t addr)
     } while (data & (1u << 31));
     if (((data >> 16) & 0x1fff) != (addr & 0xfff))
         adi_failed = true;
+    else
+        valid = true;
 done:
+    *value = data;
     restore_irq(old);
-    return data;
+    return valid;
+}
+
+static uint16_t adi_read(uint32_t addr)
+{
+    uint16_t value;
+    adi_read_checked(addr, &value);
+    return value;
 }
 
 static void adi_write(uint32_t addr, uint16_t value)
@@ -176,6 +188,9 @@ void audiohw_init(void)
      * or touch keypad/EIC resets, LCD pins or unrelated regulator bits. */
     SC_AUDIO_REG(0x20500060) = 1; /* DMA AHB clock */
     SC_AUDIO_REG(0x8b0000a0) = 1u << 28; /* audio APB clock */
+    /* NOR 0x81562: the analog audio clock has its own write-one enable.
+     * Later SET writes of 1 and 2 enable the DAC paths without clearing it. */
+    adi_write(0x82001440, 4);
     SC_AUDIO_REG(0x8b000060) = (1u << 21) | (1u << 18);
     adi_write(0x82001450, 1);
     udelay(10);
@@ -202,16 +217,6 @@ void audiohw_init(void)
     adi_update(CODEC + 0x48, 0xc0, 0x40); /* captured VCM trim */
     adi_update(CODEC + 0x4c, 0x3f, 0x28);
     udelay(3000);
-
-    /* DAC interface device 1, stock 0x6a14c/0x6a2a4. */
-    adi_update(0x82001180, 0x10, 0);
-    udelay(3000);
-    adi_update(0x820011a0, 0x10, 0x10);
-    udelay(3000);
-    adi_update(0x82001180, 0x8000, 0);
-    adi_update(0x820011a0, 0x8000, 0x8000);
-    adi_update(0x820012a0, 0x30, 0x20);
-    adi_update(0x820012a4, 0xc0, 0x80);
 
     /* Enable DAC cores; select the stock speaker or headset route below.
      * Earpiece, line-in and recording routes stay disabled. */
@@ -274,14 +279,32 @@ void audiohw_close(void)
     adi_update(CODEC + 0x40, 0xfa, 0);
     adi_update(0x82001164, 0x1f0, 0x1f0);
     SC_AUDIO_REG(0x8b0001c4) &= ~0x160u;
+    adi_write(0x82001444, 7); /* NOR 0x8153e/0x81562: DAC paths + audio clock */
+    SC_AUDIO_REG(0x8b0000a4) = 1u << 28;
     initialized = false;
 }
 
 void audiohw_set_volume(int val)
 {
+    current_volume = val;
     /* sound.c supplies tenths of a dB. The software PCM scaler starts
      * muted until this hook sets its master factors. Keep the captured
      * analog gains fixed and apply the user's volume before deinterleave. */
     pcm_set_master_volume(val <= -1000 ? INT_MIN : val,
                           val <= -1000 ? INT_MIN : val);
+}
+
+void sc6530_audio_debug(struct sc6530_audio_debug *info)
+{
+    /* Only the known codec/rail registers listed in audio-target.h.
+     * Analog reads must use the ADI mailbox, never direct MMIO loads. */
+    info->valid = 0;
+    for (unsigned i = 0; i < SC_AUDIO_ANALOG_COUNT; i++)
+        if (adi_read_checked(sc_audio_analog_regs[i].addr, &info->analog[i]))
+            info->valid |= 1u << i;
+    info->initialized = initialized;
+    info->adi_failed = adi_failed;
+    info->speaker = speaker_enabled;
+    info->volume = current_volume;
+    sc6530_pcm_debug(&info->banks, info->peak);
 }

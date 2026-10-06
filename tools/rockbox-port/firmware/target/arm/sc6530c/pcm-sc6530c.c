@@ -27,6 +27,17 @@ static const int16_t *source;
 static size_t source_frames;
 static unsigned lock_depth, completed;
 static bool running, requesting, eof, draining;
+static uint32_t bank_count;
+static unsigned peak_sample[2];
+
+void sc6530_pcm_debug(uint32_t *banks, unsigned peak[2])
+{
+    int old = disable_irq_save();
+    *banks = bank_count;
+    peak[0] = peak_sample[0];
+    peak[1] = peak_sample[1];
+    restore_irq(old);
+}
 
 static void sink_lock(void)
 {
@@ -95,6 +106,13 @@ static unsigned fill_plane(void)
         }
         plane[0][n] = *source++;
         plane[1][n] = *source++;
+        for (unsigned ch = 0; ch < 2; ch++)
+        {
+            int sample = plane[ch][n];
+            unsigned magnitude = sample < 0 ? -sample : sample;
+            if (magnitude > peak_sample[ch])
+                peak_sample[ch] = magnitude;
+        }
         source_frames--;
     }
     unsigned valid = n;
@@ -154,6 +172,7 @@ void DMA(void)
     /* Do not reuse either plane until both channels finished reading it. */
     if (completed != DMA_CHANNELS)
         return;
+    bank_count++;
     if (draining)
     {
         stop_hardware();
@@ -186,6 +205,8 @@ static void sink_play(const void *addr, size_t size)
     source = addr;
     source_frames = size / 4;
     eof = draining = false;
+    bank_count = 0;
+    peak_sample[0] = peak_sample[1] = 0;
     fill_plane();
     /* Stock 0xa7b96: bind VBC DA0/DA1 hardware requests15/16 to
      * one-based DMA channels4/3. Channel enable and destination address
