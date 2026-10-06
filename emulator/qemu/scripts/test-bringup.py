@@ -89,6 +89,23 @@ def main():
         qt.write(gpio + 4, 2)
         assert qt.read(gpio) == 2
         qt.command("set_irq_in /machine/peripheral/sc6530-aux gpio-input 49 0")
+        # Charger presence is analog EIC18 (channel2), separate from END.
+        qt.command("set_irq_in /machine/peripheral/sc6530-adi charger-input 0 1")
+        qt.write(0x82001900, 4)  # guest writes cannot force a physical input
+        assert qt.read(0x82001900) & 4 == 0
+        qt.write(0x82001904, 12)
+        assert qt.read(0x82001900) & 4 == 4
+        qt.write(0x82000018, 0x900)
+        assert qt.read(0x8200001c) & 4 == 4
+        qt.write(0x82001904, 8)
+        assert qt.read(0x82001900) & 4 == 0
+        qmp.command("system_reset")
+        qt.write(0x82001904, 4)
+        assert qt.read(0x82001900) & 4 == 4  # cable persists over reset
+        qt.command("set_irq_in /machine/peripheral/sc6530-adi charger-input 0 0")
+        qt.command("writeb 0x82001900 0xff")
+        assert qt.read(0x82001900) & 4 == 0
+        qmp.command("system_reset")
         assert command(qt, 0x9f) == 0xc8601700
         assert command(qt, 0x05) == 0
         command(qt, 0x06)

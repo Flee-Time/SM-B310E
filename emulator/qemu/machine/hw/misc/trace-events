@@ -60,6 +60,8 @@ sc6530_vbc_bank(unsigned bank, unsigned frames, unsigned queued) "VBC bank=%u fr
 sc6530_vbc_rate(unsigned mode, unsigned rate) "VBC FS mode=%u rate=%u"
 sc6530_timer_tick(uint32_t load, uint32_t ctl) "load=%u ctl=0x%x"
 sc6530_timer_int(uint32_t value, uint32_t pc) "value=0x%x pc=0x%08x"
+sc6530_timer_write(uint64_t offset, uint32_t value, uint32_t pc) "offset=0x%" PRIx64 " value=0x%x pc=0x%08x"
+sc6530_systimer_write(uint64_t offset, uint32_t value, uint32_t pc) "offset=0x%" PRIx64 " value=0x%x pc=0x%08x"
 sc6530_sfc_command(uint32_t opcode, uint32_t address, uint32_t config, uint32_t pc) "opcode=0x%02x address=0x%08x config=0x%08x pc=0x%08x"
 sc6530_gpt_write(uint32_t offset, uint32_t value) "offset=0x%x value=0x%x"
 sc6530_midi_render(uint32_t source, uint32_t output, unsigned frames, unsigned voices, bool error) "source=0x%x output=0x%x frames=%u voices=%u error=%u"

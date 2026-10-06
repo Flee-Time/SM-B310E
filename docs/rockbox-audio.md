@@ -17,8 +17,8 @@ Register assertions verify their programming, not their electrical behavior.
 
 The input is the unmodified 8 MiB `e52q7a.bin`:
 SHA256 `5e44e0858d4eacbd1c0124d3bb8d152cb429c9222a99b42f8f75c86300846c92`.
-Stock boot uses `boot-overlays=off`; the explicit experimental GPIO49-high
-input allows LCD navigation. Its physical board purpose remains unconfirmed.
+Stock boot uses `boot-overlays=off`; the default GPIO49-high input allows
+LCD navigation. Its physical board purpose remains unconfirmed.
 Keypad events open the stock ringtone preview; no guest RAM or NOR patches
 are used. The reference archive is used for register semantics only; no
 vendor code, sound bank, firmware dump or reference archive is included.
@@ -107,6 +107,30 @@ The target `audiohw_set_volume` hook sets the software PCM master factors
 using the tenths-of-a-dB value supplied by Rockbox. A no-op here leaves those
 factors at their initial zero, even when the DMA engine advances normally.
 The minimum setting, −100 dB, requests exact software mute.
+
+The codec now advertises stereo volume and accepts independent left/right
+values. Its former `MONO_VOL_CAP` made Rockbox bypass balance entirely.
+The shared analog headphone gain is chosen from the louder channel; each
+channel receives its own remaining software attenuation, including exact
+mute at the minimum. Balance is therefore preserved above 0 dB, during
+route changes and after codec reinitialization.
+
+Stereo/mono, mono-left/right, swap, karaoke and stereo width already use
+Rockbox's ARM DSP. A complete-player WAV regression verifies all of these
+with different left/right tones, plus both balance extremes, half balance
+and balance with positive gain. Mono versus stereo will sound the same on
+the phone's single speaker after it combines channels; test the difference
+through headphones with `test.wav` (440 Hz left, 660 Hz right).
+Run `ports/rockbox/tests/test-sound-settings.py` with `--qemu`, `--rockbox`,
+`--runtime` and `--output`. It uses private SD images and deterministic
+instruction timing. Normal Windows wall-clock playback can still underrun
+when host scheduling delays service of the small VBC DMA banks; these
+tests do not establish perfect real-time emulator audio or analog fidelity.
+`--realtime` selects host-clock playback to diagnose that remaining issue;
+its spectral checks currently fail on this Windows headless host because
+missed bank service inserts silence and disrupts tone phase. The idle
+regression allows up to 20 seconds for the mixer's three-second PCM silence
+drain before asserting that VBC stopped. The phone does not use host timing.
 
 The headphone maximum now extends to +24 dB relative to the old maximum.
 The reference codec gain definitions describe codes1..15 as −33..+9 dB

@@ -46,6 +46,40 @@
 #define ADI_FIFO_EMPTY  (1 << 8)
 #define ADI_BUDGET      1000000u
 
+#define ANA_EIC_DATA    0x82001900u
+#define ANA_EIC_DMSK    0x82001904u
+#define CHARGER_EIC_BIT (1u << 2)
+#define GPIO_DATA       0x8a000000u
+#define GPIO_DMSK       0x8a000004u
+#define GPIO_DIR        0x8a000008u
+#define CHARGER_DISABLE (1u << 6)
+#define CHARGER_PGB     (1u << 8)
+#define CHARGER_CHGSB   (1u << 9)
+
+static bool charger_present;
+
+static bool adi_read(uint32_t addr, uint32_t *value)
+{
+    int old = disable_irq_save();
+    uint32_t n = ADI_BUDGET, data;
+    bool ok = false;
+    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
+        if (--n == 0) goto done;
+    REG32(0x82000018) = addr & 0xfff;
+    n = ADI_BUDGET;
+    do {
+        data = REG32(0x8200001c);
+        if (!(data & (1u << 31))) {
+            ok = ((data >> 16) & 0xfff) == (addr & 0xfff);
+            if (ok) *value = data & 0xffff;
+            break;
+        }
+    } while (--n);
+done:
+    restore_irq(old);
+    return ok;
+}
+
 static bool adi_write(uint32_t addr, uint32_t val)
 {
     uint32_t n = ADI_BUDGET;
@@ -61,19 +95,42 @@ static bool adi_write(uint32_t addr, uint32_t val)
 
 void power_init(void)
 {
-    /* Nothing to do — the B310E boot menu already did chip init. */
+    uint32_t mask;
+    int old = disable_irq_save();
+    /* e52q7a CHG_PHY_IsChargerPresent at NOR 0x663d4 reads logical
+     * EIC18. The table at 0xca92c maps that to analog channel2.
+     * Preserve END's channel3 and the existing charger enable (GPIO6). */
+    adi_write(0x820010e0, 0x80);
+    adi_write(0x820010e4, 0x20);
+    if (adi_read(ANA_EIC_DMSK, &mask))
+        adi_write(ANA_EIC_DMSK, mask | CHARGER_EIC_BIT);
+    REG32(0x8b0000a0) = 1u << 19; /* GPIO clock SET */
+    REG32(GPIO_DIR) &= ~(CHARGER_PGB | CHARGER_CHGSB);
+    REG32(GPIO_DMSK) |= CHARGER_PGB | CHARGER_CHGSB;
+    restore_irq(old);
 }
 
 unsigned int power_input_status(void)
 {
-    /* No charger detection implemented (M1). */
-    return 0;
+    uint32_t data;
+    if (adi_read(ANA_EIC_DATA, &data))
+        charger_present = (data & CHARGER_EIC_BIT) != 0;
+    return charger_present ? POWER_INPUT_MAIN_CHARGER : POWER_INPUT_NONE;
 }
 
 bool charging_state(void)
 {
-    /* No charging support (M1). */
-    return false;
+    if (!power_input_status())
+        return false;
+    /* NOR 0x66352 / its GetCHGDoneStatus string: PGB is raw GPIO8,
+     * CHGSB is GPIO9; PGB low + CHGSB high means complete. PGB high
+     * means the charger has no good input. A configured GPIO6 high
+     * explicitly disables charging (0x6626c); do not drive it here. */
+    uint32_t data = REG32(GPIO_DATA);
+    if ((REG32(GPIO_DIR) & REG32(GPIO_DMSK) & CHARGER_DISABLE) &&
+        (data & CHARGER_DISABLE))
+        return false;
+    return (data & (CHARGER_PGB | CHARGER_CHGSB)) == 0;
 }
 
 void power_off(void)

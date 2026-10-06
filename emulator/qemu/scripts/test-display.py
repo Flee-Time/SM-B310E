@@ -141,7 +141,62 @@ def main():
         assert pixels(qmp, image) == retained
         qmp.command("system_reset")
         assert pixels(qmp,image) == b"\0" * (128*160*3)
-    print("PASS LCD layers, crop, RAM capture, DBI, sleep/wake retention and reset")
+    with machine(args, "rgb888-alpha") as (qt, qmp, out):
+        image = out / "panel.ppm"
+        qt.write(0x60000000, 0x11)
+        qt.write(0x60000000, 0x29)
+        for offset, value in [(4,2|(2<<16)), (8,0), (12,2|(2<<16)),
+                              (0x10,0xff), (0x54,0x34060000>>2),
+                              (0x5c,2|(2<<16)), (0x60,4), (0x64,0), (0x68,255)]:
+            qt.write(LCD+offset,value)
+        # Two rows with a four-pixel pitch: padding must never be displayed.
+        words = [0xffff0000,0x8000ff00,0xff112233,0xff112233,
+                 0x0000ff00,0xffffffff,0xff112233,0xff112233]
+        expected = b"\xf8\0\0\0\x80\x78\0\0\xf8\xf8\xfc\xf8"
+        for endian in range(4):
+            encoded = []
+            for word in words:
+                if endian >= 2:
+                    word = (word << 16 | word >> 16) & 0xffffffff
+                encoded.append(word.to_bytes(4, "big" if endian in (1,3) else "little"))
+            qt.memory(0x34060000,b"".join(encoded))
+            qt.write(LCD+0x50,0x31|(endian<<8))
+            window(qt,0,0,2,2)
+            qt.write(LCD,8)
+            data = pixels(qmp,image)
+            assert data[:6]+data[128*3:128*3+6] == expected, ("ARGB/pitch",endian)
+        qt.memory(0x34060000,struct.pack("<8I",*words))
+        qt.write(LCD+0x70,0xff0000)
+        qt.write(LCD+0x50,0x33)  # exact RGB888 color key
+        window(qt,0,0,2,2)
+        qt.write(LCD,8)
+        assert pixels(qmp,image)[:3] == b"\0\0\xf8"
+        qt.write(LCD+0x50,0x35)  # block alpha ignores inline alpha
+        window(qt,0,0,2,2)
+        qt.write(LCD,8)
+        assert pixels(qmp,image)[128*3:128*3+3] == b"\0\xfc\0"
+        qt.write(LCD+0x50,0x39)  # inline alpha multiplied by block alpha
+        qt.write(LCD+0x68,128)
+        window(qt,0,0,2,2)
+        qt.write(LCD,8)
+        assert pixels(qmp,image)[3:6] == b"\0\x40\xb8"
+        qt.write(LCD+0x50,0x8031)  # red/blue exchange
+        window(qt,0,0,2,2)
+        qt.write(LCD,8)
+        assert pixels(qmp,image)[:3] == b"\0\0\xf8"
+        # RGB565 OSD1 has a separate byte plane, with its own word order.
+        qt.memory(0x34060000,b"\0\xf8"*8)
+        qt.write(LCD+0x58,0x34061000>>2)
+        qt.write(LCD+0x68,255)
+        for endian, lane in enumerate((3,0,1,2)):
+            alpha = bytearray(8)
+            alpha[lane] = 128
+            qt.memory(0x34061000,alpha)
+            qt.write(LCD+0x50,0x251|(endian<<13))
+            window(qt,0,0,2,2)
+            qt.write(LCD,8)
+            assert pixels(qmp,image)[:3] == b"\x78\0\x78", ("alpha endian",endian)
+    print("PASS LCD layers, ARGB word order/alpha/key/pitch, capture, DBI, sleep/wake and reset")
 
 
 if __name__ == "__main__":

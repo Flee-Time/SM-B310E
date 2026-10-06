@@ -45,13 +45,16 @@ section for the exact spellings.
 
 ## Run
 
-The machine: `-M b310e,boot-mode=warm|stock|ours` (default warm) with
+The machine: `-M b310e,boot-mode=warm|stock|ours|rockbox` (default stock) with
 `-display none -serial none` (headless; the display renders through the
 QEMU console, captured with `screendump`). Options:
 
-- `boot-mode` - `warm` (default), `stock`, or `ours`.
-- `hold-end=on` - assert the EIC END key (0x82001900 bit 3) from reset - the
-  END-hold test (FALSIFIED, see Boot-paths).
+- `boot-mode` - `stock` (default), `warm`, `ours`, or `rockbox`.
+- `hold-end=on` (default for stock/warm) - assert analog END during power-on.
+  Custom firmware does not inherit the held key. Earlier warm-path END
+  experiments below describe the old boot investigation.
+- `gpio49-high=on` (default) - supply the ready level observed by the stock
+  LCD sleep/wake wrapper. Its electrical source remains unidentified.
 
 The `-drive` lines:
 - **NOR** (boot=warm/stock): `tools\spd_dump\full-backup.bin` - the
@@ -234,7 +237,7 @@ img base, `xp /4wx 0x8100300c` for the sys-ms counter), `info registers`,
 
 The stock firmware boots two ways, selected by `boot-mode`.
 
-### warm - `-M b310e,boot-mode=warm` (default; PC = 0x10000)
+### warm - `-M b310e,boot-mode=warm` (experimental; PC = 0x10000)
 
 Skips the PBL entirely: the CPU starts at the main-OS vector table (0x10000),
 the warm-boot magic (`0xFE519C04`) is written to the PSRAM base, and the OS
@@ -256,7 +259,7 @@ runs straight through the boot task -> module init -> the display phase.
 | SFC_STATUS 0x20a00010 benign = 0x3 | the SFC driver waits for bit 0 (ready); value 2 (bit 0 clear) spun the poll forever |
 | `hold-end` (optional) | the EIC END-key physical-level model (the END-hold test - FALSIFIED, see below) |
 
-### stock - `-M b310e,boot-mode=stock` (PC = 0x0)
+### stock - `-M b310e,boot-mode=stock` (default; PC = 0x0)
 
 Runs the full PBL (boot vector 0x0 -> 0x46e4 -> the mode-stack setup ->
 caseD_a -> the reload). The PBL touches extra init the warm path skips:

@@ -97,6 +97,9 @@
 #define BATTERY_CAPACITY_INC       50  /* capacity increment */
 
 #define CONFIG_BATTERY_MEASURE VOLTAGE_MEASURE
+/* Observe the external charger; its current/voltage control stays with
+ * the boot firmware and charger IC. */
+#define CONFIG_CHARGING CHARGING_MONITOR
 
 /***************************************************************************/
 /* Application Config */

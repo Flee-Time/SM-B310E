@@ -22,6 +22,7 @@ static bool speaker_enabled;
 static unsigned current_fsel = HW_FREQ_DEFAULT;
 static int current_volume = -1000;
 static int digital_volume = -1000;
+static int volume_left = -1000, volume_right = -1000;
 
 static bool adi_wait(uint32_t mask, bool set)
 {
@@ -141,16 +142,23 @@ static unsigned headphone_gain(void)
     return 4 + (current_volume > 0 ? (current_volume + 29) / 30 : 0);
 }
 
+static void apply_pcm_volume(int gain)
+{
+    int left = volume_left - gain;
+    int right = volume_right - gain;
+    if (left > 0) left = 0;
+    if (right > 0) right = 0;
+    digital_volume = MAX(left, right);
+    pcm_set_master_volume(volume_left <= -1000 ? INT_MIN : left,
+                          volume_right <= -1000 ? INT_MIN : right);
+}
+
 static void apply_volume(bool speaker)
 {
     int gain = speaker ? 0 : (headphone_gain() - 4) * 30;
-    digital_volume = current_volume - gain;
     /* The speaker stays at its proven stock PA gain. Positive headphone
      * volume settings saturate at the speaker's existing maximum. */
-    if (digital_volume > 0)
-        digital_volume = 0;
-    int pcm_volume = digital_volume <= -1000 ? INT_MIN : digital_volume;
-    pcm_set_master_volume(pcm_volume, pcm_volume);
+    apply_pcm_volume(gain);
     if (!speaker)
         adi_update(CODEC + 0x94, 0xff, headphone_gain() * 0x11);
 }
@@ -319,22 +327,18 @@ void audiohw_close(void)
     initialized = false;
 }
 
-void audiohw_set_volume(int val)
+void audiohw_set_volume(int left, int right)
 {
     /* sound.c supplies tenths of a dB. Preserve the old range/default;
      * additional headphone headroom ends at codec unity, code12. */
-    if (val < -1000)
-        val = -1000;
-    if (val > 240)
-        val = 240;
     unsigned previous_gain = headphone_gain();
-    current_volume = val;
+    volume_left = MIN(MAX(left, -1000), 240);
+    volume_right = MIN(MAX(right, -1000), 240);
+    current_volume = MAX(volume_left, volume_right);
     if (!initialized)
     {
         /* No analog access before the codec has power/clocks. */
-        digital_volume = val > 0 ? 0 : val;
-        int pcm_volume = val <= -1000 ? INT_MIN : digital_volume;
-        pcm_set_master_volume(pcm_volume, pcm_volume);
+        apply_pcm_volume(0);
         return;
     }
     bool change_gain = !speaker_enabled && previous_gain != headphone_gain();

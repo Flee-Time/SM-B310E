@@ -4,7 +4,8 @@
  * into the panel's CASET/RASET window. Panel pixels persist after the
  * guest frees its source buffers and across partial updates.
  * Register offsets and RGB565 layout are verified against stock e52q7a.
- * Unsupported color formats are logged rather than read as RGB565.
+ * Stock icons use 32-bit RGB888 with inline pixel alpha; backgrounds use
+ * RGB565. Unsupported formats/rotation are logged rather than misread.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
@@ -189,11 +190,23 @@ static uint32_t sc6530_layer_pixel(Sc6530LcdcState *s, unsigned base,
     }
     sx = x - dx;
     sy = y - dy;
-    if (format != 5 || (ctrl & 0x1c00)) {
-        return under; /* Only stock's unrotated RGB565 path is verified. */
+    if ((format != 3 && format != 5) || (ctrl & 0x1c00)) {
+        return under;
     }
     addr = (hwaddr)r[1] << 2;
-    {
+    if (format == 3) {
+        uint32_t pixel;
+        address_space_read(&address_space_memory, addr + 4 * (sy * pitch + sx),
+                           MEMTXATTRS_UNSPECIFIED, bytes, 4);
+        /* The LCDC consumes A,R,G,B bytes from a DMA word. Endian 0 is
+         * native ARGB; 1 reverses the bytes; 2 swaps the two halfwords. */
+        pixel = endian == 1 || endian == 3 ? ldl_be_p(bytes) : ldl_le_p(bytes);
+        if (endian >= 2) {
+            pixel = (pixel << 16) | (pixel >> 16);
+        }
+        rgb = pixel & 0xffffff;
+        alpha = pixel >> 24;
+    } else {
         unsigned index = sy * pitch + sx;
         uint16_t pixel;
         /* DMA word order 2 sends low halfword first, MSB byte first:
@@ -210,13 +223,19 @@ static uint32_t sc6530_layer_pixel(Sc6530LcdcState *s, unsigned base,
     }
     if (base != 0x20) {
         unsigned select = (ctrl >> 2) & 3;
-        if ((ctrl & 2) && sc6530_to565(rgb) == sc6530_to565(r[8])) {
+        if ((ctrl & 2) && (format == 3 ? rgb == (r[8] & 0xffffff) :
+                          sc6530_to565(rgb) == sc6530_to565(r[8]))) {
             return under;
         }
         {
-            /* RGB565 pixel alpha is a separate byte plane. */
+            /* RGB565 pixel alpha is a separate byte plane on OSD1.
+             * RGB888 carries alpha in the fourth byte of each pixel. */
             hwaddr alpha_addr = ((hwaddr)r[2] << 2) + sy * pitch + sx;
-            if (select != 1) {
+            if (format == 5 && select != 1) {
+                unsigned alpha_endian = (ctrl >> 13) & 3;
+                static const unsigned order[] = {3, 0, 1, 2};
+                alpha_addr = ((hwaddr)r[2] << 2) +
+                             ((sy * pitch + sx) ^ order[alpha_endian]);
                 address_space_read(&address_space_memory, alpha_addr,
                                    MEMTXATTRS_UNSPECIFIED, bytes, 1);
                 alpha = bytes[0];
@@ -258,7 +277,7 @@ static void sc6530_lcdc_refresh_panel(Sc6530LcdcState *s)
     for (unsigned i = 0; i < ARRAY_SIZE(layers); i++) {
         uint32_t ctrl = s->regs[layers[i] / 4];
         unsigned format = (ctrl >> 4) & 15;
-        if ((ctrl & 1) && (format != 5 || (ctrl & 0x1c00))) {
+        if ((ctrl & 1) && ((format != 3 && format != 5) || (ctrl & 0x1c00))) {
             qemu_log_mask(LOG_UNIMP, "sc6530_lcdc: unsupported layer %x ctrl %x\n",
                           layers[i], ctrl);
         }

@@ -196,20 +196,17 @@ static void sc6530_timer2_write(void *opaque, hwaddr offset,
 {
     Sc6530TimerState *s = opaque;
     uint32_t pc = sc6530_timer_guest_pc();
+    trace_sc6530_timer_write(offset, value, pc);
 
     switch (offset) {
     case SC6530_TIMER2_LOAD:
         s->load = value;
-        qemu_log("sc6530_timer: timer2 LOAD write val=0x%" PRIx64
-                 " pc=0x%08" PRIx32 "\n", value, pc);
         if (s->ctl & 0x80) {
             sc6530_timer2_run(s);   /* reload while running */
         }
         break;
     case SC6530_TIMER2_CTL:
         s->ctl = value;
-        qemu_log("sc6530_timer: timer2 CTL write val=0x%" PRIx64
-                 " pc=0x%08" PRIx32 "\n", value, pc);
         if (value & 0x80) {
             sc6530_timer2_run(s);
         } else {
@@ -220,8 +217,6 @@ static void sc6530_timer2_write(void *opaque, hwaddr offset,
         /* bit0 = IRQ enable, bit3 = clear pending (write 9 = both; the
          * kernel's sys_tick_isr writes exactly 9). The pending bit stays
          * readable independent of the enable state. */
-        qemu_log("sc6530_timer: INT write val=0x%" PRIx64 " pc=0x%08"
-                 PRIx32 "\n", value, pc);
         s->int_enable = (value & 1u) != 0;
         if (value & 8u) {
             s->pending = false;
@@ -278,6 +273,7 @@ static void sc6530_systimer_write(void *opaque, hwaddr offset,
 {
     Sc6530TimerState *s = opaque;
     uint32_t pc = sc6530_timer_guest_pc();
+    trace_sc6530_systimer_write(offset, value, pc);
 
     switch (offset) {
     case 0x00:
@@ -298,8 +294,6 @@ static void sc6530_systimer_write(void *opaque, hwaddr offset,
         } else {
             sc6530_systimer_irq(s);
         }
-        qemu_log("sc6530_timer: sys-ctl write val=0x%" PRIx64 " pc=0x%08"
-                 PRIx32 "\n", value, pc);
         break;
     }
     case SC6530_SYSTIMER_MS:

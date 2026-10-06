@@ -94,16 +94,40 @@ model individual supply voltages, watchdog reset timing or automatic
 restart with USB power present. Hardware shutdown remains to be checked
 both with USB disconnected and connected.
 
-The reported freeze occurred while paused with USB connected. Rockbox's
-idle timeout applies to paused playback. Charger detection is still a
-stub, so Rockbox cannot inhibit this timeout when USB supplies power.
-The phone's ADC can show the supplied rail as full while USB is attached;
-that is not a measurement of the battery's stored charge. The shutdown
-trigger is consistent with the idle timeout, but no hardware log proves
-which trigger ran. For uninterrupted paused use while charging, set
-**Settings → General Settings → Startup/Shutdown → Idle Poweroff → Off**
-until charger detection is implemented. This does not disable a configured
-sleep timer or emergency low-voltage shutdown.
+The reported freeze occurred while paused with USB connected. The former
+charger stub let Rockbox's paused idle timeout run while externally powered.
+Charger monitoring now enables the normal plug indicator, charge animation
+and inhibition of idle shutdown. Manual END shutdown remains available.
+
+The mapping is independently reconstructed from the unmodified e52q7a dump:
+
+| Signal | Stock evidence | Rockbox behavior |
+|---|---|---|
+| External power | `CHG_PHY_IsChargerPresent` at NOR `0x663d4` reads logical EIC18; the `0xca92c` table maps it to analog `0x82001900` bit2, active high | Enable analog EIC clocks and unmask bit2, preserving END bit3; poll for power presence |
+| Charger enable | `0x416fc` returns raw GPIO6; `0x6626c` drives high to disable, `0x66332` low to enable | Preserve its mask/direction/value; observe an explicitly configured high disable |
+| Power good / charge complete | `0x41704` returns raw GPIO8 (PGB), `0x41700` GPIO9 (CHGSB); `0x66352` and its `GetCHGDoneStatus` string return complete for GPIO8 low, GPIO9 high | Configure only status pins8/9 as inputs; animate while both are low and power is present; stop for completion, bad power or explicit disable |
+
+This is `CHARGING_MONITOR`: it does not set charger current, voltage or
+drive GPIO6. Regulation remains with the charger IC and inherited firmware
+setup. Indicator behavior and charge-pin levels need confirmation on the
+phone; QEMU validates the driver and Rockbox policy against external inputs.
+
+With USB/DC connected, the phone's channel5 ADC measures the powered rail.
+The target now retains its last valid unplugged battery sample while powered.
+A powered boot reports unknown battery percentage until USB is removed,
+rather than treating that rail as full charge. B310E-specific filter guards
+preserve unknown readings and initialize the filter on the first real sample;
+externally powered writes remain allowed. Percentage cannot track charge
+progress while plugged in with this ADC path. ADI battery reads/writes now
+serialize mailbox access against the button/timer interrupt.
+
+`ports/rockbox/tests/test-charger.py` boots the full player and checks cable
+insertion/removal, charging/completion/fault/disable states, cached voltage,
+powered-boot unknown voltage, first unplugged conversion and inhibition of
+a one-minute idle timeout. QEMU provides `sc6530_adi.charger-present` and
+the named `charger-input` pin0 (active high). Analog EIC bit2 obeys DMSK;
+the input persists over reset and cannot be forced by guest writes. EIC
+debounce/edge IRQs, analog clock gating and electrical charging are not modeled.
 
 ## Validation
 
@@ -169,10 +193,10 @@ not infer a runtime improvement from emulator host CPU usage.
 3. **Reduce active CPU frequency.** The port is fixed at 208 MHz and has
    no adjustable-frequency implementation. Verify divider transitions,
    memory timing and codec performance before enabling scaling.
-4. **Verify shutdown on hardware and implement charger reporting.**
-   `power_off()` now follows the stock LDO shutdown above;
-   `power_input_status()` and `charging_state()` remain stubs. Establish the
-   board charger inputs and inhibit idle shutdown while externally powered.
+4. **Verify shutdown and charger status on hardware.**
+   `power_off()` follows the stock LDO shutdown above; charger reporting
+   now uses the stock EIC/GPIO inputs. Check charge completion, USB removal
+   and manual shutdown while externally powered.
    A reliable software firmware/loader handoff could also avoid battery
    removal when switching firmware.
 5. **Finish storage power and hotplug.** The existing SDIO command path

@@ -162,6 +162,7 @@ struct Sc6530AdiState {
 
     uint32_t mailbox_regs[SC6530_ADI_MAILBOX_SIZE / 4];
     uint16_t battery_adc;
+    bool charger_present;
     uint32_t ana_regs[SC6530_ADI_ANA_SIZE / 4];
     uint32_t vbc_regs[SC6530_ADI_VBC_SIZE / 4];
     uint32_t dp_regs[SC6530_DP_SIZE / 4];
@@ -242,6 +243,7 @@ static unsigned sc6530_vbc_frames(Sc6530AdiState *s)
     return MIN(((s->vbc_regs[0x10 / 4] >> 8) & 0xff) + 1,
                VBC_BANK_FRAMES);
 }
+
 
 static void sc6530_audio_callback(void *opaque, int available)
 {
@@ -390,6 +392,14 @@ static uint32_t sc6530_adi_ana_effective(const Sc6530AdiState *s,
         /* Physical EIC level is the ground truth (the debounce-mask is a
          * config the guest may not touch for the power-button channel). */
         word |= (s->eic_pb_phys & 0xffffu);
+        /* e52q7a 0x663d4: logical EIC18 = analog channel2, active high.
+         * External power cannot be written by the guest. Only polling
+         * is modeled here; debounce/edge interrupts remain unsupported. */
+        word &= ~(1u << 2);
+        if (s->charger_present &&
+            (s->ana_regs[SC6530_ADI_EIC_DMSK_OFF / 4] & (1u << 2))) {
+            word |= 1u << 2;
+        }
     }
     return word;
 }
@@ -730,6 +740,12 @@ static void sc6530_adi_reset(DeviceState *dev)
      * runs BEFORE this one, so zeroing here would wipe the hold). */
 }
 
+static void sc6530_adi_charger_input(void *opaque, int pin, int level)
+{
+    Sc6530AdiState *s = opaque;
+    s->charger_present = level != 0;
+}
+
 static void sc6530_adi_init(Object *obj)
 {
     Sc6530AdiState *s = SC6530_ADI(obj);
@@ -758,6 +774,8 @@ static void sc6530_adi_init(Object *obj)
                              object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
     object_property_add_link(obj, "dsp", "sc6530_dsp", &s->dsp,
                              object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
+    qdev_init_gpio_in_named(DEVICE(obj), sc6530_adi_charger_input,
+                           "charger-input", 1);
 }
 
 static void sc6530_audio_exit(Notifier *notifier, void *data)
@@ -808,6 +826,7 @@ static void sc6530_adi_finalize(Object *obj)
 
 static const Property sc6530_adi_properties[] = {
     DEFINE_PROP_UINT16("battery-adc", Sc6530AdiState, battery_adc, 900),
+    DEFINE_PROP_BOOL("charger-present", Sc6530AdiState, charger_present, false),
     DEFINE_AUDIO_PROPERTIES(Sc6530AdiState, audio_be),
 };
 
