@@ -46,12 +46,25 @@ def main():
         eic = 0x8a001000
         assert qt.read(eic) == 0
         qt.write(eic + 4, 1)
+        assert qt.read(eic) == 0  # mask alone cannot enable EIC sampling
+        qt.write(0x8b0000a0, 1 << 25)
+        assert qt.read(eic) == 0  # RTC clock also required
+        qt.command("writeb 0x8b0000a3 0x04")  # byte SET for RTC clock
+        assert qt.read(eic) == 1
+        qt.write(0x8b0000a0, 1 << 24)  # unrelated SET preserves both clocks
+        assert qt.read(0x8b0000a8) == 7 << 24
+        qt.write(0x8b0000a4, 1 << 26)
+        assert qt.read(eic) == 0
+        assert qt.read(0x8b0000a8) == 3 << 24
+        qt.write(0x8b0000a0, 1 << 26)
         assert qt.read(eic) == 1
         qt.command("set_irq_in /machine/peripheral/sc6530-aux eic-input 0 0")
         qt.write(eic, 1)  # guest cannot override the physical level
         assert qt.read(eic) == 0
         assert int(qt.command(f"readb {eic:#x}")[0], 16) == 0
         qmp.command("system_reset")
+        assert qt.read(0x8b0000a8) == 0
+        qt.write(0x8b0000a0, 3 << 25)
         qt.write(eic + 4, 1)
         assert qt.read(eic) == 0  # external insertion survives reset
         qt.command("set_irq_in /machine/peripheral/sc6530-aux eic-input 0 1")

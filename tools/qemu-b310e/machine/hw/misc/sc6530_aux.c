@@ -516,6 +516,14 @@ static void sc6530_aux_apb_write(void *opaque, hwaddr offset,
     Sc6530AuxState *s = opaque;
 
     sc6530_regs_write(s->apb_regs, offset, value, size);
+    /* Stock EIC_D open/close 0x673c0/0x673da use APB write-one clock
+     * SET/CLEAR aliases. +0xa8 reports their combined enable state. */
+    uint32_t written = (uint32_t)value << ((offset & 3) * 8);
+    if ((offset & ~3u) == 0xa0) {
+        s->apb_regs[0xa8 / 4] |= written;
+    } else if ((offset & ~3u) == 0xa4) {
+        s->apb_regs[0xa8 / 4] &= ~written;
+    }
     trace_sc6530_aux_write(SC6530_AUX_APB_BASE + offset, value,
                            sc6530_aux_guest_pc());
 }
@@ -616,6 +624,10 @@ static uint64_t sc6530_aux_eic_read(void *opaque, hwaddr offset, unsigned size)
 {
     Sc6530AuxState *s = opaque;
     if ((offset & ~3u) == 0) {
+        const uint32_t clocks = (1u << 25) | (1u << 26);
+        if ((s->apb_regs[0xa8 / 4] & clocks) != clocks) {
+            return 0; /* no digital EIC sampling while its clocks are off */
+        }
         uint32_t data = (s->eic_regs[0] & ~1u) | !s->headset_present;
         data &= s->eic_regs[1] & 0xffff;
         return extract32(data, (offset & 3) * 8, size * 8);

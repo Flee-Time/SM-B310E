@@ -31,7 +31,8 @@ struct sc6530_audio_debug {
     uint16_t analog[SC_AUDIO_ANALOG_COUNT];
     uint32_t valid, banks;
     unsigned peak[2]; /* largest absolute post-volume PCM since playback start */
-    int volume;
+    int volume, digital_volume;
+    uint32_t headset_data, headset_mask, headset_clocks;
     bool initialized, adi_failed, speaker;
 };
 void sc6530_audio_debug(struct sc6530_audio_debug *info);

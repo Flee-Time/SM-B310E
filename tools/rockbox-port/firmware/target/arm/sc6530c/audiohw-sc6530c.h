@@ -28,9 +28,10 @@
  * via the HAVE_SC6530_CODEC define).
  *
  * Playback uses the stock ARM-owned DMA/VBC/on-die DAC route. Rockbox
- * applies software volume before the DMA sink; analog gain stays at
- * the captured stock value. The settings table exposes one master
- * volume control for both channels, with no unverified input/amp controls.
+ * applies software volume before the DMA sink. Above the previous 0 dB
+ * maximum, headphone gain rises from stock's -24 dB to codec unity.
+ * Speaker gain remains at its captured setting; positive settings on
+ * that output saturate at the existing 0 dB level.
  *
  * This header is processed TWICE per TU class:
  *  - in firmware/sound.c (AUDIOHW_IS_SOUND_C defined) the AUDIOHW_SETTING
@@ -40,10 +41,10 @@
 
 #include "config.h"
 
-/* One master volume; audiohw_set_volume forwards tenths of a dB to the
- * core PCM scaler before the stereo samples reach the DMA sink. */
+/* One master volume in 1 dB steps. The target splits positive headphone
+ * settings into analog gain and nonpositive PCM attenuation. */
 #define AUDIOHW_CAPS (MONO_VOL_CAP)
 
-AUDIOHW_SETTING(VOLUME, "dB", 0, 1, -100, 0, -30)
+AUDIOHW_SETTING(VOLUME, "dB", 0, 1, -100, 24, -30)
 
 #endif /* AUDIOHW_SC6530C_H */
