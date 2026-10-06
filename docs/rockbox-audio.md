@@ -267,7 +267,9 @@ Copy the newly built `sdcard/progs/rockbox.bin` and `.rockbox` tree to the
 phone's existing card layout and launch it through the existing loader.
 Use a short track to check elapsed time, speaker output and headphones.
 The phone now reports an advancing timer and audible sound through both
-outputs. Test jack insertion/removal with **Speaker → Auto**, including
+outputs. The follow-up hardware report confirms that automatic jack
+detection and the extended headphone gain work. Test jack insertion/removal
+with **Speaker → Auto**, including
 booting with the jack empty and with headphones already inserted. Test
 the extended volume range on headphones; the speaker maximum is unchanged.
 
@@ -306,6 +308,7 @@ establishes that this ARM-owned Rockbox playback route produces sound
 without that loader; it does not validate DSP-controlled phone services.
 
 QEMU does not emulate analog gain, PA electrical behavior or DAC ramps.
-Jack hotplug, extended gain fidelity, pop suppression and hardware timing
-remain to be measured on the phone. No microphone/recording
+Jack hotplug and the extended gain are confirmed on the phone; quantitative
+gain fidelity, pop suppression and hardware timing remain to be measured.
+No microphone/recording
 capability is advertised by this port. Vendor DSP execution is unimplemented.

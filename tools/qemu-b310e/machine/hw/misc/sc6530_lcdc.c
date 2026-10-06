@@ -76,6 +76,8 @@ struct Sc6530LcdcState {
     uint16_t column_start, column_end, row_start, row_end;
     uint16_t gram_x, gram_y;
     bool gram_write;
+    bool panel_sleep, display_on;
+    bool panel_initialized;
 };
 
 struct Sc6530LcmState {
@@ -116,6 +118,9 @@ static void sc6530_lcdc_render(Sc6530LcdcState *s)
 
         for (x = 0; x < SC6530_LCDC_W; x++) {
             uint16_t p = lduw_le_p(s->pixels + 2 * i++);
+            if (s->panel_sleep || !s->display_on) {
+                p = 0;
+            }
             uint32_t r5 = (p >> 11) & 0x1f;
             uint32_t g6 = (p >> 5) & 0x3f;
             uint32_t b5 = p & 0x1f;
@@ -447,6 +452,10 @@ static void sc6530_lcdc_reset(DeviceState *dev)
     s->column_end = SC6530_LCDC_W - 1;
     s->row_end = SC6530_LCDC_H - 1;
     s->gram_write = false;
+    /* The board's loader handoff skips the ROM's panel initialization.
+     * Keep that initial state explicit; later sleep commands still apply. */
+    s->panel_sleep = !s->panel_initialized;
+    s->display_on = s->panel_initialized;
     s->irq_raw = 0;
     qemu_set_irq(s->irq, 0);
 }
@@ -473,12 +482,17 @@ static void sc6530_lcdc_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+static const Property sc6530_lcdc_properties[] = {
+    DEFINE_PROP_BOOL("panel-initialized", Sc6530LcdcState, panel_initialized, false),
+};
+
 static void sc6530_lcdc_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
 
     dc->desc = "Spreadtrum SC6530 LCDC display controller";
     dc->realize = sc6530_lcdc_realize;
+    device_class_set_props(dc, sc6530_lcdc_properties);
     device_class_set_legacy_reset(dc, sc6530_lcdc_reset);
 }
 
@@ -536,6 +550,14 @@ static void sc6530_lcm_data_write(void *opaque, hwaddr offset, uint64_t val, uns
         s->have_pixel_high = false;
         s->rdid_state = s->command == 4 ? 1 : 0;
         if (panel) {
+            switch (s->command) {
+            case 0x10: panel->panel_sleep = true; break;
+            case 0x11: panel->panel_sleep = false; break;
+            case 0x28: panel->display_on = false; break;
+            case 0x29: panel->display_on = true; break;
+            default: break;
+            }
+            sc6530_lcdc_render(panel);
             panel->gram_write = s->command == 0x2c;
             if (panel->gram_write) {
                 panel->gram_x = panel->column_start;

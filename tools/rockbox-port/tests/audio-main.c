@@ -67,8 +67,12 @@ void TIMER0(void) {}
 static void wait_ms(unsigned ms)
 {
     uint32_t start = SC_AUDIO_REG(0x8100300c);
-    while ((uint32_t)(SC_AUDIO_REG(0x8100300c) - start) < ms)
-        asm volatile("mcr p15, 0, %0, c7, c0, 4" : : "r"(0) : "memory");
+    while ((uint32_t)(SC_AUDIO_REG(0x8100300c) - start) < ms) {
+        /* Match core_idle(): exercise the real target-selected sleep path
+         * with IRQ masked, including timer and DMA wakeup handling. */
+        disable_irq();
+        core_sleep();
+    }
 }
 void sleep(int ticks) { wait_ms(ticks > 0 ? ticks * 10 : 1); }
 void undef_instr_handler(void) { finish(false); }

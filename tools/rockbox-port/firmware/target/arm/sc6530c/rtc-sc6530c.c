@@ -24,8 +24,9 @@
 /*
  * B310E-OS Rockbox port — b310e/target/arm/sc6530c/rtc-sc6530c.c
  * (GPLv2, Rockbox-derived; a port of the B310E-OS drivers/rtc.c — the
- * SC6530 on-die RTC, register map decoded from the stock rtc_phy_v5.c,
- * clean-room).
+ * SC6530 on-die RTC). The legacy calendar interpretation and write
+ * protocol below still need reconciliation with the stock day counter
+ * and update-ACK contract; do not infer calendar/backup support from it.
  *
  * Registers (ADI mailbox):
  *   read:  sec/min/hour @ 0x82001600/04/08 (mask 0x3f/0x3f/0x1f)
@@ -80,7 +81,8 @@ static void adi_write(uint32_t addr, uint32_t val)
         if (--n == 0) return;
 }
 
-/* Wait for the RTC to finish updating (bit 0 of 0x82001634), bounded. */
+/* Legacy write-path wait; bit0 is actually the second interrupt. Calendar
+ * writes need a separate day-counter/update-ACK implementation. */
 static int rtc_wait_idle(void)
 {
     uint32_t n = ADI_BUDGET;
@@ -101,13 +103,19 @@ int rtc_read_datetime(struct tm *tm)
 {
     uint32_t sec, min, hour, date;
 
-    if (tm == NULL || rtc_wait_idle() != 0)
+    if (tm == NULL)
         return -1;
 
+    /* +0x634 bit0 is a latched SECOND interrupt, not an update-busy flag
+     * (time-update ACKs are bits8..11 in the stock contract). Polling it burns
+     * the entire million-read budget on every clock/status refresh.
+     * Keep these mailbox commands atomic against the button tick. */
+    int oldlevel = disable_irq_save();
     sec  = adi_read(RTC_SEC)  & 0x3fu;
     min  = adi_read(RTC_MIN)  & 0x3fu;
     hour = adi_read(RTC_HOUR) & 0x1fu;
     date = adi_read(RTC_DATE) & 0xffffu;
+    restore_irq(oldlevel);
 
     tm->tm_sec   = (int)sec;
     tm->tm_min   = (int)min;

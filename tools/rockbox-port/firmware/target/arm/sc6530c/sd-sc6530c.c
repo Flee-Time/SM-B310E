@@ -55,7 +55,6 @@
 
 #define KEYPAD_BASE_ADDR   0x87000000u
 #define KEYPAD_CTRL        (*(volatile uint32_t *)(KEYPAD_BASE_ADDR + 0x00))
-#define KEYPAD_INT_CLR     (*(volatile uint32_t *)(KEYPAD_BASE_ADDR + 0x10))
 #define SD_BOUNCE_BUF      0x4000b000u   /* IRAM, 512-byte aligned */
 
 /* ---- sdio-sc6530c.c (ported fpdoom SC6530 SDIO driver) ------------------ */
@@ -65,13 +64,17 @@ extern int  sdio_read_block(uint32_t idx, uint8_t *buf);
 extern int  sdio_write_block(uint32_t idx, uint8_t *buf);
 extern unsigned sdio_shl;
 extern unsigned long sdio_num_blocks;
+extern void sc6530_keypad_capture(void);
 
 static bool sd_enabled_ = false;   /* card present after sd_init */
 static long  sd_activity;
+static struct mutex sd_mutex;
 
 int sd_init(void)
 {
     int oldlevel;
+
+    mutex_init(&sd_mutex);
 
     /* The whole probe runs with the tick IRQ masked (B310E-OS hardware
      * lesson: a live 1 ms tick during sdio_init kills the phone). */
@@ -114,52 +117,50 @@ static int transfer_block(uint32_t idx, void *buf, bool write)
             memcpy(buf, bounce, SD_BLOCK_SIZE);
     }
 
-    KEYPAD_INT_CLR = 0xfffu;                /* keypad_resume() */
+    sc6530_keypad_capture();                /* capture + ACK before resume */
     KEYPAD_CTRL |= 1u;
+    return rc;
+}
+
+/* File metadata and audio buffering run in different threads. Protect the
+ * controller AND its shared IRAM bounce buffer for the entire request. */
+static int transfer_sectors(sector_t start, int count, void *buf, bool write)
+{
+    uint32_t idx = (uint32_t)start;         /* sdio_read_block shifts */
+    uint8_t *p = (uint8_t *)buf;
+    int rc = 0;
+
+    if (!sd_enabled_)
+        return -1;
+
+    mutex_lock(&sd_mutex);
+    while (count--) {
+        if (transfer_block(idx++, p, write)) {
+            rc = -1;
+            break;
+        }
+        p += SD_BLOCK_SIZE;
+    }
+    sd_activity = current_tick;
+    mutex_unlock(&sd_mutex);
     return rc;
 }
 
 int sd_read_sectors(IF_MD(int drive,) sector_t start, int count, void *buf)
 {
-    uint32_t idx = (uint32_t)start;         /* sdio_read_block shifts */
-    uint8_t *p = (uint8_t *)buf;
-
 #ifdef HAVE_MULTIDRIVE
     (void)drive;
 #endif
-
-    if (!sd_enabled_)
-        return 0;
-
-    while (count--) {
-        if (transfer_block(idx++, p, false))
-            return -1;
-        p += SD_BLOCK_SIZE;
-    }
-    sd_activity = current_tick;
-    return 0;
+    return transfer_sectors(start, count, buf, false);
 }
 
 int sd_write_sectors(IF_MD(int drive,) sector_t start, int count,
                      const void *buf)
 {
-    uint32_t idx = (uint32_t)start;
-    const uint8_t *p = (const uint8_t *)buf;
-
 #ifdef HAVE_MULTIDRIVE
     (void)drive;
 #endif
-
-    if (!sd_enabled_)
-        return 0;
-
-    while (count--) {
-        if (transfer_block(idx++, (void *)p, true))
-            return -1;
-        p += SD_BLOCK_SIZE;
-    }
-    sd_activity = current_tick;
-    return 0;
+    return transfer_sectors(start, count, (void *)buf, true);
 }
 
 #ifdef STORAGE_GET_INFO

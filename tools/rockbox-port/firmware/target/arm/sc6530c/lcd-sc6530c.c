@@ -62,6 +62,7 @@
 #define LCM_CS        0u
 #define LCD_RST_REG   0x8b000224u   /* GPIO-style AHB reg, NOT a pinmux */
 #define AHB_PWR_ON    0x20500060u
+#define AHB_PWR_OFF   0x20500070u
 #define AHB_RST_SET   0x20500020u
 #define AHB_RST_CLR   0x20500030u
 
@@ -116,6 +117,13 @@ typedef volatile struct {
 } lcdc_t;
 
 #define LCDC ((lcdc_t *)0x20d00000u)
+
+/* Serialize frame copies against the backlight thread's sleep/wake path.
+ * lcd-memframe.c owns lcd_active(), and suppresses updates while asleep. */
+extern void lcd_set_active(bool active);
+static struct mutex lcd_mutex;
+/* One extra tick covers entry partway through a tick: at least 120 ms. */
+#define PANEL_SETTLE_TICKS ((120 * HZ + 999) / 1000 + 1)
 
 /* ---- ST7735 init sequences (fpdoom lcd_config.h, Unlicense) ----------- */
 
@@ -430,6 +438,8 @@ void lcd_init_device(void)
     const lcd_config_t *lcd;
     unsigned i;
 
+    mutex_init(&lcd_mutex);
+
     /* LCM power, panel reset, safe DBI baseline, id read, then the REAL
      * DBI timing from the AHB clock (fpdoom lcm_init, syscode.c:507-551). */
     REG32(AHB_PWR_ON) = 0x40;                /* LCM enable */
@@ -460,6 +470,55 @@ void lcd_init_device(void)
     lcdc_init_regs();
     LCDC->img.y_base_addr = (uint32_t)FRAME >> 2;
     LCDC->img.ctrl |= 1;
+    lcd_set_active(true);
+}
+
+void lcd_sleep(void)
+{
+    mutex_lock(&lcd_mutex);
+    if (lcd_active()) {
+        lcd_set_active(false);
+        /* The last one-shot DBI transfer may still be in flight. Give it
+         * a full frame interval before changing from DMA to command mode.
+         * IRQ and the scheduler stay live throughout panel settling. */
+        sleep(HZ / 50 + 1);
+        LCDC->ctrl &= ~(1u | 8u);
+        LCDC->irq.en &= ~1u;
+        LCDC->irq.clr = 1;
+        lcm_set_mode(1);
+        lcm_send_cmd(0x28); /* Display off, as in the stock panel path. */
+        lcm_send_cmd(0x10); /* Sleep in: stop panel oscillator/scanning. */
+        sleep(PANEL_SETTLE_TICKS);
+        /* Stock 0x27d54..60 disables CTRL bit0, then AHB bit12.
+         * Keep LCM and shared system clocks available for panel wake. */
+        REG32(AHB_PWR_OFF) = 0x1000;
+    }
+    mutex_unlock(&lcd_mutex);
+}
+
+void lcd_awake(void)
+{
+    bool activated = false;
+    mutex_lock(&lcd_mutex);
+    if (!lcd_active()) {
+        REG32(AHB_PWR_ON) = 0x1000; /* stock enable at 0x27cd4 */
+        lcm_set_mode(1);
+        lcm_send_cmd(0x11); /* Sleep out. No reset: retain panel settings. */
+        sleep(PANEL_SETTLE_TICKS);
+        lcm_send_cmd(0x29);
+        /* A command interrupts RAMWR; restore orientation, window and
+         * RAMWR before handing the DBI interface back to the LCDC. */
+        lcm_exec(cmd_init2);
+        lcm_set_mode(0x28);
+        LCDC->ctrl |= 1;
+        lcd_set_active(true);
+        activated = true;
+    }
+    mutex_unlock(&lcd_mutex);
+    if (activated) {
+        lcd_update();
+        send_event(LCD_EVENT_ACTIVATION, NULL);
+    }
 }
 
 /* Called by lcd-memframe.c: copy a Rockbox framebuffer rectangle to FRAME
@@ -471,6 +530,13 @@ void lcd_copy_buffer_rect(fb_data *dst, const fb_data *src,
 {
     lcdc_t *lc = LCDC;
     int r;
+
+    mutex_lock(&lcd_mutex);
+    /* Recheck under the mutex: sleep can race the generic update guard. */
+    if (!lcd_active()) {
+        mutex_unlock(&lcd_mutex);
+        return;
+    }
 
     /* Two call shapes (lcd-memframe.c): full-frame / full-width rects call
      * with (width = total pixels, height = 1) — one contiguous copy; the
@@ -506,6 +572,7 @@ void lcd_copy_buffer_rect(fb_data *dst, const fb_data *src,
         while (!(lc->irq.raw & 1) && --wait) ;
         lc->irq.clr |= 1;
     }
+    mutex_unlock(&lcd_mutex);
 }
 
 void lcd_set_flip(bool yesno)

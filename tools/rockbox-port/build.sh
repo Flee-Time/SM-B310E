@@ -162,6 +162,24 @@ patch_file "$CLONE_DIR/firmware/export/config.h" '#include "config/b310e.h"' \
 patch_file "$CLONE_DIR/firmware/export/cpu.h" '#include "sc6530c.h"' \
   's/(#include "stm32h743.h"\n)/$1#elif CONFIG_CPU == SC6530C\n#include "sc6530c.h"\n/'
 
+# SC6530C's ARM926 must wait for interrupts when no threads are runnable.
+# The scheduler masks IRQ before core_sleep(); the generic ARM WFI path
+# waits with IRQ masked, then enables it to service the wakeup interrupt.
+patch_file "$CLONE_DIR/firmware/target/arm/system-arm-classic.h" 'CONFIG_CPU == SC6530C /* B310E idle */' \
+  's/(\|\| CONFIG_CPU == S5L8702 \|\| CONFIG_CPU == S5L8720)\n/$1 \\\n|| CONFIG_CPU == SC6530C \/* B310E idle *\/\n/'
+
+# Rockbox's root menu normally ignores Cancel. Let the B310E's Back key
+# return to the screen that opened Menu, as it does in submenus.
+patch_file "$CLONE_DIR/apps/menu.c" '/* B310E root Back */' \
+  's/else if \(menu != &root_menu_\)\n            \{\n                ret = GO_TO_PREVIOUS;/else if (menu != \&root_menu_ || CONFIG_KEYPAD == B310E_PAD) \/* B310E root Back *\/\n            {\n                ret = GO_TO_PREVIOUS;/'
+
+# FAT passes interior directory-entry pointers to dc_dirty_buf(). Subtract
+# byte addresses before dividing: strided-array pointer subtraction lets
+# GCC assume buffer alignment and exclude interior pointers in the last
+# buffer from the bounds check, silently losing directory writes.
+patch_file "$CLONE_DIR/firmware/common/disk_cache.c" '/* B310E cache byte index */' \
+  's/\(\(uint8_t \(\*\)\[DC_CACHE_BUFSIZE\]\)\(buf\) - cache_buffer\)/(((uintptr_t)(buf) - (uintptr_t)cache_buffer) \/ DC_CACHE_BUFSIZE) \/* B310E cache byte index *\//'
+
 # 8. firmware/export/audiohw.h — HAVE_SC6530_CODEC -> audiohw-sc6530c.h
 patch_file "$CLONE_DIR/firmware/export/audiohw.h" "HAVE_SC6530_CODEC" \
   's/(#include "dummy_codec.h"\n)/$1#elif defined(HAVE_SC6530_CODEC)\n#include "audiohw-sc6530c.h"\n/'

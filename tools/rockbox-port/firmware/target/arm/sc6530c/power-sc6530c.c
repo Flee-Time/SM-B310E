@@ -30,44 +30,33 @@
  * (GPLv2, Rockbox-derived; modeled on Rockbox's mini2440/power-mini2440.c
  * and the B310E-OS menu_reboot watchdog sequence, arch/diag_menu_main.c).
  *
- * There is no software power control on the B310E (the END key is the
- * physical power button). power_off() reboots via the SC6530 watchdog
- * (0.5 s reset) — the closest thing to a power cycle the software can do.
+ * Stock e52q7a NOR 0x1a42e powers off by disabling IRQ/FIQ and writing
+ * the two LDO power-down SET registers. This is separate from reboot.
  */
 
 #define REG32(a) (*(volatile uint32_t *)(a))
 
-#define WDG_BASE  0x82001480
+#define ANA_LDO_PD_SET0  0x82001180
+#define ANA_LDO_PD_SET1  0x82001184
 
-/* Bounded ADI mailbox (fpdoom pattern — the watchdog lives on the ANA
+/* Bounded ADI mailbox (fpdoom pattern — the power controls live on the ANA
  * die and is reached through the FIFO bridge). */
-#define ADI_RD_CMD      0x82000018
-#define ADI_RD_DATA     0x8200001C
 #define ADI_FIFO_STS    0x82000020
 #define ADI_FIFO_FULL   (1 << 9)
 #define ADI_FIFO_EMPTY  (1 << 8)
 #define ADI_BUDGET      1000000u
 
-static uint32_t adi_read(uint32_t addr)
-{
-    uint32_t a = 0, n = ADI_BUDGET;
-
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)
-        if (--n == 0) break;
-    return a & 0xffffu;
-}
-
-static void adi_write(uint32_t addr, uint32_t val)
+static bool adi_write(uint32_t addr, uint32_t val)
 {
     uint32_t n = ADI_BUDGET;
 
     while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) return;
+        if (--n == 0) return false;
     REG32(addr) = val;
     n = ADI_BUDGET;
     while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return;
+        if (--n == 0) return false;
+    return true;
 }
 
 void power_init(void)
@@ -89,21 +78,19 @@ bool charging_state(void)
 
 void power_off(void)
 {
-    /* No software power-down on the B310E; reboot via the watchdog
-     * (B310E-OS menu_reboot: LOCK 0xe551, CTRL enable+start, LOAD 0x4000
-     * = 0.5 s @ 32768 Hz). */
-    adi_write(WDG_BASE + 0x20, 0xe551);
-    {
-        uint32_t ctrl = adi_read(WDG_BASE + 8);
-        adi_write(WDG_BASE + 8, ctrl | 9);
-    }
-    adi_write(WDG_BASE, 0x4000);
-    adi_write(WDG_BASE + 4, 0);
-    {
-        uint32_t ctrl = adi_read(WDG_BASE + 8);
-        adi_write(WDG_BASE + 8, ctrl | 2);
-    }
-    adi_write(WDG_BASE + 0x20, ~0xe551u);
+    /* Rockbox has already stopped audio and flushed the filesystem.
+     * Serialize the ADI bridge against button/timer interrupt handlers.
+     * Stock 0x1a448..52: SET1=0x1f, then SET0=0x3fff. The final store
+     * removes the CPU/RAM supplies, so do not wait on ADI afterwards. */
+    disable_interrupt(IRQ_FIQ_STATUS);
+    REG32(0x8000000c) = 0xffffffff;
+    if (!adi_write(ANA_LDO_PD_SET1, 0x1f))
+        system_reboot();
+    uint32_t budget = ADI_BUDGET;
+    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
+        if (--budget == 0)
+            system_reboot();
+    REG32(ANA_LDO_PD_SET0) = 0x3fff;
     while (1)
-        ;
+        asm volatile ("mcr p15, 0, %0, c7, c0, 4" :: "r" (0) : "memory");
 }

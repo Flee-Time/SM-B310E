@@ -91,7 +91,7 @@ def main():
                  upstream / "lib/rbcodec/dsp", upstream / "lib/skin_parser"]:
         flags += ["-I" + str(path)]
     sources = [target / "crt0.S", target / "system-sc6530c.c", target / "pcm-sc6530c.c",
-               target / "audiohw-sc6530c.c", fw / "target/arm/mmu-arm.S",
+               target / "audiohw-sc6530c.c", target / "button-sc6530c.c", fw / "target/arm/mmu-arm.S",
                fw / "pcm.c", fw / "pcm_sw_volume.c", fw / "pcm_sampr.c", fw / "general.c",
                upstream / "apps/audio_path.c",
                upstream / "lib/fixedpoint/fixedpoint.c"]

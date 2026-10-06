@@ -25,7 +25,8 @@
  * keymap-echor1.c)
  *
  * B310E keypad (see button-target.h for the physical layout):
- *   d-pad = directions; CENTER = SELECT/OK; DIAL = PLAY;
+ *   d-pad = directions (WPS: volume / tracks / hold to seek);
+ *   CENTER = SELECT/OK (WPS: play/pause); DIAL = PLAY alias;
  *   LSOFT = MENU; RSOFT = BACK; END = POWER;
  *   2/8 = VOL_UP/VOL_DOWN; 4/6 = PREV/NEXT; STAR = HOME (quickscreen);
  *   HASH = HASH (hotkey); digits 0/1/3/5/7/9 for the keyboard.
@@ -59,6 +60,7 @@ static const struct button_mapping button_context_standard[] = {
 }; /* button_context_standard */
 
 static const struct button_mapping button_context_wps[] = {
+    {ACTION_WPS_PLAY,           BUTTON_SELECT|BUTTON_REL,   BUTTON_SELECT},
     {ACTION_WPS_PLAY,           BUTTON_PLAY|BUTTON_REL,     BUTTON_PLAY},
     {ACTION_WPS_STOP,           BUTTON_POWER|BUTTON_REL,    BUTTON_POWER},
 
@@ -69,7 +71,13 @@ static const struct button_mapping button_context_wps[] = {
     {ACTION_WPS_SEEKFWD,        BUTTON_RIGHT|BUTTON_REPEAT, BUTTON_NONE},
     {ACTION_WPS_STOPSEEK,       BUTTON_LEFT|BUTTON_REL,     BUTTON_LEFT|BUTTON_REPEAT},
     {ACTION_WPS_STOPSEEK,       BUTTON_RIGHT|BUTTON_REL,    BUTTON_RIGHT|BUTTON_REPEAT},
+    {ACTION_WPS_SKIPPREV,       BUTTON_LEFT|BUTTON_REL,     BUTTON_LEFT},
+    {ACTION_WPS_SKIPNEXT,       BUTTON_RIGHT|BUTTON_REL,    BUTTON_RIGHT},
 
+    {ACTION_WPS_VOLDOWN,        BUTTON_DOWN|BUTTON_REPEAT,  BUTTON_NONE},
+    {ACTION_WPS_VOLDOWN,        BUTTON_DOWN,                BUTTON_NONE},
+    {ACTION_WPS_VOLUP,          BUTTON_UP|BUTTON_REPEAT,    BUTTON_NONE},
+    {ACTION_WPS_VOLUP,          BUTTON_UP,                  BUTTON_NONE},
     {ACTION_WPS_VOLDOWN,        BUTTON_VOL_DOWN|BUTTON_REPEAT, BUTTON_NONE},
     {ACTION_WPS_VOLDOWN,        BUTTON_VOL_DOWN,            BUTTON_NONE},
     {ACTION_WPS_VOLUP,          BUTTON_VOL_UP|BUTTON_REPEAT,   BUTTON_NONE},
@@ -80,7 +88,7 @@ static const struct button_mapping button_context_wps[] = {
     {ACTION_WPS_CONTEXT,        BUTTON_SELECT|BUTTON_REPEAT, BUTTON_SELECT},
 
     {ACTION_WPS_HOTKEY,         BUTTON_HOME|BUTTON_MENU,    BUTTON_NONE},
-    {ACTION_WPS_BROWSE,         BUTTON_SELECT|BUTTON_REL,   BUTTON_SELECT},
+    {ACTION_WPS_BROWSE,         BUTTON_BACK|BUTTON_REL,     BUTTON_BACK},
 
     LAST_ITEM_IN_LIST
 }; /* button_context_wps */
@@ -163,6 +171,7 @@ static const struct button_mapping button_context_yesno[] = {
 }; /* button_context_yesno */
 
 static const struct button_mapping button_context_colorchooser[] = {
+    {ACTION_STD_OK,                 BUTTON_SELECT|BUTTON_REL,   BUTTON_SELECT},
     {ACTION_STD_OK,                 BUTTON_PLAY|BUTTON_REL,     BUTTON_NONE},
     LAST_ITEM_IN_LIST__NEXTLIST(CONTEXT_CUSTOM|CONTEXT_SETTINGS),
 }; /* button_context_colorchooser */

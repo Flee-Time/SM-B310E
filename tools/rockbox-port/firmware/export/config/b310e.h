@@ -52,6 +52,9 @@
 
 /* Display */
 #define HAVE_LCD_COLOR
+#define HAVE_LCD_SLEEP
+/* Sleep the panel immediately after the backlight timeout. */
+#define LCD_SLEEP_TIMEOUT 0
 /* ST7735S BOE 128x160, RGB565, refreshed by the SC6530 LCDC DMA from a
  * fixed physical framebuffer (see firmware/export/sc6530c.h FRAME). */
 #define CONFIG_LCD LCD_B310E
@@ -74,6 +77,7 @@
 /* Keypad */
 #define CONFIG_KEYPAD B310E_PAD
 #define HAVE_BUTTON_DATA
+#define HAVE_SW_POWEROFF /* Hold END to request normal Rockbox shutdown. */
 
 /* I2C: not used on this SoC */
 #define CONFIG_I2C I2C_NONE
@@ -123,8 +127,7 @@
 /* USB */
 #define USB_NONE
 
-/* No hardware volume control — the mixer applies software volume and feeds
- * the sink already-scaled 16-bit samples (volume_type = PCM_SINK_SWVOL). */
+/* Software attenuation plus the codec's positive headphone gain steps. */
 #define HAVE_SW_VOLUME_CONTROL
 
 #define BOOTFILE_EXT "b310e"
