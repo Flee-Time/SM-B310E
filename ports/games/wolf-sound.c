@@ -3,7 +3,7 @@
 #include "b310e-mixer.h"
 extern void b310e_opl_init(void);
 extern void b310e_opl_write(unsigned,unsigned);
-extern int b310e_opl_sample(void);
+extern void b310e_opl_block(int32_t *,unsigned);
 boolean AdLibPresent=true,SoundBlasterPresent=true,SoundPositioned;
 byte SoundMode=sdm_Off,MusicMode=smm_Off,DigiMode=sds_Off;
 int DigiMap[LASTSOUND],DigiChannel[STARTMUSIC-STARTDIGISOUNDS];
@@ -20,7 +20,9 @@ static int left_position,right_position;
 static void opl(unsigned reg,unsigned val) {b310e_opl_write(reg,val);}
 static unsigned le16(const byte *p) {return p[0]|p[1]<<8;}
 static void render(int16_t *out,unsigned frames) {
-    for(unsigned i=0;i<frames;i++) {
+    int32_t samples[160];
+    unsigned i=0;
+    while(i<frames) {
         music_clock+=700;
         if(music_clock>=22050) {
             music_clock-=22050;
@@ -43,8 +45,17 @@ static void render(int16_t *out,unsigned frames) {
                 if(!effect_left) {opl(0xb0,0);sound_priority=0;}
             }
         }
-        int value=MIN(32767,MAX(-32768,b310e_opl_sample()));
-        out[i*2]=out[i*2+1]=value;
+        /* Batch only up to the next register write. IMF stays at 700 Hz,
+         * effects at 140 Hz, including their fractional sample intervals. */
+        unsigned n=MIN(frames-i,160);
+        n=MIN(n,(22049-music_clock)/700+1);
+        n=MIN(n,(22049-effect_clock)/140+1);
+        b310e_opl_block(samples,n);
+        for(unsigned j=0;j<n;j++) {
+            int value=MIN(32767,MAX(-32768,samples[j]));
+            out[(i+j)*2]=out[(i+j)*2+1]=value;
+        }
+        music_clock+=(n-1)*700;effect_clock+=(n-1)*140;i+=n;
     }
 }
 void Delay(int32_t ticks) {if(ticks>0)SDL_Delay(ticks*100/7);}

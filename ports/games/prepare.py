@@ -123,6 +123,9 @@ def prepare(source, dest):
         replace(make, '-DLIBC_SDIO=$(LIBC_SDIO) -DFAT_WRITE=1',
                 '-DLIBC_SDIO=$(LIBC_SDIO) -DFAT_WRITE=1 -DB310E_GAMES=1')
         replace(make, '-fomit-frame-pointer', '-fomit-frame-pointer -Wno-error=incompatible-pointer-types')
+        with make.open('a') as f:
+            f.write('\n# ARM code avoids Thumb-1 software divides in the audio IRQ.\n'
+                    '$(OBJDIR)/sys/b310e-mixer.o $(OBJDIR)/sys/b310e-music.o: CFLAGS += -marm -O2\n')
         replace(make, '$(OBJS2) -o $@', '$(OBJS2) -lm -lgcc -o $@')
         replace(make, '$(OBJS1) -o $@', '$(OBJS1) -lgcc -o $@')
         replace(make, '$(OBJS) -o $@', '$(OBJS) -lgcc -o $@')
@@ -263,8 +266,16 @@ def prepare(source, dest):
             text=text.replace('#include "../version.h"', '#define USE_GPL 1')
             text=text.replace('#pragma pack(1)', '')
             text=text.replace('#include "dbopl.h"', '#include "b310e-dbopl.h"')
-            if ext=='cpp': text=text.replace('#include <math.h>', '#include <math.h>\nextern "C" double sin(double), pow(double,double);')
+            if ext=='cpp':
+                text=text.replace('#include <math.h>', '#include <math.h>\nextern "C" double sin(double), pow(double,double);')
+                first=text.index('\t//Generate the best matching attack rate')
+                last=text.index('\tfor ( Bit8u i = 62; i < 76; i++ )',first)
+                text=text[:first] + ('\t/* Fixed output rate: calibrate on the host, not for millions of\n'
+                        '\t * simulated samples during phone startup. */\n'
+                        '\t#include "b310e-opl-rates.h"\n'
+                        '\tfor (unsigned i=0;i<62;i++) attackRates[i]=b310e_opl_attack_rates[i];\n') + text[last:]
             (wolf / ('b310e-dbopl.'+ext)).write_text(text)
+        shutil.copy2(PORT / 'wolf-opl-rates.h', wolf / 'b310e-opl-rates.h')
         sound = (PORT / 'wolf-sound.c').read_text()
         path = wolf / 'Wolf4SDL/id_sd.c'
         text = path.read_text(); start=text.index('#if NO_SOUND'); end=text.index('\n#else',start)
@@ -277,6 +288,7 @@ def prepare(source, dest):
             f.write('\nSYS_CFLAGS += -DCXX_SUPPORT\nCXXFLAGS := $(CFLAGS) -std=c++14 -fno-exceptions -fno-rtti\n'
                     '$(OBJDIR)/app/%.o: %.cpp | objdir\n\t$(call compile_cxx,-I$(SYSDIR) -I.)\n'
                     'GAME_CFLAGS += -I$(SYSDIR)\n')
+            f.write('$(OBJDIR)/app/b310e-opl.o $(OBJDIR)/app/b310e-dbopl.o: CXXFLAGS += -marm -O2\n')
         build = stage / 'fpbuild'
         shutil.copy2(PORT / 'build-sound.h', sys / 'b310e-build-sound.h')
         for game,adapter in (('jfduke3d','duke-sound.c'),('jfsw','sw-sound.c')):
@@ -293,6 +305,25 @@ def prepare(source, dest):
                 'cachesize += ram_size - (4 << 20);\n\t\t/* Leave room for PCM, music and save buffers. */\n'
                 '\t\tif (cachesize > (512u << 10)) cachesize -= 512u << 10;')
         replace(build / 'jfduke3d/src/game.c', '#if NO_SOUND\n    if (0)', '#if NO_SOUND && !B310E_GAMES\n    if (0)')
+        # NO_SOUND selects our small backend instead of JFAudioLib. It must
+        # not discard CON filenames or the reachable sound-options screen.
+        replace(build / 'jfduke3d/src/gamedef.c', 'case 57:    //definesound\n#if NO_SOUND',
+                'case 57:    //definesound\n#if NO_SOUND && !B310E_GAMES')
+        sound_check = 'for(j=1;j<NUM_SOUNDS;j++)\n                if( SoundOwner[j][0].i == g_i )\n                    break;'
+        replace(build / 'jfduke3d/src/gamedef.c', sound_check,
+                '#if B310E_GAMES\n            j=issoundplaying(g_i,-1)?1:NUM_SOUNDS;\n'
+                '#else\n            '+sound_check+'\n#endif')
+        replace(build / 'jfduke3d/src/gamedef.c', '#if NO_SOUND\n            if(1) j = 0; else',
+                '#if NO_SOUND && !B310E_GAMES\n            if(1) j = 0; else')
+        replace(build / 'jfduke3d/src/menues.c', '#if NO_SOUND', '#if NO_SOUND && !B310E_GAMES')
+        replace(build / 'jfduke3d/src/menues.c', '#if !NO_SOUND', '#if !NO_SOUND || B310E_GAMES')
+        fx = build / 'jfaudiolib/include/fx_man.h'
+        for old, new in (
+            ('static inline void FX_SetVolume(int a) {}', 'void FX_SetVolume(int a);'),
+            ('static inline void FX_SetReverseStereo(int a) {}', 'void FX_SetReverseStereo(int a);'),
+            ('static inline int FX_StopAllSounds(void) { return 0; }', 'int FX_StopAllSounds(void);'),
+        ):
+            replace(fx, old, '#ifdef GAME_DUKE3D\n' + new + '\n#else\n' + old + '\n#endif')
         replace(build / 'jfsw/src/game.c', '#if !NO_SOUND\n    ASS_MessageOutputString', '#if !NO_SOUND || B310E_GAMES\n    ASS_MessageOutputString')
         replace(build / 'jfbuild/include/compat.h', '#if defined(__linux) || defined(__HAIKU__)',
                 '#if B310E_GAMES\n# define B_LITTLE_ENDIAN 1\n# define B_BIG_ENDIAN 0\n# define B_ENDIAN_C_INLINE 1\n'
@@ -356,11 +387,18 @@ static void b310e_retris_click(unsigned lines) {
         replace(snes, '#include "display.h"', '#include "display.h"\n#include "../fpdoom/b310e-audio.h"')
         (stage / 'snes9x/b310e_apu.cpp').write_text(
                 '#include "snes9x.h"\n#include "apu.h"\n#include "spc700.h"\n#include "cpuexec.h"\n'
+                'static_assert(__builtin_offsetof(SIAPU,APUExecuting)==12,"SPC assembly ABI");\n'
+                'static_assert(__builtin_offsetof(SAPU,Cycles)==0,"SPC assembly ABI");\n'
                 'extern "C" void b310e_snes_apu_execute(void) { APU_EXECUTE(); }\n')
         replace(stage / 'snes9x/Makefile', 'APP_OBJS2 = $(SNES_SRCS:%=$(OBJDIR)/snes/%.o)',
                 'APP_OBJS2 = $(SNES_SRCS:%=$(OBJDIR)/snes/%.o) $(OBJDIR)/app/b310e_apu.o')
         replace(stage / 'snes9x/snesasm.s', '15:\tldr\tr0, [r4, #12]',
-                '15:\tbl\tb310e_snes_apu_execute\n\tldr\tr0, [r4, #12]')
+                '15:\tldr\tr0, =IAPU\n\tldrb\tr0, [r0, #12]\n'
+                '\tcmp\tr0, #0\n\tbeq\t18f\n'
+                '\tldr\tr0, =APU\n\tldr\tr0, [r0]\n\tldr\tr1, [r4, #32]\n'
+                '\tcmp\tr0, r1\n\tblle\tb310e_snes_apu_execute\n'
+                '18:\tldr\tr0, [r4, #12]')
+        replace(snes, 'if (!render && skipped < 1)', 'if (!render && skipped < 5)')
         replace(snes, 'Settings.Stereo = FALSE;', 'Settings.Stereo = TRUE;\n\tSettings.SixteenBitSound = TRUE;\n\tSettings.SoundSync = 1;')
         replace(snes, 'Settings.APUEnabled = Settings.NextAPUEnabled = FALSE;',
                 'Settings.APUEnabled = Settings.NextAPUEnabled = TRUE;')
@@ -388,12 +426,61 @@ static void b310e_retris_click(unsigned lines) {
                 '\tso.err_counter &= 65535;\n'
                 '\twhile (frames--) { S9xMixSamples((uint8*)(samples+used*2), 2);\n'
                 '\t\tif (++used == 256) { b310e_audio_submit(samples, used); used = 0; }\n\t}\n}')
+        replace(snes, 'void S9xGenerateSound() {\n\tstatic int16_t samples[512]; static unsigned used;',
+                'static unsigned b310e_pending_samples;\n'
+                'extern "C" void b310e_snes_flush_sound() {\n'
+                '\tstatic int16_t samples[512]; static unsigned used;\n'
+                '\twhile (b310e_pending_samples) {\n'
+                '\t\tunsigned n=MIN(b310e_pending_samples,256-used);\n'
+                '\t\tS9xMixSamples((uint8*)(samples+used*2),n*2);\n'
+                '\t\tused+=n; b310e_pending_samples-=n;\n'
+                '\t\tif (used==256) {b310e_audio_submit(samples,used);used=0;}\n'
+                '\t}\n}\nvoid S9xGenerateSound() {')
+        replace(snes, '\twhile (frames--) { S9xMixSamples((uint8*)(samples+used*2), 2);\n'
+                '\t\tif (++used == 256) { b310e_audio_submit(samples, used); used = 0; }\n\t}',
+                '\tb310e_pending_samples+=frames;\n'
+                '\tif (b310e_pending_samples>=64) b310e_snes_flush_sound();')
+        apu = stage / 'snes9x/snes9x_src/apu.cpp'
+        replace(apu, 'void S9xSetAPUDSP (uint8 byte)\n{',
+                'extern "C" void b310e_snes_flush_sound();\n'
+                'void S9xSetAPUDSP (uint8 byte)\n{\n\tb310e_snes_flush_sound();')
+        replace(apu, 'uint8 S9xGetAPUDSP ()\n{',
+                'uint8 S9xGetAPUDSP ()\n{\n\tb310e_snes_flush_sound();')
+        # Keep the slow scanline mixer setup out of the per-sample loop.
+        # Flush before DSP reads/writes, preserving register and ENDX timing.
         replace(stage / 'snes9x/snes9x_fp.c', '#include <stdio.h>', '#include <stdio.h>\n#include <time.h>')
         replace(stage / 'snes9x/snes9x_fp.c', 'uint32_t res2 = 0x180000, res0;',
                 'uint32_t res2 = 0x100000, res0; /* Keep room for the SPC700 and 16-bit renderer on 4 MiB phones. */')
         replace(sys / 'include/time.h', 'typedef long time_t;', '#include <sys/types.h>')
         # InfoNES mixes its five generated unsigned waveforms into stereo.
         replace(stage / 'infones/Makefile', '-DAPU_Mute=1', '-DAPU_Mute=0')
+        papu = stage / 'infones/InfoNES/src/InfoNES_pAPU.c'
+        # The upstream per-frame counters were moved into sample loops without
+        # changing their units. Scale them by the actual buffer length.
+        for channel in (1,2,4):
+            replace(papu, f'ApuC{channel}EnvPhase += ApuC{channel}EnvDelay;',
+                    f'ApuC{channel}EnvPhase += ApuC{channel}EnvDelay * ApuSamplesPerSync;')
+        for channel in (1,2):
+            replace(papu, f'ApuC{channel}SweepPhase += ApuC{channel}SweepDelay;',
+                    f'ApuC{channel}SweepPhase += ApuC{channel}SweepDelay * ApuSamplesPerSync;')
+            replace(papu, f'ApuC{channel}SweepPhase -= 2;', f'int changed=0; ApuC{channel}SweepPhase -= 2;')
+            replace(papu, f'ApuC{channel}SweepPhase += ApuC{channel}SweepDelay * ApuSamplesPerSync;',
+                    f'changed=1; ApuC{channel}SweepPhase += ApuC{channel}SweepDelay * ApuSamplesPerSync;')
+            replace(papu, f'if ( ApuC{channel}Freq ) {{', f'if ( changed && ApuC{channel}Freq ) {{')
+            replace(papu, f'/ ApuC{channel}Freq;', f'/ (ApuC{channel}Freq + 1);')
+            replace(papu, f'if ( ApuC{channel}Env )', f'if ( !ApuC{channel}Env )')
+            replace(papu, f'( ApuC{channel}Vol + ApuC{channel}EnvVol )', f'( 15 - ApuC{channel}EnvVol )')
+            replace(papu, f'if ( ApuC{channel}Atl ) {{ ApuC{channel}Atl--;  }}',
+                    f'if ( ApuC{channel}Atl && !ApuC{channel}Hold ) {{ ApuC{channel}Atl--; }}')
+            # Keep processing later register events when a channel is muted.
+            replace(papu, f'wave_buffers[{channel-1}][i] = 0;\n      break;',
+                    f'wave_buffers[{channel-1}][i] = 0;\n      continue;')
+            # Timer-high writes restart the envelope.
+            marker=f'case 3:\n\t  ApuC{channel}d = ApuEventQueue[event].data;'
+            replace(papu, marker, marker + f'\n\t  ApuC{channel}EnvVol = 0;\n'
+                    f'\t  ApuC{channel}EnvPhase = ApuC{channel}EnvDelay * ApuSamplesPerSync;')
+        replace(papu, 'ApuC2Freq -= ~( ApuC2Freq >> ApuC2SweepShifts );',
+                'ApuC2Freq -= ( ApuC2Freq >> ApuC2SweepShifts );')
         nes = stage / 'infones/InfoNES_System.c'
         replace(nes, 'void InfoNES_SoundInit(void) {}',
                 '#include "b310e-audio.h"\nvoid InfoNES_SoundInit(void) {}')

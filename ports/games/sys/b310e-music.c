@@ -14,7 +14,7 @@ static int volume = 80;
 static struct track { const uint8_t *p, *end, *start; unsigned next; uint8_t status; bool done; } tracks[TRACKS];
 static unsigned ntracks;
 static uint8_t velocity[16], programs[16], channel_volume[16];
-static struct note { unsigned phase, step, age; uint8_t channel, key, velocity; bool release, active; } notes[NOTES];
+static struct note { unsigned phase, step, age; int gain; uint8_t channel, key, velocity; bool release, active; } notes[NOTES];
 #include "b310e-notes.h"
 static unsigned le16(const uint8_t *p) { return p[0]|p[1]<<8; }
 static unsigned be16(const uint8_t *p) { return p[0]<<8|p[1]; }
@@ -31,6 +31,9 @@ static void timing(void) { step=(unsigned)((uint64_t)division*1000000*65536/((ui
 static void note_off(unsigned ch, unsigned key) {
     for (unsigned i=0; i<NOTES; i++) if (notes[i].channel==ch && notes[i].key==key) notes[i].release=true;
 }
+static void note_gain(struct note *n) {
+    n->gain=(n->velocity*channel_volume[n->channel]*volume*1024)/(127*24*127);
+}
 static void note_on(unsigned ch, unsigned key, unsigned vel) {
     if (!vel) { note_off(ch,key); return; }
     unsigned chosen=0, oldest=0;
@@ -41,9 +44,13 @@ static void note_on(unsigned ch, unsigned key, unsigned vel) {
     struct note *n=&notes[chosen];
     n->phase=n->age=0; n->step=b310e_note_step[key&127];
     n->channel=ch; n->key=key&127; n->velocity=MIN(127,vel); n->release=false; n->active=true;
+    note_gain(n);
 }
 static void control(unsigned ch, unsigned cc, unsigned value) {
-    if (cc==7) channel_volume[ch]=value;
+    if (cc==7) {
+        channel_volume[ch]=value;
+        for(unsigned i=0;i<NOTES;i++) if(notes[i].channel==ch) note_gain(&notes[i]);
+    }
     if (cc==120 || cc==123) for (unsigned i=0; i<NOTES; i++) if (notes[i].channel==ch) notes[i].release=true;
 }
 static void reset(void) {
@@ -136,7 +143,11 @@ void b310e_music_stop(void) {
     uint8_t *previous=song; song=NULL; song_size=0; b310e_irq_restore(old); free(previous);
 }
 void b310e_music_pause(bool value) {paused=value;}
-void b310e_music_volume(int value) {volume=MIN(127,MAX(0,value));}
+void b310e_music_volume(int value) {
+    int old=b310e_irq_save();volume=MIN(127,MAX(0,value));
+    for(unsigned i=0;i<NOTES;i++) note_gain(&notes[i]);
+    b310e_irq_restore(old);
+}
 bool b310e_music_playing(void) {return playing;}
 int b310e_music_sample(void) {
     if (!playing || paused) return 0;
@@ -158,11 +169,11 @@ int b310e_music_sample(void) {
     for (unsigned i=0; i<NOTES; i++) {
         struct note *n=&notes[i]; if (!n->active) continue;
         n->phase+=n->step; n->age++;
-        if (n->release && (n->age&31)==0 && n->velocity) n->velocity--;
+        if (n->release && (n->age&31)==0 && n->velocity) {n->velocity--;note_gain(n);}
         if (!n->velocity || ((mus?n->channel==15:n->channel==9) && n->age>RATE/5)) {n->active=false;continue;}
         int wave=b310e_sine[n->phase>>24];
         if (programs[n->channel]<8) wave=(wave*3+b310e_sine[(n->phase>>23)&255])/4;
-        sample+=wave*n->velocity*channel_volume[n->channel]/(127*24);
+        sample+=(wave*n->gain)/1024;
     }
-    return sample*volume/127;
+    return sample;
 }

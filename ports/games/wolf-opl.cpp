@@ -9,8 +9,7 @@ extern "C" void b310e_opl_init(void) {
 extern "C" void b310e_opl_write(unsigned reg,unsigned value) {
     if(chip) chip->WriteReg(reg,value);
 }
-extern "C" int b310e_opl_sample(void) {
-    int32_t sample=0;
-    if(chip) chip->GenerateBlock2(1,&sample);
-    return sample;
+extern "C" void b310e_opl_block(int32_t *samples,unsigned frames) {
+    if(chip) chip->GenerateBlock2(frames,samples);
+    else for(unsigned i=0;i<frames;i++) samples[i]=0;
 }

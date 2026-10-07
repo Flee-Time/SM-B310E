@@ -28,7 +28,9 @@ void PauseSong(BOOL pause) {b310e_music_pause(pause!=0);}
 void SetSongVolume(int volume) {b310e_music_volume(volume/2);}
 BOOL SongIsPlaying(void) {return b310e_music_playing();}
 BOOL PlaySong(char *name,int track,BOOL loop,BOOL restart) {
-    (void)track;(void)restart;return gs.MusicOn && b310e_group_music(name,loop!=0);
+    (void)track;(void)restart;
+    if(!gs.MusicOn || !b310e_group_music(name,loop!=0))return FALSE;
+    SetSongVolume(gs.MusicVolume);return TRUE;
 }
 BOOL CacheSound(int number,int type) {(void)type;return (unsigned)number<sizeof(voc)/sizeof(*voc);}
 int PlaySound(int number,int *x,int *y,int *z,Voc3D_Flags flags) {
@@ -49,7 +51,11 @@ void PlaySpriteSound(short owner,int index,Voc3D_Flags flags) {
     Set3DSoundOwner(owner);
 }
 void DoUpdateSounds3D(void) {
-    for(int i=0;i<8;i++)if(b310e_sample_active(i))b310e_sample_volume(i,gs.SoundVolume,128);
+    static int last_volume=-1;
+    if(last_volume!=gs.SoundVolume) {
+        last_volume=gs.SoundVolume;
+        for(int i=0;i<8;i++)if(b310e_sample_active(i))b310e_sample_volume(i,last_volume,128);
+    }
     b310e_audio_poll();
 }
 void Terminate3DSounds(void) {StopFX();}
