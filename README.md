@@ -66,7 +66,7 @@ Start with [the build guide](docs/build.md) for dependencies and tool detection.
 .\build.ps1 doctor
 .\build.ps1 sdcard      # OS + JSON menu + games + Rockbox runtime
 .\build.ps1 sd-image    # FAT32 emulator image with stereo test audio
-.\build.ps1 qemu        # pinned headless emulator
+.\build.ps1 qemu        # pinned GTK/SDL desktop emulator and Windows package
 .\build.ps1 check       # host tests and ARM boot-address checks
 .\build.ps1 clean       # preserves card data and downloaded caches
 ```

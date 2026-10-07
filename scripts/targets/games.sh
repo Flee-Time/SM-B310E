@@ -12,7 +12,7 @@ Out="$Repo/build/games"
 SdBin="$Repo/sdcard/fpbin"
 ScriptDir="$(cd "$(dirname "$0")" && pwd)"
 
-# The prebuilt fix14 bins (infones/fpsw/fpduke3d/snes9x/snes9x_16bit) are
+# The prebuilt bins (infones/fpsw/fpduke3d/snes9x/snes9x_16bit) are
 # extracted from a 7z archive downloaded from the fpdoom releases - that is a
 # hard requirement, so fail fast with a clear message instead of after the
 # multi-minute game builds.
@@ -45,8 +45,7 @@ fi
 # NOTE: fpblood, wolf3d, wolf3d_sw removed 2026-08-28 (don't work; no prebuilt
 # replacement). infones/fpsw/fpduke3d AND snes9x/snes9x_16bit are also NOT
 # locally built - our builds don't work on the B310E (GCC-14 port
-# incompatibilities on a fresh clone), but the fpdoom repo's prebuilt_fix14.7z
-# ones do, so all five are copied from there (see the prebuilt section below).
+# incompatibilities on a fresh clone), so all five use upstream prebuilts.
 games=(
 "fpdoom|fpdoom|"
 "chocolate-doom|chocolate-doom|GAME=doom"
@@ -56,17 +55,42 @@ games=(
 "gnuboy|gnuboy|FAT_WRITE=1"
 )
 
-# Bins copied from the fpdoom repo's prebuilt_fix14.7z release asset (our
-# builds of these don't work on the B310E; the prebuilt ones do). Pinned to
+# Bins copied from the fpdoom repo's prebuilt_fix15.7z release asset (our
+# local builds of these don't work on the B310E). Pinned to
 # release 1.20251101. Downloaded once and cached; extracted into $Out so the
 # staging loop below picks them up.
 PrebuiltRelease="1.20251101"
-PrebuiltUrl="https://github.com/ilyakurdyukov/fpdoom/releases/download/$PrebuiltRelease/prebuilt_fix14.7z"
-PrebuiltCache="$Repo/build/fpdoom/prebuilt_fix14.7z"
+PrebuiltUrl="https://github.com/ilyakurdyukov/fpdoom/releases/download/$PrebuiltRelease/prebuilt_fix15.7z"
+PrebuiltHash=67d41ffaeefe212a61c7c44fb21e5eed09f64dcb5a73328aa1cc31115238e1b7
+PrebuiltCache="$Repo/build/fpdoom/prebuilt_fix15.7z"
 PrebuiltBins=(infones.bin fpsw.bin fpduke3d.bin snes9x.bin snes9x_16bit.bin)
 PrebuiltExtract="$Out/prebuilt-extract"
 
 mkdir -p "$Out"
+
+# Verify the release download before spending time on the source builds.
+# Existing staged prebuilts survive; a clean build uses the pinned archive.
+have_prebuilt=true
+for b in "${PrebuiltBins[@]}"; do
+    if [ ! -f "$Out/$b" ]; then have_prebuilt=false; break; fi
+done
+if [ "$have_prebuilt" != true ]; then
+    echo "=== prebuilt: fetching $PrebuiltUrl ==="
+    if [ ! -f "$PrebuiltCache" ]; then
+        "${B310E_CURL:-curl}" -fLsS -o "$PrebuiltCache.part" "$PrebuiltUrl" || fail "prebuilt download failed (exit $?)"
+        printf '%s  %s\n' "$PrebuiltHash" "$PrebuiltCache.part" | sha256sum -c - || fail "prebuilt checksum mismatch"
+        mv "$PrebuiltCache.part" "$PrebuiltCache"
+    fi
+    printf '%s  %s\n' "$PrebuiltHash" "$PrebuiltCache" | sha256sum -c - || fail "cached prebuilt checksum mismatch"
+    mkdir -p "$PrebuiltExtract"
+    for b in "${PrebuiltBins[@]}"; do
+        7z x -y "$PrebuiltCache" -o"$PrebuiltExtract" "sdcard/fpbin/$b" >/dev/null || fail "prebuilt extract failed: $b"
+        cp "$PrebuiltExtract/sdcard/fpbin/$b" "$Out/$b"
+        echo "  -> $b ($(stat -c %s "$Out/$b") B, prebuilt)"
+    done
+else
+    echo "=== prebuilt: already present ==="
+fi
 
 # 0. download + patch all game sources. This is DELEGATED to
 # scripts/targets/fetch-games.sh - the old in-line `make -f helper.make
@@ -121,29 +145,6 @@ for g in "${games[@]}"; do
     cp "$bin" "$dest"
     echo "  -> $dest ($(stat -c %s "$dest") B)"
 done
-
-# 1.5 prebuilt bins (infones/fpsw/fpduke3d - our builds don't work on the
-# B310E, the fpdoom prebuilt_fix14 release ones do). Download once (cached),
-# extract into $Out so the staging loop picks them up.
-have_prebuilt=true
-for b in "${PrebuiltBins[@]}"; do
-    if [ ! -f "$Out/$b" ]; then have_prebuilt=false; break; fi
-done
-if [ "$have_prebuilt" != true ]; then
-    echo "=== prebuilt: fetching $PrebuiltUrl ==="
-    if [ ! -f "$PrebuiltCache" ]; then
-        "${B310E_CURL:-curl}" -fLsS -o "$PrebuiltCache" "$PrebuiltUrl" || fail "prebuilt download failed (exit $?)"
-    fi
-    mkdir -p "$PrebuiltExtract"
-    for b in "${PrebuiltBins[@]}"; do
-        7z x "$PrebuiltCache" -o"$PrebuiltExtract" "sdcard/fpbin/$b" >/dev/null || fail "prebuilt extract failed: $b"
-        cp "$PrebuiltExtract/sdcard/fpbin/$b" "$Out/$b"
-        echo "  -> $b ($(stat -c %s "$Out/$b") B, prebuilt)"
-    done
-    rm -rf "$PrebuiltExtract"
-else
-    echo "=== prebuilt: already present (infones/fpsw/fpduke3d) ==="
-fi
 
 # 2. stage into sdcard/fpbin
 mkdir -p "$SdBin"

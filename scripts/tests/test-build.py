@@ -20,7 +20,7 @@ spec.loader.exec_module(build)
 class BuildTests(unittest.TestCase):
     def builder(self, downloads=False, dry=False):
         return build.Builder(argparse.Namespace(msys='C:/msys64', toolchain=None,
-                             host_cc=None, jobs=2, qemu_source=None, dsp_blob=None,
+                             host_cc=None, jobs=2, qemu_source=None, qemu_headless=False, dsp_blob=None,
                              dry_run=dry, downloads=downloads, force=False, image=Path('card.img')))
 
     def test_entry_from_another_directory(self):
@@ -35,6 +35,26 @@ class BuildTests(unittest.TestCase):
         for args in (['unknown'], ['check', '--jobs', '0']):
             result = subprocess.run([sys.executable, ENTRY, *args], capture_output=True)
             self.assertEqual(result.returncode, 2)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows toolchain selection')
+    def test_msys_compiler_overrides_unrelated_windows_path_compiler(self):
+        with tempfile.TemporaryDirectory() as temp:
+            msys = Path(temp) / 'msys64'
+            (msys / 'mingw64/bin').mkdir(parents=True)
+            (msys / 'mingw64/bin/gcc.exe').write_bytes(b'fixture')
+            args = argparse.Namespace(msys=str(msys), toolchain=None, host_cc=None,
+                                      jobs=2, qemu_source=None, qemu_headless=False,
+                                      dsp_blob=None, dry_run=True)
+            builder = build.Builder(args)
+            self.assertEqual(builder.host, (msys / 'mingw64/bin').resolve())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows MSYS2 locations')
+    def test_detects_d_toolchains_and_retains_c_msys_fallback(self):
+        for installed, expected in (('D:/Toolchains/msys64', 'D:/Toolchains/msys64'),
+                                     ('C:/msys64', 'C:/msys64')):
+            with patch.object(Path, 'is_file', autospec=True,
+                              side_effect=lambda path: path.as_posix() == installed + '/usr/bin/bash.exe'):
+                self.assertEqual(build.msys_root(None), Path(expected).resolve())
 
     def test_clean_preserves_card_and_downloads(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(build, 'ROOT', Path(temp)):

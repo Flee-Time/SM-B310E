@@ -8,22 +8,71 @@ Run every supported build from the repository root with `build.ps1` on Windows,
 
 Python 3.10+, Git, an `arm-none-eabi` GCC toolchain, and host GCC are needed
 for firmware. The native firmware build does not require Bash or Make.
-Arm GNU Toolchain 14.2.Rel1 is the currently tested compiler.
+Arm GNU Toolchain 14.2.Rel1 and 15.3.Rel1 have been tested. The clean Windows
+setup was validated with MSYS2 host GCC 16.2.0 and ARM GCC 15.3.1.
 
 Menu/game/Rockbox builds also need Bash, Make and the standard POSIX tools
 (`sed`, `perl`, `curl`, `tar`). Games need 7-Zip for the pinned
 upstream release binaries. Rockbox needs `zip`. Install these dependencies
 before building; the scripts do not install packages or request elevation.
 
-On Windows, ports use MSYS2 (default `C:/msys64`). Install its MINGW64 host GCC
-and Python; pass `--msys` or set `B310E_MSYS` for a different installation.
+On Windows, ports use MSYS2. The entry point detects `D:/Toolchains/msys64`
+first, then `C:/msys64`. Install its MINGW64 host GCC and Python; pass `--msys`
+or set `B310E_MSYS` for a different installation. MINGW64 host GCC is preferred
+over unrelated WinLibs/UCRT compilers on Windows PATH. An explicit `--host-cc`
+still overrides that choice.
 The Windows download helper uses the system certificate store. On Linux,
 use your distribution's host GCC and POSIX tools.
 
-QEMU additionally needs its normal build dependencies: Ninja, Meson, GLib,
-Pixman, libpng, pkg-config and host GCC. On Windows these must be the MSYS2
-MINGW64 packages. The supported emulator build is headless, with PNG captures;
-it does not require GTK, SDL, administrator access or firmware dumps.
+QEMU additionally needs Ninja, Meson, GLib, Pixman, libpng, pkg-config,
+GTK3, SDL2, libepoxy (OpenGL) and host GCC. The default build includes GTK,
+SDL, OpenGL, VNC, keyboard input and host audio.
+`--qemu-headless` omits GTK/SDL/OpenGL and the Windows package for automated
+tests. Firmware dumps are not needed to compile either build.
+
+The recommended Windows layout is:
+
+```text
+D:/Toolchains/msys64/                 MSYS2, including mingw64/bin/
+D:/Toolchains/arm-none-eabi/bin/       separate ARM compiler
+D:/Toolchains/downloads/              verified installer cache
+```
+
+To bootstrap MSYS2 and all desktop/port dependencies into that layout:
+
+```powershell
+.\scripts\setup-windows.ps1 -ToolchainsRoot D:/Toolchains -SetUserEnvironment
+.\build.ps1 doctor
+.\build.ps1 qemu
+```
+
+The setup script checks the published SHA-256 of the MSYS2 base, fully updates
+it, and installs dependencies. `-SetUserEnvironment` saves `B310E_MSYS` and,
+if present, `B310E_TOOLCHAIN` for new shells; it leaves global PATH untouched.
+Install the ARM compiler separately into `arm-none-eabi/`. The build scripts
+do not install packages themselves. Setup does not delete older installations.
+
+For manual setup, use one MSYS2 **MINGW64** installation.
+Update MSYS2 with `pacman -Syu`, following any instruction to close/reopen
+the shell and finish the update. Then install these packages in its MINGW64
+shell; do not mix UCRT64 or MSYS libraries with MINGW64 libraries:
+
+```sh
+pacman -S --needed base-devel git \
+  mingw-w64-x86_64-gcc mingw-w64-x86_64-python \
+  mingw-w64-x86_64-python-setuptools mingw-w64-x86_64-python-wheel \
+  mingw-w64-x86_64-meson mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf \
+  mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman mingw-w64-x86_64-dtc \
+  mingw-w64-x86_64-libpng mingw-w64-x86_64-gtk3 \
+  mingw-w64-x86_64-SDL2 mingw-w64-x86_64-libepoxy
+```
+
+On Debian/Ubuntu the corresponding desktop dependencies can be installed with
+`sudo apt install build-essential git python3 python3-venv ninja-build meson
+pkg-config libglib2.0-dev libpixman-1-dev libpng-dev libfdt-dev libgtk-3-dev
+libsdl2-dev libepoxy-dev`. Other distributions use their corresponding packages.
+QEMU downloads its pinned Meson subprojects on a fresh clone. Internet access is
+therefore required for the first build; later invocations reuse the checkout.
 
 ## Commands
 
@@ -37,6 +86,7 @@ it does not require GTK, SDL, administrator access or firmware dumps.
 .\build.ps1 sdcard               # complete card: OS + menu + games + Rockbox
 .\build.ps1 sd-image             # FAT32 emulator image with stereo test.wav
 .\build.ps1 qemu                # emulator: build/qemu/build/qemu-system-arm.exe
+.\build.ps1 qemu --qemu-headless # smaller build for automated tests
 .\build.ps1 check               # 182 host checks + ARM entry/text checks
 .\build.ps1 debug               # LCD, rotation, SD, MMU and NOR diagnostics
 .\build.ps1 clean               # generated outputs only
@@ -69,6 +119,7 @@ For Make aliases use `make rockbox`, `make check`, etc. Set `PYTHON` if necessar
 - `build/firmware/`, `build/host/`, `build/fpmain/`, `build/games/`: build outputs.
 - `build/fpdoom/`, `build/rockbox/`, `build/qemu/`: upstream source/build caches.
 - `build/logs/`: complete logs, one per target.
+- `build/qemu-desktop/`, `build/qemu-desktop.zip`: portable Windows GUI package.
 - `sdcard/`: generated card staging plus your local music, ROMs and settings.
 
 The upstream revisions are checked before use and existing checkouts are never
@@ -87,10 +138,60 @@ files without deleting your saved configuration, playlists or music. Menu
 builds stage the tracked default `ports/fpmain/config.json`, so retain any
 custom menu configuration separately before rebuilding the menu.
 
+The five upstream prebuilt games now use the checksum-pinned `prebuilt_fix15.7z`
+from fpdoom release `1.20251101`; upstream removed the previous fix14 asset.
+Existing prebuilt game outputs are retained. Fresh builds download and verify
+fix15 before source compilation. The five updated prebuilts still need phone
+testing; successfully compiling/downloading them does not establish hardware
+compatibility.
+
 `sd-image` needs the staged menu and Rockbox files. Existing images are protected;
 pass `--force` only when you want to replace the generated image. The image
 contains a stereo test WAV and a test configuration; it is separate from your
 physical card and its settings.
+
+## Running the Windows desktop package
+
+After `.\build.ps1 qemu`, extract `build/qemu-desktop.zip` and keep its
+`bin/`, `lib/`, `share/` and `etc/` folders together. End users do not need
+MSYS2 or Python. Drag a stock `.bin` dump onto `run-stock.cmd`, or run:
+
+```bat
+run-stock.cmd "C:\phone\stock.bin" "C:\phone\sdcard.img"
+```
+
+The SD image is optional. The launcher opens GTK and enables SDL host audio;
+it protects the NOR dump with `readonly=on`. The SD image is writable.
+GTK provides fullscreen, zoom and input grab. Arrow
+keys are the D-pad, Enter is OK, F1/F2 are the soft keys and Escape is END.
+`Ctrl+Alt+G` releases grabbed input. See `emulator-guide.md` in the package
+for the remaining keypad mappings and advanced options. The phone firmware
+and proprietary reference sources are not included.
+
+The package contains both `bin/qemu-system-arm.exe` (with a console for
+startup/serial output) and `bin/qemu-system-armw.exe` (without a console).
+Advanced users can select `-display sdl` instead of GTK. Native builds on
+Linux run from `build/qemu/build/qemu-system-arm` with `-display gtk`.
+
+An absent or empty source directory is cloned automatically. Existing Git
+checkouts, including linked worktrees, are checked against the pinned commit
+before machine files are installed. Version errors report the actual commit;
+archives without `.git` are identified explicitly. No existing checkout is
+reset. Windows builds copy needed resources when symlink privileges are absent,
+so enabling Developer Mode or running the build as administrator is unnecessary.
+
+The fresh-build regression checks are `python scripts/tests/test-build.py`
+and `python scripts/tests/test-qemu-build.py`. Full configure/build logs are
+`b310e-configure.log` and `b310e-build.log` in the QEMU source directory.
+`python emulator/qemu/scripts/test-desktop-package.py --package build/qemu-desktop
+--output build/validation/desktop-package` relocates the package into a folder
+with spaces and checks GTK and SDL with MSYS2 removed from PATH, LCD captures
+and soft-key press/release delivery. It uses null audio by default for hosts
+without a sound device; `--audio-backend sdl` tests native output startup.
+`--opengl` additionally requests a GTK GL context. Accelerated GTK and SDL
+both crashed on the local Windows test host and remain unverified on the remote
+host. The default launcher explicitly uses `gtk,gl=off`; this 2D display path
+passed on both hosts and supports the phone framebuffer and keyboard input.
 
 The optional `dsp-diag --dsp-blob /path/to/dsp-blob-CC874.dec.bin` target
 requires the previously verified private DSP bundle and checks its SHA-256.
