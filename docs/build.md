@@ -81,7 +81,7 @@ therefore required for the first build; later invocations reuse the checkout.
 .\build.ps1 firmware             # RAM-loaded OS: build/bin/os.bin
 .\build.ps1 os-sd                # USB-free SD-boot OS
 .\build.ps1 fpmain               # JSON boot menu, staged into sdcard/fpbin
-.\build.ps1 games                # supported game ports and pinned prebuilts
+.\build.ps1 games                # all supported game ports from pinned sources
 .\build.ps1 rockbox              # player binary and matching .rockbox runtime
 .\build.ps1 sdcard               # complete card: OS + menu + games + Rockbox
 .\build.ps1 sd-image             # FAT32 emulator image with stereo test.wav
@@ -138,12 +138,12 @@ files without deleting your saved configuration, playlists or music. Menu
 builds stage the tracked default `ports/fpmain/config.json`, so retain any
 custom menu configuration separately before rebuilding the menu.
 
-The five upstream prebuilt games now use the checksum-pinned `prebuilt_fix15.7z`
-from fpdoom release `1.20251101`; upstream removed the previous fix14 asset.
-Existing prebuilt game outputs are retained. Fresh builds download and verify
-fix15 before source compilation. The five updated prebuilts still need phone
-testing; successfully compiling/downloading them does not establish hardware
-compatibility.
+All 16 game binaries now compile from pinned source with the B310E save/audio
+overlay. `ports/games/fetch.py` fetches the additional cores, then
+`ports/games/prepare.py` creates an isolated `build/game-ports/` tree. Cached
+upstream sources stay unchanged. Every variant is cleaned before compilation;
+only the declared outputs are staged, so old prebuilt binaries cannot silently
+replace an updated port. See [game controls, data and testing](game-ports.md).
 
 `sd-image` needs the staged menu and Rockbox files. Existing images are protected;
 pass `--force` only when you want to replace the generated image. The image

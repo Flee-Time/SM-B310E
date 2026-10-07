@@ -1,155 +1,61 @@
 #!/usr/bin/env bash
-# Build the supported games and stage the pinned prebuilt ports.
+# Build every supported port from pinned sources with the B310E save/audio overlay.
 set -euo pipefail
-
 fail() { echo "error: $*" >&2; exit 1; }
-
 Repo="$(cd "$(dirname "$0")/../.." && pwd)"
-# The fpdoom clone lives in the repo's build/ tree (gitignored, cached across
-# normal clean runs) - cloned here if missing. Override with FPDOOM_DIR.
 Fpdoom="${FPDOOM_DIR:-$Repo/build/fpdoom}"
 Out="$Repo/build/games"
-SdBin="$Repo/sdcard/fpbin"
+Prepared="$Repo/build/game-ports"
 ScriptDir="$(cd "$(dirname "$0")" && pwd)"
-
-# The prebuilt bins (infones/fpsw/fpduke3d/snes9x/snes9x_16bit) are
-# extracted from a 7z archive downloaded from the fpdoom releases - that is a
-# hard requirement, so fail fast with a clear message instead of after the
-# multi-minute game builds.
-if ! command -v 7z >/dev/null 2>&1; then
-    fail "7z is required to extract the prebuilt game binaries (infones/fpsw/fpduke3d/snes9x). Install p7zip (or the 7-Zip CLI) and put 7z on PATH."
-fi
-
+Python="${B310E_PYTHON:-python3}"
+HostCC=gcc # ensure_fpdoom adds the configured host compiler directory to PATH.
 source "$ScriptDir/fpdoom.sh"
 ensure_fpdoom
-if [ ! -x "$Fpdoom/pack_reloc/pack_reloc" ]; then
-    echo "building fpdoom pack_reloc"
-    # the clone's pack_reloc needs inc/elf.h (the build host may lack it) -
-    # vendored in the repo at tools/pack_reloc/inc/elf.h
-    mkdir -p "$Fpdoom/pack_reloc/inc"
-    cp "$Repo/tools/pack_reloc/inc/elf.h" "$Fpdoom/pack_reloc/inc/elf.h"
-    ( cd "$Fpdoom/pack_reloc" && make CC=gcc "CFLAGS=-O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused -I inc" ) \
-        || fail "pack_reloc build failed"
-fi
-if [ ! -f "$Fpdoom/build_sc6531.make" ]; then
-    fail "fpdoom clone incomplete at $Fpdoom - missing build_sc6531.make"
-fi
-
-# toolchain on PATH: on Linux arm-none-eabi-* usually lives in /usr/bin (already
-# on PATH); an explicit override can be prepended via B310E_TOOLCHAIN.
-if [ -n "${B310E_TOOLCHAIN:-}" ]; then
-    PATH="$B310E_TOOLCHAIN:$PATH"
-fi
-
-# sources: dir, make targets, build NAME=... GAME=...
-# NOTE: fpblood, wolf3d, wolf3d_sw removed 2026-08-28 (don't work; no prebuilt
-# replacement). infones/fpsw/fpduke3d AND snes9x/snes9x_16bit are also NOT
-# locally built - our builds don't work on the B310E (GCC-14 port
-# incompatibilities on a fresh clone), so all five use upstream prebuilts.
+if [ -n "${B310E_TOOLCHAIN:-}" ]; then PATH="$B310E_TOOLCHAIN:$PATH"; fi
+mkdir -p "$Fpdoom/pack_reloc/inc" "$Out" "$Repo/sdcard/fpbin"
+cp "$Repo/tools/pack_reloc/inc/elf.h" "$Fpdoom/pack_reloc/inc/elf.h"
+make -C "$Fpdoom/pack_reloc" CC="$HostCC" "CFLAGS=-O2 -Wall -Wextra -std=c99 -pedantic -Wno-unused -I inc"
+bash "$ScriptDir/fetch-games.sh"
+"$Python" "$Repo/ports/games/fetch.py" "$Fpdoom" --curl "${B310E_CURL:-curl}"
+"$Python" "$Repo/ports/games/prepare.py" "$Fpdoom"
 games=(
 "fpdoom|fpdoom|"
 "chocolate-doom|chocolate-doom|GAME=doom"
 "chocolate-heretic|chocolate-doom|GAME=heretic"
 "chocolate-hexen|chocolate-doom|GAME=hexen"
 "retris|retris|"
-"gnuboy|gnuboy|FAT_WRITE=1"
+"gnuboy|gnuboy|"
+"infones|infones|"
+"snes9x|snes9x|USE_16BIT=0"
+"snes9x_16bit|snes9x|USE_16BIT=1"
+"wolf3d|wolf3d|"
+"wolf3d_sw|wolf3d|"
+"wolf3d_apo|wolf3d|"
+"wolf3d_v11|wolf3d|GAMEVER=UPLOAD"
+"fpduke3d|fpbuild|GAME=duke3d"
+"fpsw|fpbuild|GAME=sw"
+"fpblood|fpbuild|GAME=blood"
 )
-
-# Bins copied from the fpdoom repo's prebuilt_fix15.7z release asset (our
-# local builds of these don't work on the B310E). Pinned to
-# release 1.20251101. Downloaded once and cached; extracted into $Out so the
-# staging loop below picks them up.
-PrebuiltRelease="1.20251101"
-PrebuiltUrl="https://github.com/ilyakurdyukov/fpdoom/releases/download/$PrebuiltRelease/prebuilt_fix15.7z"
-PrebuiltHash=67d41ffaeefe212a61c7c44fb21e5eed09f64dcb5a73328aa1cc31115238e1b7
-PrebuiltCache="$Repo/build/fpdoom/prebuilt_fix15.7z"
-PrebuiltBins=(infones.bin fpsw.bin fpduke3d.bin snes9x.bin snes9x_16bit.bin)
-PrebuiltExtract="$Out/prebuilt-extract"
-
-mkdir -p "$Out"
-
-# Verify the release download before spending time on the source builds.
-# Existing staged prebuilts survive; a clean build uses the pinned archive.
-have_prebuilt=true
-for b in "${PrebuiltBins[@]}"; do
-    if [ ! -f "$Out/$b" ]; then have_prebuilt=false; break; fi
+for game in "${games[@]}"; do
+    IFS='|' read -r name dir vars <<< "$game"
+    echo "building $name"
+    # Each variant shares upstream object directories; clean with its own flags.
+    # Intentional word splitting passes the fixed make-variable list above.
+    # shellcheck disable=SC2086
+    make -C "$Prepared/$dir" clean CHIP=3 LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi NAME="$name" $vars
+    # Host table generators require the object directory before a parallel build.
+    # shellcheck disable=SC2086
+    make -C "$Prepared/$dir" objdir CHIP=3 LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi NAME="$name" $vars
+    # shellcheck disable=SC2086
+    make -C "$Prepared/$dir" -j"${B310E_BUILD_JOBS:-8}" CHIP=3 LIBC_SDIO=3 \
+        TOOLCHAIN=arm-none-eabi HOSTCC="$HostCC" NAME="$name" $vars
+    cp "$Prepared/$dir/$name.bin" "$Out/$name.bin"
+    # Preserve the matching symbols before the next variant replaces its objects.
+    cp "$Prepared/$dir/obj3"*/"$name"_part2.elf "$Out/$name.elf"
 done
-if [ "$have_prebuilt" != true ]; then
-    echo "=== prebuilt: fetching $PrebuiltUrl ==="
-    if [ ! -f "$PrebuiltCache" ]; then
-        "${B310E_CURL:-curl}" -fLsS -o "$PrebuiltCache.part" "$PrebuiltUrl" || fail "prebuilt download failed (exit $?)"
-        printf '%s  %s\n' "$PrebuiltHash" "$PrebuiltCache.part" | sha256sum -c - || fail "prebuilt checksum mismatch"
-        mv "$PrebuiltCache.part" "$PrebuiltCache"
-    fi
-    printf '%s  %s\n' "$PrebuiltHash" "$PrebuiltCache" | sha256sum -c - || fail "cached prebuilt checksum mismatch"
-    mkdir -p "$PrebuiltExtract"
-    for b in "${PrebuiltBins[@]}"; do
-        7z x -y "$PrebuiltCache" -o"$PrebuiltExtract" "sdcard/fpbin/$b" >/dev/null || fail "prebuilt extract failed: $b"
-        cp "$PrebuiltExtract/sdcard/fpbin/$b" "$Out/$b"
-        echo "  -> $b ($(stat -c %s "$Out/$b") B, prebuilt)"
-    done
-else
-    echo "=== prebuilt: already present ==="
-fi
-
-# 0. download + patch all game sources. This is DELEGATED to
-# scripts/targets/fetch-games.sh - the old in-line `make -f helper.make
-# ZIPDIR=. all patch` loop is BROKEN (helper.make's patch target re-extracts
-# with partial src/* globs that miss subdirs like src/doom, overwriting the
-# full tree; fetch-games.sh does a full unzip + direct patch -p1, which is
-# the only path that works on a fresh clone). fetch-games.sh skips sources
-# already present, so re-runs are no-ops.
-# Run as a CHILD process so its `set -e`/fail behavior cannot abort THIS
-# script's error handling and it returns a real exit code.
-bash "$ScriptDir/fetch-games.sh" || fail "fetch-games.sh failed (exit $?)"
-
-# 1. build each game
-for g in "${games[@]}"; do
-    IFS='|' read -r name makedir vars <<< "$g"
-    dir="$Fpdoom/$makedir"
-    bin="$dir/$name.bin"
-    dest="$Out/$name.bin"
-    echo "=== build $name [$vars] ==="
-    (
-        cd "$dir" || fail "cannot cd to $dir"
-        # GCC 14 makes -Wincompatible-pointer-types a hard ERROR; the fpdoom
-        # ports were written for older GCCs where it was a warning. The clone
-        # is not restored between game builds, so patch each port's Makefile
-        # once (marker-guarded, idempotent) to downgrade it. The fpdoom
-        # release CI hits the same wall on modern GCC.
-        mk="$dir/Makefile"
-        if [ -f "$mk" ] && ! grep -q 'Wno-error=incompatible-pointer-types' "$mk"; then
-            echo 'CFLAGS += -Wno-error=incompatible-pointer-types' >> "$mk"
-            echo "  patched Makefile: -Wno-error=incompatible-pointer-types (GCC 14 compat)"
-        fi
-        # snes9x port defines time() but omits <time.h> (works on old glibc
-        # where stdio.h pulled it in; fails on the B310E toolchain).
-        sfp="$dir/snes9x_fp.c"
-        if [ -f "$sfp" ] && ! grep -q '#include <time.h>' "$sfp"; then
-            sed -i '0,/#include <stdio.h>/s//#include <stdio.h>\n#include <time.h>/' "$sfp"
-            echo "  patched snes9x_fp.c: #include <time.h>"
-        fi
-        # Use the same variant flags for clean and build; GAME selects a
-        # different object directory for Doom/Heretic/Hexen.
-        # shellcheck disable=SC2086
-        make clean LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi CHIP=3 FAT_WRITE=0 $vars
-        # Retris' host table generator requires obj3 before the parallel pass.
-        # shellcheck disable=SC2086
-        make objdir LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi CHIP=3 FAT_WRITE=0 $vars
-        # $vars splits on whitespace so multi-token vars (e.g. "FAT_WRITE=1
-        # NAME=snes9x_16bit") reach make as SEPARATE arguments - an unquoted
-        # expansion performs the word-splitting PowerShell lacks.
-        # shellcheck disable=SC2086
-        make -j"${B310E_BUILD_JOBS:-8}" all LIBC_SDIO=3 TOOLCHAIN=arm-none-eabi CHIP=3 FAT_WRITE=0 $vars || fail "build failed (exit $?)"
-    )
-    cp "$bin" "$dest"
-    echo "  -> $dest ($(stat -c %s "$dest") B)"
+# Stage only this build's declared outputs; an old cached binary cannot sneak in.
+for game in "${games[@]}"; do
+    IFS='|' read -r name _ _ <<< "$game"
+    cp "$Out/$name.bin" "$Repo/sdcard/fpbin/$name.bin"
 done
-
-# 2. stage into sdcard/fpbin
-mkdir -p "$SdBin"
-for f in "$Out"/*.bin; do
-    [ -e "$f" ] || continue
-    cp "$f" "$SdBin/$(basename "$f")"
-done
-echo "staged into: $SdBin"
+echo "staged game binaries into $Repo/sdcard/fpbin"

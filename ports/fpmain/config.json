@@ -107,6 +107,24 @@
           ]
         },
         {
+          "name": "Wolfenstein 3D",
+          "bin": "fpbin/wolf3d.bin",
+          "args": [
+            "--dir",
+            "games/wolf3d",
+            "wolf3d"
+          ]
+        },
+        {
+          "name": "Blood",
+          "bin": "fpbin/fpblood.bin",
+          "args": [
+            "--dir",
+            "games/blood",
+            "blood"
+          ]
+        },
+        {
           "name": "Retris",
           "bin": "fpbin/retris.bin",
           "args": [

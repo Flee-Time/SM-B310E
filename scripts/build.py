@@ -145,7 +145,7 @@ class Builder:
             self.copy(ROOT / 'build/bin/os-sd.bin', ROOT / 'sdcard/progs/os.bin')
             self.copy(ROOT / 'ports/fpmain/games-README.md', ROOT / 'sdcard/games/README.md')
             if not self.args.dry_run:
-                for folder in ('doom1', 'doom2', 'duke3d', 'sw', 'heretic', 'hexen', 'retris', 'snes', 'gameboy', 'nes'):
+                for folder in ('doom1', 'doom2', 'duke3d', 'sw', 'heretic', 'hexen', 'wolf3d', 'blood', 'retris', 'snes', 'gameboy', 'nes'):
                     (ROOT / 'sdcard/games' / folder).mkdir(parents=True, exist_ok=True)
         elif name == 'sd-image':
             self.run([sys.executable, ROOT / 'ports/rockbox/tests/make-sd-image.py',
