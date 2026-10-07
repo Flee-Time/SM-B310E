@@ -26,8 +26,9 @@ static void render(int16_t *out, unsigned frames) {
             struct voice *v = &voices[ch];
             if (!v->active) continue;
             if (v->position >= v->size) { v->active=false; continue; }
-            int value = ((int)v->data[v->position]-128)*256;
-            left += value*v->left/255; right += value*v->right/255;
+            /* Gains are Q8: no software division in the sample loop. */
+            int value = (int)v->data[v->position]-128;
+            left += value*v->left; right += value*v->right;
             v->fraction += v->step;
             v->position += v->fraction >> 16; v->fraction &= 65535;
         }
@@ -55,8 +56,8 @@ void b310e_sample_volume(int channel, int volume, int separation) {
     if ((unsigned)channel >= VOICES) return;
     volume = MIN(255,MAX(0,volume)); separation = MIN(255,MAX(0,separation));
     int old = b310e_irq_save();
-    voices[channel].left = volume*MIN(255,(255-separation)*2)/255;
-    voices[channel].right = volume*MIN(255,separation*2)/255;
+    voices[channel].left = (volume*MIN(255,(255-separation)*2)*256+32512)/65025;
+    voices[channel].right = (volume*MIN(255,separation*2)*256+32512)/65025;
     b310e_irq_restore(old);
 }
 int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,

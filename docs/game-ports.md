@@ -62,6 +62,23 @@ unimplemented. This is audible music and effects support, not sound fidelity
 equivalent to the original PC engines. CPU-heavy games still need phone
 performance testing.
 
+Build effects use a 96 KiB LRU cache, so repeated shots and menu sounds do
+not reread their VOC/WAV files from the card. PCM and wavetable gains are
+computed when controls change, leaving multiplication and shifts in the
+sample loop. These two hot mixer files and Wolf's OPL generator compile as
+optimized ARM code. File loading remains outside the DMA interrupt.
+
+Wolf's fixed 22050 Hz OPL attack calibration is calculated on the host;
+startup uses those exact values. OPL generation batches samples up to the
+next 700 Hz IMF or 140 Hz effect event. SNES batches pending PCM until a DSP
+read/write or 64 frames, keeps its SPC700 execution synchronized, and allows
+up to five consecutive skipped display frames when behind. NES envelopes
+and pulse sweeps use 240/120 Hz clocks, independent of the sample rate;
+constant volume, pulse-two negative sweep and stale muted buffers are fixed.
+Duke retains CON sound filenames and its reachable sound-options screen,
+with working sound/music toggles and volume controls. Its positional effects
+also apply a simple stereo pan and the reverse-stereo setting.
+
 ## Save and startup repairs
 
 The common FAT layer implements long ASCII save filenames, append, overwrite,
@@ -97,12 +114,18 @@ toolchain available on PATH:
 python scripts/tests/test-build.py
 python ports/games/tests/test-fat.py --cc gcc
 python ports/games/tests/test-audio.py --cc gcc
+python ports/games/tests/test-performance.py --cc gcc --cxx g++
 python ports/games/tests/test-strings.py --cc gcc
 python ports/games/tests/test-arm-save.py --qemu build/qemu/build/qemu-system-arm.exe --nor /path/to/stock-dump.bin
 ```
 
 The FAT suite exercises the actual prepared writer, including full-card and
 failed-write cases. The audio suite checks the actual mixer and sequencer.
+The performance regression suite compares the fixed OPL calibration and
+batched PCM with the original generator, checks cache reads/eviction/bounds,
+and exercises InfoNES envelopes, sweep and timed writes at 11025, 22050 and
+44100 Hz. Host benchmark timings measure the calibration workload; they
+are not phone frame-rate measurements.
 The ARM test boots twice through the SD loader, writes and independently
 verifies a 72 KiB long-name save, replacement saves and append data, exhausts
 and recovers the heap, and checks stereo audio while SD writes run.
