@@ -188,8 +188,10 @@ and `python scripts/tests/test-qemu-build.py`. Full configure/build logs are
 with spaces and checks GTK and SDL with MSYS2 removed from PATH, LCD captures
 and soft-key press/release delivery. It uses null audio by default for hosts
 without a sound device; `--audio-backend sdl` tests native output startup.
-`--opengl` additionally requests a GTK GL context on a host with compatible
-graphics drivers. The phone display uses the ordinary 2D path by default.
+`--opengl` additionally requests a GTK GL context. Accelerated GTK and SDL
+both crashed on the local Windows test host and remain unverified on the remote
+host. The default launcher explicitly uses `gtk,gl=off`; this 2D display path
+passed on both hosts and supports the phone framebuffer and keyboard input.
 
 The optional `dsp-diag --dsp-blob /path/to/dsp-blob-CC874.dec.bin` target
 requires the previously verified private DSP bundle and checks its SHA-256.

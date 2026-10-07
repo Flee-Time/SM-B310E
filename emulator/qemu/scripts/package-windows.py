@@ -101,9 +101,9 @@ set "GSETTINGS_SCHEMA_DIR=%~dp0share\glib-2.0\schemas"
 set "GDK_PIXBUF_MODULE_FILE=%~dp0lib\gdk-pixbuf-2.0\2.10.0\loaders.cache"
 set "FONTCONFIG_PATH=%~dp0etc\fonts"
 if "%~2"=="" (
-    "%~dp0bin\qemu-system-arm.exe" -M b310e -display gtk -audiodev sdl,id=audio0,in.voices=0 -global sc6530_adi.audiodev=audio0 -L "%~dp0share\qemu" -serial stdio -drive "if=none,id=nor,file=%B310E_ROM%,format=raw,readonly=on"
+    "%~dp0bin\qemu-system-arm.exe" -M b310e -display gtk,gl=off -audiodev sdl,id=audio0,in.voices=0 -global sc6530_adi.audiodev=audio0 -L "%~dp0share\qemu" -serial stdio -drive "if=none,id=nor,file=%B310E_ROM%,format=raw,readonly=on"
 ) else (
-    "%~dp0bin\qemu-system-arm.exe" -M b310e -display gtk -audiodev sdl,id=audio0,in.voices=0 -global sc6530_adi.audiodev=audio0 -L "%~dp0share\qemu" -serial stdio -drive "if=none,id=nor,file=%B310E_ROM%,format=raw,readonly=on" -drive "if=none,id=sdcard,file=%B310E_CARD%,format=raw"
+    "%~dp0bin\qemu-system-arm.exe" -M b310e -display gtk,gl=off -audiodev sdl,id=audio0,in.voices=0 -global sc6530_adi.audiodev=audio0 -L "%~dp0share\qemu" -serial stdio -drive "if=none,id=nor,file=%B310E_ROM%,format=raw,readonly=on" -drive "if=none,id=sdcard,file=%B310E_CARD%,format=raw"
 )
 exit /b %errorlevel%
 ''', encoding='utf-8', newline='\r\n')
@@ -117,6 +117,8 @@ The NOR dump is read-only; an optional SD image is writable.
 Arrow keys: D-pad. Enter: OK. F1/F2: soft keys. Escape: END.
 Digits: phone keypad. Keypad Enter: DIAL. See emulator-guide.md for all keys.
 GTK menus provide zoom, fullscreen and input grab; Ctrl+Alt+G releases the grab.
+The launcher uses the tested 2D display path. Accelerated OpenGL is optional
+and has not passed validation on the Windows test hosts.
 The console shows the firmware's serial output and startup errors.
 For advanced use, bin/qemu-system-arm.exe supports -display sdl and normal QEMU options.
 bin/qemu-system-armw.exe provides the same emulator without a console window.
