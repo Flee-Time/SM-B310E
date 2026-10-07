@@ -66,16 +66,19 @@ $env:B310E_HOST_CC = '/c/msys64/mingw64/bin'
   --cc C:/msys64/mingw64/bin/gcc.exe
 # ARM startup, directory filtering, ROM selection and actual launch args:
 & C:/msys64/mingw64/bin/python.exe ports/fpmain/tests/test-boot.py `
-  --qemu D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe `
+  --qemu D:/floppy/SM-B310E/build/qemu/build/qemu-system-arm.exe `
   --firmware D:/floppy/phonefirmware/e52q7a.bin `
   --toolchain D:/floppy/.tools/arm-toolchain/bin `
   --output emulator/qemu/logs/fpmain-boot
 ```
 
-The ARM test uses generated FAT32 cards and an original tiny launcher/ROM
+The ARM test uses generated FAT32 cards and an original 128 KiB launcher/ROM
 fixture. It verifies JSON-only, empty, invalid and missing configurations,
-then selects a spaced ROM filename through the keypad and checks the actual
-arguments at the launched program. It supplies the loader's initial card
+then launches programs and a spaced ROM filename through the keypad and checks
+the actual arguments and final payload word at the launched program. Add
+`--pad-loader 1024` to repeat with a larger loader section. Symbol addresses
+use the binary's own loader length rather than assuming a fixed offset.
+The test supplies the loader's initial card
 state/entry PC; it does not test NOR loader installation. Real-phone menu
 boot still needs a retest. Copy the built `sdcard/fpbin/fpmain.bin` and
 `config.json` to the card; the existing NOR loader need not change.
@@ -117,16 +120,22 @@ The official fpdoom release builds `fpbin/fpmain.bin` from the **fpmenu** app
 (`release.make`: `%/fpmain.bin: makebin fpmenu OPTS NAME=fpmain`). The app
 format (verified against the stock build):
 
-- **`fpmain.bin` (stock fpmenu) = 29684 B** = part2 stub (512 B) + part1 app
+- **Example stock fpmenu build: 29684 B** = part2 stub (512 B) + part1 app
   (29032 B, linked at `0x14000000`, self-relocating via its appended reloc
   table) + relocs.
+- The part2 length is stored in the word at file offset `+4`. It changes
+  with the compiler: ARM GCC 14.2 produced 512 bytes and ARM GCC 15.3 produced
+  504 bytes in the tested builds. fpmain reads that header at `0x04000000`,
+  checks it against the part1 runtime address and the IRAM capacity, and copies
+  the actual loader length. Invalid layouts show `LOADER ERROR` and return
+  to the menu.
 - sdboot loads the whole file to `0x04000000` (NOR boot) and jumps there.
   part2's `_start` (`bl __image_end`) branches into part1's `start.s`, which
   relocates itself for the `0x04000000` runtime base, then `entry_main` →
   `sys_init` (LCD/keypad from the firmware-dump scan) → `main()`.
 
-**The port is DONE (2026-08-23): the current `fpmain.bin` (30252 B, built by
-`build.ps1 fpmain`) is the fpmenu skeleton with OUR boot menu**
+**The `fpmain.bin` built by `build.ps1 fpmain` is the fpmenu skeleton with
+our boot menu**
 — **BOOT STOCK** + the card's **progs/** (OS-like / single apps, no args) +
 the **fpbin/config.json ports and discovered ROMs**, launched with their
 configured arguments.
@@ -221,7 +230,7 @@ make sdcard     # stage the whole card (fpmain + games + os + rockbox)
 Verified headers: sdboot3.bin `+0 b` (ARM), `+4 0xffffffff` (install writes
 0x46e4), `+16 __image_size` = file size, `+20 sdbootkey` = 0xffffffff (any
 key), contains `"fpbin/fpmain.bin"`, no `BMEN` magic. fpmain.bin offset 0 =
-`bl __image_end` (ARM) → part1 at +0x200.
+`bl __image_end` (ARM) → part1 at the offset stored in its `+4` size word.
 
 ## NOR install (REVERSIBLE — the flash step)
 

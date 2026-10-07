@@ -142,14 +142,24 @@ def boot_case(args, name, config, symbols, fixture):
                     time.sleep(.4)
                 qmp.command('screendump', {'filename': str(out / 'roms.png'), 'format': 'png'})
                 qmp.hmp('sendkey ret 100')
-                time.sleep(1)
-                assert qt.read(0x40002000) == 0x424f4f54, 'selected ROM did not launch fixture'
+            else:
+                # Exercise the progs/ launch path even without valid JSON.
+                for key in ['down', 'ret']:
+                    qmp.hmp(f'sendkey {key} 100')
+                    time.sleep(.4)
+            time.sleep(1)
+            qmp.command('screendump', {'filename': str(out / 'launched.png'), 'format': 'png'})
+            (out / 'launch-registers.txt').write_text(qmp.hmp('info registers'))
+            assert qt.read(0x40002000) == 0x424f4f54, 'selected binary did not launch fixture'
+            if name == 'rom-discovery':
                 data = bytes.fromhex(qt.command('read 0x40002004 0x100')[0].removeprefix('0x'))
                 argc = struct.unpack_from('<H', data)[0]
                 actual = [x.decode() for x in data[2:].split(b'\0')[:argc]]
                 assert actual == ['--bright', '50', '--rotate', '2,0', '--dir',
                                   'games/nes', 'infones', 'Test Game.NES'], actual
                 (out / 'launch-args.json').write_text(json.dumps(actual, indent=2))
+            else:
+                assert qt.read(0x40002004) & 0xffff == 0, 'progs launch must clear argv'
             qmp.command('quit')
             process.wait(timeout=10)
         finally:
@@ -173,13 +183,26 @@ def main():
     parser.add_argument('--fpmain', type=Path, default=REPO / 'sdcard/fpbin/fpmain.bin')
     parser.add_argument('--elf', type=Path, default=REPO / 'build/fpdoom/fpmain-b310e/obj3/fpmain_part1.elf')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--pad-loader', type=int, default=0,
+                        help='Add word-aligned padding between loader and menu to test size independence')
     args = parser.parse_args()
+    if args.pad_loader < 0 or args.pad_loader & 3:
+        parser.error('--pad-loader must be a nonnegative multiple of four')
     for field in ['qemu', 'firmware', 'toolchain', 'fpmain', 'elf', 'output']:
         setattr(args, field, getattr(args, field).resolve())
     args.output.mkdir(parents=True, exist_ok=True)
     nm = args.toolchain / 'arm-none-eabi-nm'
     result = subprocess.run([str(nm), str(args.elf)], capture_output=True, text=True, check=True)
-    symbols = {row.split()[-1]: int(row.split()[0], 16) - 0x14000000 + 0x04000200
+    packed = args.fpmain.read_bytes()
+    part2_size = struct.unpack_from('<I', packed, 4)[0]
+    if args.pad_loader:
+        padded = bytearray(packed[:part2_size] + bytes(args.pad_loader) + packed[part2_size:])
+        part2_size += args.pad_loader
+        # The first ARM BL skips the loader and enters the relocated menu.
+        struct.pack_into('<II', padded, 0, 0xeb000000 | ((part2_size - 8) // 4), part2_size)
+        args.fpmain = args.output / 'fpmain-padded.bin'
+        args.fpmain.write_bytes(padded)
+    symbols = {row.split()[-1]: int(row.split()[0], 16) - 0x14000000 + 0x04000000 + part2_size
                for row in result.stdout.splitlines() if len(row.split()) == 3}
     asm = args.output / 'fixture.s'
     asm.write_text('''.syntax unified
@@ -187,6 +210,11 @@ def main():
 .arm
 .global _start
 _start:
+ ldr r0, =0x04020000
+ ldr r1, [r0]
+ ldr r2, =0x13579bdf
+ cmp r1, r2
+ bne 3f
  ldr r0, =0x40000004
  ldr r1, =0x40002004
  mov r2, #256
@@ -198,6 +226,15 @@ _start:
  ldr r1, =0x424f4f54
  str r1, [r0]
 2: b 2b
+3:
+ ldr r0, =0x40002000
+ ldr r1, =0x42414421
+ str r1, [r0]
+ b 2b
+.ltorg
+/* Force reads across many FAT clusters and verify the end reached PSRAM. */
+.org 0x20000
+.word 0x13579bdf
 ''')
     elf, binary = args.output / 'fixture.elf', args.output / 'fixture.bin'
     subprocess.run([str(args.toolchain / 'arm-none-eabi-gcc'), '-nostdlib', '-Wl,-Ttext=0x04000000',
