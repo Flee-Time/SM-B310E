@@ -19,6 +19,13 @@ spec.loader.exec_module(prepare)
 
 
 class QemuBuildTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows Git/MSYS2 path translation')
+    def test_native_and_msys_git_roots_resolve_to_the_same_folder(self):
+        for drive in ('C', 'D'):
+            native = f'{drive}:/Users/test/qemu source'
+            msys = f'/{drive.lower()}/Users/test/qemu source'
+            self.assertEqual(prepare.git_path(native), prepare.git_path(msys))
+
     def repository(self, path):
         path.mkdir()
         subprocess.run(['git', 'init', str(path)], check=True, capture_output=True)

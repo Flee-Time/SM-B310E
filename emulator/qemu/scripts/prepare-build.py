@@ -38,6 +38,13 @@ def git(source, *arguments):
     return result.stdout.strip()
 
 
+def git_path(value):
+    # MSYS2 Git prints /c/... even when invoked by native Windows Python.
+    if os.name == 'nt' and len(value) > 2 and value[0] == '/' and value[1].isalpha() and value[2] == '/':
+        value = value[1] + ':' + value[2:]
+    return Path(value).resolve()
+
+
 def checkout(source):
     if not source.exists() or (source.is_dir() and not any(source.iterdir())):
         source.parent.mkdir(parents=True, exist_ok=True)
@@ -46,7 +53,7 @@ def checkout(source):
     if not (source / '.git').exists():
         raise RuntimeError(f'{source} is not a QEMU Git checkout. Use an empty folder '
                            'or --qemu-source pointing to a clone; files were not reset.')
-    root = Path(git(source, 'rev-parse', '--show-toplevel')).resolve()
+    root = git_path(git(source, 'rev-parse', '--show-toplevel'))
     if root != source:
         raise RuntimeError(f'Git resolved {source} to {root}; refusing to modify it.')
     actual = git(source, 'rev-parse', 'HEAD^{commit}')
