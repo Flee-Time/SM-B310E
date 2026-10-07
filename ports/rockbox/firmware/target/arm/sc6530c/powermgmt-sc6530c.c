@@ -55,24 +55,29 @@
 
 static uint32_t adi_read(uint32_t addr)
 {
+    int old = disable_irq_save();
     uint32_t a = 0, n = ADI_BUDGET;
 
     REG32(ADI_RD_CMD) = addr & 0xfff;
     while ((a = REG32(ADI_RD_DATA)) >> 31)
         if (--n == 0) break;
+    restore_irq(old);
     return a & 0xffffu;
 }
 
 static void adi_write(uint32_t addr, uint32_t val)
 {
+    int old = disable_irq_save();
     uint32_t n = ADI_BUDGET;
 
     while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) return;
+        if (--n == 0) goto done;
     REG32(addr) = val;
     n = ADI_BUDGET;
     while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return;
+        if (--n == 0) goto done;
+done:
+    restore_irq(old);
 }
 
 /* ---- ADC registers (adc_phy_v5.c; base 0x82001680) --------------------- */
@@ -224,5 +229,14 @@ unsigned short percent_to_volt_charge[11] =
 /* Returns battery voltage from the SC6530 ADC [millivolts] */
 int _battery_voltage(void)
 {
-    return (int)battery_read_mv();
+    static int last_battery_mv = -1;
+    /* With USB/DC applied, channel5 measures the powered rail, not the
+     * cell. Keep the last unplugged sample; a plugged boot is unknown
+     * until DC is removed. Never turn that rail reading into 100%. */
+    if (!power_input_status()) {
+        int mv = battery_read_mv();
+        if (mv > 0)
+            last_battery_mv = mv;
+    }
+    return last_battery_mv;
 }

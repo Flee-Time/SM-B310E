@@ -41,9 +41,10 @@
 
 #include "config.h"
 
-/* One master volume in 1 dB steps. The target splits positive headphone
- * settings into analog gain and nonpositive PCM attenuation. */
-#define AUDIOHW_CAPS (MONO_VOL_CAP)
+/* Stereo volume lets sound.c apply balance independently to left/right.
+ * Positive headphone settings share analog gain, with per-channel PCM
+ * attenuation preserving the requested levels. */
+#define AUDIOHW_CAPS 0
 
 AUDIOHW_SETTING(VOLUME, "dB", 0, 1, -100, 24, -30)
 

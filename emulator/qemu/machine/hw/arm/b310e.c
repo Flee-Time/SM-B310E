@@ -41,7 +41,7 @@
  * b310e_init(); this file deliberately creates no device yet (b310e.c maps
  * memory + CPU + boot only).
  *
- * Boot modes (-M b310e,boot-mode=warm|stock|ours, default warm).
+ * Boot modes (-M b310e,boot-mode=warm|stock|ours, default stock).
  * NOTE: the property is named "boot-mode", not "boot" - MachineClass already
  * owns a generic typed "boot" property (BootConfiguration, hw/core/machine.c)
  * and object_class_property_add would abort on the duplicate (asserted on
@@ -266,10 +266,10 @@ struct B310EMachineState {
     MachineState parent_obj;
     /*< public >*/
 
-    /* -M b310e,boot=warm|stock|ours (default "warm") */
+    /* -M b310e,boot-mode=warm|stock|ours (default "stock") */
     char *boot_mode;
 
-    /* -M b310e,hold-end=on (default off): hold the EIC END key from reset */
+    /* Hold END for stock power-on; custom firmware boots without a held key. */
     bool hold_end;
     bool boot_overlays;
     bool gpio49_high;
@@ -372,7 +372,7 @@ static void b310e_reset(void *opaque)
 }
 
 /* ---------------------------------------------------------------------- */
-/* Boot-mode property: -M b310e,boot-mode=warm|stock|ours (default warm). */
+/* Boot-mode property: -M b310e,boot-mode=warm|stock|ours (default stock). */
 /* Named "boot-mode" because "boot" is taken by the generic MachineClass   */
 /* BootConfiguration property (hw/core/machine.c).                         */
 /* ---------------------------------------------------------------------- */
@@ -381,7 +381,7 @@ static char *b310e_get_boot(Object *obj, Error **errp)
 {
     B310EMachineState *s = B310E_MACHINE(obj);
 
-    return g_strdup(s->boot_mode ? s->boot_mode : "warm");
+    return g_strdup(s->boot_mode ? s->boot_mode : "stock");
 }
 
 static void b310e_set_boot(Object *obj, const char *value, Error **errp)
@@ -453,7 +453,7 @@ static void b310e_init(MachineState *machine)
     }
 
     if (!s->boot_mode) {
-        s->boot_mode = g_strdup("warm");
+        s->boot_mode = g_strdup("stock");
     }
 
     /* CPU: ARM926EJ-S (mc->default_cpu_type), created like musicpal. */
@@ -684,9 +684,11 @@ static void b310e_init(MachineState *machine)
         sysbus_mmio_map_overlap(aux_sbd, 28, 0x8a001000,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(aux_sbd, &error_fatal);
-        /* The stock LCD_EnterSleep (0x15520) waits on input GPIO49.
-         * Its electrical role is not established yet. Expose an explicit
-         * board-level experiment; do not patch the firmware's wait flag. */
+        /* LCD_EnterSleep at NOR 0x15624/0x156f8 polls GPIO49. Leaving the
+         * external level floating low blocks the LCD task and its mutex;
+         * keypad IRQ8 continues but cannot complete the wake operation.
+         * Model the observed ready level. gpio49-high=off remains available
+         * for investigation: the wire's electrical source is still unknown. */
         qemu_set_irq(qdev_get_gpio_in_named(aux_dev, "gpio-input", 49),
                      s->gpio49_high);
     }
@@ -781,6 +783,7 @@ static void b310e_init(MachineState *machine)
     }
 
     adi_dev = qdev_new(TYPE_SC6530_ADI);
+    qdev_set_id(adi_dev, g_strdup("sc6530-adi"), &error_fatal);
     object_property_set_link(OBJECT(adi_dev), "dma", OBJECT(dma_dev), &error_fatal);
     {
         SysBusDevice *adi_sbd = SYS_BUS_DEVICE(adi_dev);
@@ -816,7 +819,9 @@ static void b310e_init(MachineState *machine)
         object_property_set_link(OBJECT(keypad_dev), "adi",
                                  OBJECT(adi_dev), &error_fatal);
         object_property_set_bool(OBJECT(keypad_dev), "hold-end",
-                                 s->hold_end, &error_fatal);
+                                  s->hold_end && (strcmp(s->boot_mode, "stock") == 0 ||
+                                                  strcmp(s->boot_mode, "warm") == 0),
+                                  &error_fatal);
         sysbus_mmio_map_overlap(keypad_sbd, 0, B310E_KEYPAD_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(keypad_sbd, &error_fatal);
@@ -971,14 +976,17 @@ static void b310e_machine_init(MachineClass *mc)
     mc->default_ram_size = B310E_PSRAM_SIZE;
     mc->default_ram_id = "b310e.psram";
 
-    object_class_property_add_str(OBJECT_CLASS(mc), "boot-mode",
-                                  b310e_get_boot, b310e_set_boot);
-    object_class_property_add_bool(OBJECT_CLASS(mc), "hold-end",
-                                   b310e_get_hold_end, b310e_set_hold_end);
+    object_property_set_default_str(
+        object_class_property_add_str(OBJECT_CLASS(mc), "boot-mode",
+                                      b310e_get_boot, b310e_set_boot), "stock");
+    object_property_set_default_bool(
+        object_class_property_add_bool(OBJECT_CLASS(mc), "hold-end",
+                                       b310e_get_hold_end, b310e_set_hold_end), true);
     object_class_property_add_bool(OBJECT_CLASS(mc), "boot-overlays",
                                    b310e_get_boot_overlays, b310e_set_boot_overlays);
-    object_class_property_add_bool(OBJECT_CLASS(mc), "gpio49-high",
-                                   b310e_get_gpio49_high, b310e_set_gpio49_high);
+    object_property_set_default_bool(
+        object_class_property_add_bool(OBJECT_CLASS(mc), "gpio49-high",
+                                       b310e_get_gpio49_high, b310e_set_gpio49_high), true);
 }
 
 DEFINE_MACHINE_EXTENDED("b310e", MACHINE, B310EMachineState,

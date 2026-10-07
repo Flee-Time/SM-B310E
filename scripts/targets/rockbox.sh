@@ -129,6 +129,18 @@ patch_file "$CLONE_DIR/firmware/common/disk_cache.c" '/* B310E cache byte index 
 patch_file "$CLONE_DIR/firmware/export/audiohw.h" "HAVE_SC6530_CODEC" \
   's/(#include "dummy_codec.h"\n)/$1#elif defined(HAVE_SC6530_CODEC)\n#include "audiohw-sc6530c.h"\n/'
 
+# USB/DC makes the B310E ADC measure the supply rail instead of the cell.
+# The target returns -1 on a powered boot until an unplugged sample exists.
+# Keep that unknown state out of the voltage filter and low-battery logic.
+patch_file "$CLONE_DIR/firmware/powermgmt.c" '/* B310E unknown voltage init */' \
+  's/    voltage_now = _battery_voltage\(\) \+ 15;/    int millivolts = _battery_voltage();\n#ifdef B310E\n    voltage_now = millivolts < 0 ? -1 : millivolts + 15; \/* B310E unknown voltage init *\/\n#else\n    voltage_now = millivolts + 15;\n#endif/'
+patch_file "$CLONE_DIR/firmware/powermgmt.c" '/* B310E unknown voltage sample */' \
+  's/(static void average_step\(bool low_battery\).*?int millivolts = _battery_voltage\(\);)/$1\n#ifdef B310E\n    \/* B310E unknown voltage sample *\/\n    if (millivolts < 0)\n        return;\n    if (voltage_now < 0) {\n        voltage_now = millivolts;\n        voltage_avg = millivolts * BATT_AVE_SAMPLES;\n        return;\n    }\n#endif/s'
+patch_file "$CLONE_DIR/firmware/powermgmt.c" '/* B310E externally powered writes */' \
+  's/(bool battery_level_safe\(void\)\n\{)/$1\n#ifdef B310E\n    \/* B310E externally powered writes *\/\n    if (power_input_present())\n        return true;\n#endif/'
+patch_file "$CLONE_DIR/firmware/powermgmt.c" '/* B310E unknown voltage shutdown */' \
+  's/(bool query_force_shutdown\(void\)\n\{)/$1\n#ifdef B310E\n    if (voltage_now < 0)\n        return false; \/* B310E unknown voltage shutdown *\/\n#endif/'
+
 # B310E defaults to Auto output; other speaker targets retain their default.
 patch_file "$CLONE_DIR/apps/settings_list.c" 'DEFAULT_SPEAKER_MODE, "speaker mode"' \
   's/    CHOICE_SETTING\(0, speaker_mode, LANG_ENABLE_SPEAKER, 0, "speaker mode",/#ifndef DEFAULT_SPEAKER_MODE\n#define DEFAULT_SPEAKER_MODE 0\n#endif\n    CHOICE_SETTING(0, speaker_mode, LANG_ENABLE_SPEAKER, DEFAULT_SPEAKER_MODE, "speaker mode",/'

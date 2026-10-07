@@ -5,10 +5,11 @@ CPU-filled ping-pong banks and DMA-fed stereo playback both work. The stock
 firmware gets through flash initialization, compressed code paging and DSP
 download, starts its ThreadX tasks, and reaches the stock "Time and date"
 setup prompt in a 90-second capture.
-With the explicit `gpio49-high=on` board experiment, the unmodified stock OS
-also reaches the home screen, settings and default ringtone picker. Input49
-is polled by its LCD sleep/wake wrapper; the electrical purpose of that
-signal is still unconfirmed, so the option defaults off. Built-in stock
+The default board now uses the full stock reset path, holds END during
+power-on, and supplies GPIO49 high. The unmodified stock OS reaches the
+home screen, settings and default ringtone picker. Input49 is polled by
+its LCD sleep/wake wrapper; its electrical purpose is still unconfirmed.
+`gpio49-high=off` is available for investigating that input. Built-in stock
 ringtone playback now produces stereo WAV output through the real firmware's
 MIDI renderer, PCM conversion and DMA queues. The first successful capture
 contains 341018 frames at 44.1 kHz (about 7.7 seconds), 661461 nonzero samples,
@@ -25,6 +26,37 @@ The time/date prompt appeared at about 19 seconds in the updated capture.
 A 150-second navigation/idle run remained responsive, including entering
 digits in Contacts and waking the locked keypad after an idle interval.
 This does not establish that every stock freeze is resolved.
+
+The default `-M b310e` formerly selected the incomplete warm path. Full
+reset now initializes the kernel without boot overlays. Stock LCD sleep
+waits at NOR `0x15624/0x156f8` for raw GPIO49 via `0x1ad8e`; holding the
+input low prevented the LCD task from completing wake despite keypad IRQ8.
+Three repeated default-boot sleep/unlock/menu cycles now pass.
+
+Missing menu icons were RGB888/ARGB OSD layers (format3), which the RGB565-
+only compositor discarded. Format3 now supports its four DMA word orders,
+inline/block/multiplied alpha, color key and source pitch. RGB565 OSD1's
+separate alpha plane also observes its own word order. All nine icons are
+visible in the stock captures, with synthetic pixel regressions for each
+mode. Rotation and other image formats remain incomplete.
+
+Timer2 and system-timer writes previously logged unconditionally. A default
+boot emitted 46,789 such lines in five seconds, including every short flash
+delay; terminal output can greatly lengthen the splash. They now use opt-in
+`sc6530_timer_write` and `sc6530_systimer_write` trace events. The local dump
+leaves the model-number image in about one second. This timing is specific
+to this dump and host; it does not establish identical timing for another
+stock backup or every later startup phase.
+
+After rebuilding, the user's launcher can keep `-M b310e` and its existing
+NOR drive. Add `readonly=on` to protect a research backup from stock writes;
+use a separate writable copy when persistence is wanted. A new repository
+build puts QEMU under `build/qemu/build/`; an existing checkout supplied
+with `--qemu-source` retains that checkout's `build/` location.
+
+`scripts/test-stock-ui.py` checks the local e52q7a dump's startup images,
+all nine menu cells and three sleep/key wake cycles using normal keypad
+events. It writes captures and results into the selected output directory.
 
 ## Inputs and provenance
 

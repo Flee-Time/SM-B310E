@@ -216,8 +216,8 @@ def main():
                 s = state()
                 return not (s["lcdc"] & 1 or s["backlight"] & 0x40) and s["lcm_mode"] == 1
 
-            def wait_for(condition, name):
-                deadline = time.monotonic() + 8
+            def wait_for(condition, name, timeout=8):
+                deadline = time.monotonic() + timeout
                 while not condition():
                     if time.monotonic() > deadline:
                         snapshot("failure-" + name)
@@ -279,7 +279,9 @@ def main():
             wait_for(awake, "playback wake")
             snapshot("playing-wake")
             key("ret")  # Center: pause/resume
-            wait_for(lambda: not state()["vbc"] & 0xe000, "pause")
+            # Rockbox's mixer drains three seconds of silent PCM after fade
+            # out. Host-clock bank underruns can stretch that drain on Windows.
+            wait_for(lambda: not state()["vbc"] & 0xe000, "pause", timeout=20)
             idle("paused-screen-off", False)
             key("ret")
             wait_for(lambda: state()["vbc"] & 0xe000, "resume")
@@ -356,7 +358,7 @@ def main():
             if args.shutdown:
                 qmp.hmp("trace-event sc6530_ana_write on")
                 key("ret")
-                wait_for(lambda: not state()["vbc"] & 0xe000, "pause before shutdown")
+                wait_for(lambda: not state()["vbc"] & 0xe000, "pause before shutdown", timeout=20)
                 snapshot("paused-before-shutdown")
                 if args.shutdown == "manual":
                     time.sleep(15)  # include the delayed resume/settings flush

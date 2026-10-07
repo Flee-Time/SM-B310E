@@ -156,7 +156,7 @@ int main(void)
     pcm_set_frequency(TEST_RATE);
     /* Exercise sound.c's codec hook; calling the scaler directly hid a
      * silent full-player integration bug in the original driver. */
-    audiohw_set_volume(TEST_VOLUME);
+    audiohw_set_volume(TEST_VOLUME, TEST_VOLUME);
     test_volume = TEST_VOLUME < -1000 ? -1000 : TEST_VOLUME > 240 ? 240 : TEST_VOLUME;
     if (!output_matches(!TEST_HEADSET))
         finish(false);
