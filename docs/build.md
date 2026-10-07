@@ -8,7 +8,8 @@ Run every supported build from the repository root with `build.ps1` on Windows,
 
 Python 3.10+, Git, an `arm-none-eabi` GCC toolchain, and host GCC are needed
 for firmware. The native firmware build does not require Bash or Make.
-Arm GNU Toolchain 14.2.Rel1 is the currently tested compiler.
+Arm GNU Toolchain 14.2.Rel1 and 15.3.Rel1 have been tested. The clean Windows
+setup was validated with MSYS2 host GCC 16.2.0 and ARM GCC 15.3.1.
 
 Menu/game/Rockbox builds also need Bash, Make and the standard POSIX tools
 (`sed`, `perl`, `curl`, `tar`). Games need 7-Zip for the pinned
@@ -136,6 +137,13 @@ external `--qemu-source` trees are retained. Rockbox packaging updates runtime
 files without deleting your saved configuration, playlists or music. Menu
 builds stage the tracked default `ports/fpmain/config.json`, so retain any
 custom menu configuration separately before rebuilding the menu.
+
+The five upstream prebuilt games now use the checksum-pinned `prebuilt_fix15.7z`
+from fpdoom release `1.20251101`; upstream removed the previous fix14 asset.
+Existing prebuilt game outputs are retained. Fresh builds download and verify
+fix15 before source compilation. The five updated prebuilts still need phone
+testing; successfully compiling/downloading them does not establish hardware
+compatibility.
 
 `sd-image` needs the staged menu and Rockbox files. Existing images are protected;
 pass `--force` only when you want to replace the generated image. The image
