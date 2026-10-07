@@ -54,7 +54,7 @@ use a separate writable copy when persistence is wanted. A new repository
 build puts QEMU under `build/qemu/build/`; an existing checkout supplied
 with `--qemu-source` retains that checkout's `build/` location.
 
-`scripts/test-stock-ui.py` checks the local e52q7a dump's startup images,
+`emulator/qemu/scripts/test-stock-ui.py` checks the local e52q7a dump's startup images,
 all nine menu cells and three sleep/key wake cycles using normal keypad
 events. It writes captures and results into the selected output directory.
 
@@ -84,19 +84,15 @@ envelope and interpolation conventions were cross-checked against the public
 and its interpolation engine. The Q15 calculations and metadata are useful
 evidence for behavior, but are not measurements of the accelerator's rounding.
 
-## Windows headless build
+## Windows desktop build
 
 QEMU is pinned to v11.1.0, commit
 `84f07211cc5b4fc6a371559bf8a5de4fb068e648`. The local source/build is
 `D:\floppy\.tools\qemu-b310e-src`; the executable is
 `build\qemu-system-arm.exe`. MSYS2 MINGW64 supplies the runtime DLLs.
 
-With MSYS2 installed at `C:\msys64`, install these build dependencies from
-its MINGW64 shell if they are missing:
-
-```sh
-pacman -S --needed base-devel git mingw-w64-x86_64-gcc mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman mingw-w64-x86_64-pkgconf mingw-w64-x86_64-ninja mingw-w64-x86_64-python mingw-w64-x86_64-python-setuptools mingw-w64-x86_64-python-wheel mingw-w64-x86_64-dtc mingw-w64-x86_64-libpng
-```
+With MSYS2 installed at `C:\msys64`, install the MINGW64 desktop dependencies
+listed in [build.md](build.md), including GTK3, SDL2 and libepoxy.
 
 From the repository in PowerShell:
 
@@ -104,12 +100,14 @@ From the repository in PowerShell:
 & ./build.ps1 qemu --qemu-source D:/floppy/.tools/qemu-b310e-src
 ```
 
-This clones QEMU if the destination is absent, verifies the pin, installs the
-machine and builds ARM with PNG and no GUI dependency. Configure uses the
-bundled Python wheels with downloads disabled. It does not reset an
-existing checkout. The optional install-bundle helper skips Windows symlink
-permission failures; this build is for running locally, not `make install`.
-For an already configured tree, `-SkipConfigure` rebuilds only changed files.
+This clones QEMU if the destination is absent or empty, verifies the pin,
+installs the machine and builds ARM with GTK, SDL, OpenGL, PNG and audio.
+Fresh checkouts download QEMU's pinned build dependencies. Existing checkouts
+are never reset. Windows symlink permission failures copy required resources
+instead of discarding them. `build/qemu-desktop.zip` includes runtime DLLs,
+GTK resources and a stock launcher for users without MSYS2 installed.
+Use `--qemu-headless` to omit desktop dependencies for automated testing.
+Unchanged configure options reuse the configured build; Ninja rebuilds changed files.
 Logs are `b310e-configure.log` and `b310e-build.log` inside the QEMU checkout.
 
 ## Reproduce the checks

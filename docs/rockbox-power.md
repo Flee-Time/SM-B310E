@@ -109,8 +109,10 @@ The mapping is independently reconstructed from the unmodified e52q7a dump:
 
 This is `CHARGING_MONITOR`: it does not set charger current, voltage or
 drive GPIO6. Regulation remains with the charger IC and inherited firmware
-setup. Indicator behavior and charge-pin levels need confirmation on the
-phone; QEMU validates the driver and Rockbox policy against external inputs.
+setup. On 2026-10-07 the user confirmed that charge detection works on the
+phone. Charge-complete indication and the GPIO8/9 electrical levels still
+need hardware confirmation; QEMU validates the driver and Rockbox policy
+against external inputs.
 
 With USB/DC connected, the phone's channel5 ADC measures the powered rail.
 The target now retains its last valid unplugged battery sample while powered.

@@ -36,17 +36,29 @@ def msys_path(path):
     return value
 
 
+def msys_root(value):
+    if value:
+        return Path(value).expanduser().resolve()
+    for candidate in (Path('D:/Toolchains/msys64'), Path('C:/msys64')):
+        if (candidate / 'usr/bin/bash.exe').is_file():
+            return candidate.resolve()
+    return Path('D:/Toolchains/msys64')
+
+
 class Builder:
     def __init__(self, args):
         self.args = args
         self.env = os.environ.copy()
-        self.msys = Path(args.msys).resolve() if os.name == 'nt' else None
+        self.msys = msys_root(args.msys) if os.name == 'nt' else None
         self.arm = compiler_dir(args.toolchain, 'arm-none-eabi-gcc', (
-            ROOT.parent / '.tools/arm-toolchain/bin', Path('C:/arm-gcc/bin'),
+            Path('D:/Toolchains/arm-none-eabi/bin'), ROOT.parent / '.tools/arm-toolchain/bin', Path('C:/arm-gcc/bin'),
             Path('C:/Program Files (x86)/Arm GNU Toolchain arm-none-eabi/14.2 rel1/bin'),
         ))
-        self.host = compiler_dir(args.host_cc, 'gcc',
-                                 [self.msys / 'mingw64/bin'] if self.msys else [])
+        host_hint = args.host_cc
+        if not host_hint and self.msys and (self.msys / 'mingw64/bin/gcc.exe').is_file():
+            # A WinLibs/UCRT compiler on Windows PATH must not override MINGW64.
+            host_hint = self.msys / 'mingw64/bin'
+        self.host = compiler_dir(host_hint, 'gcc')
         paths = [str(p) for p in (self.arm, self.host) if p]
         if os.name == 'nt':
             paths += [str(self.msys / 'usr/bin'), 'C:/Program Files/7-Zip']
@@ -122,9 +134,11 @@ class Builder:
             if os.name == 'nt':
                 self.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                           ROOT / 'scripts/targets/qemu.ps1', '-QemuSrc', self.qemu_source,
-                          '-Msys64', self.msys, '-Jobs', str(self.args.jobs)], 'qemu')
+                          '-Msys64', self.msys, '-Jobs', str(self.args.jobs),
+                          '-DisplayMode', 'headless' if self.args.qemu_headless else 'desktop'], 'qemu')
             else:
-                self.shell('scripts/targets/qemu.sh', 'qemu', str(self.qemu_source), str(self.args.jobs))
+                self.shell('scripts/targets/qemu.sh', 'qemu', str(self.qemu_source), str(self.args.jobs),
+                           'headless' if self.args.qemu_headless else 'desktop')
         elif name == 'sdcard':
             for target in ('os-sd', 'fpmain', 'games', 'rockbox'):
                 self.target(target)
@@ -148,7 +162,7 @@ class Builder:
             build_root = ROOT / 'build'
             if build_root.is_symlink() or build_root.resolve() != ROOT.resolve() / 'build':
                 raise RuntimeError(f'Refusing to clean redirected build root: {build_root}')
-            folders = ['bin', 'firmware', 'host', 'fpmain', 'games', 'logs']
+            folders = ['bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
             if self.args.downloads:
                 folders += ['fpdoom', 'rockbox', 'qemu']
             for folder in folders:
@@ -160,6 +174,13 @@ class Builder:
                 print(f'Remove {path}')
                 if not self.args.dry_run:
                     shutil.rmtree(path)
+            archive = build_root / 'qemu-desktop.zip'
+            if archive.exists():
+                if archive.is_symlink() or archive.resolve() != build_root.resolve() / archive.name:
+                    raise RuntimeError(f'Refusing to clean redirected archive: {archive}')
+                print(f'Remove {archive}')
+                if not self.args.dry_run:
+                    archive.unlink()
         elif name == 'doctor':
             print(f'Repository: {ROOT}\nPython: {sys.executable}\nARM GCC: {self.arm or "missing"}\nHost GCC: {self.host or "missing"}\nQEMU source: {self.qemu_source}')
             for tool in ('git', 'make', 'bash', '7z'):
@@ -185,8 +206,10 @@ def main():
     parser.add_argument('--jobs', type=int, default=min(os.cpu_count() or 1, 8))
     parser.add_argument('--toolchain', default=os.environ.get('B310E_TOOLCHAIN'))
     parser.add_argument('--host-cc', default=os.environ.get('B310E_HOST_CC'))
-    parser.add_argument('--msys', default=os.environ.get('B310E_MSYS', 'C:/msys64'))
+    parser.add_argument('--msys', default=os.environ.get('B310E_MSYS'),
+                        help='MSYS2 root; auto-detect D:/Toolchains/msys64 then C:/msys64')
     parser.add_argument('--qemu-source', default=os.environ.get('B310E_QEMU_SOURCE'))
+    parser.add_argument('--qemu-headless', action='store_true', help='omit GTK/SDL/OpenGL and the Windows desktop package')
     parser.add_argument('--dsp-blob', help='optional hash-verified DSP bundle for dsp-diag')
     parser.add_argument('--dry-run', action='store_true', help='show the plan without changing files')
     parser.add_argument('--downloads', action='store_true', help='also remove in-repo upstream clones with clean')

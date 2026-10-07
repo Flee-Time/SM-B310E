@@ -25,6 +25,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     port = API["free_port"]()
     command = [str(args.qemu), "-M", "b310e", "-display", "none", "-serial", "none",
+               "-audiodev", "none,id=audio0,in.voices=0", "-global", "sc6530_adi.audiodev=audio0",
                "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off", "-drive",
                f"if=none,id=nor,file={args.firmware.as_posix()},format=raw,readonly=on"]
     (args.output / "command.json").write_text(json.dumps(command, indent=2))
