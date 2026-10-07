@@ -56,7 +56,9 @@ def checkout(source):
     root = git_path(git(source, 'rev-parse', '--show-toplevel'))
     if root != source:
         raise RuntimeError(f'Git resolved {source} to {root}; refusing to modify it.')
-    actual = git(source, 'rev-parse', 'HEAD^{commit}')
+    # HEAD is already the checked-out commit. MSYS2's argument globbing can
+    # strip braces from HEAD^{commit} when called from native Python.
+    actual = git(source, 'rev-parse', '--verify', 'HEAD')
     if actual != COMMIT:
         raise RuntimeError(f'QEMU {TAG} requires commit {COMMIT}; found {actual} in '
                            f'{source}. Existing files were not reset.')
