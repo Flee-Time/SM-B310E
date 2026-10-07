@@ -56,9 +56,8 @@
                                        (os.bin/games, linked at 0x14000000)
                                        self-relocates to 0x04000000 via its
                                        .rel table (diff = -0x10000000). */
-#define PART2_SIZE      0x200u      /* the fpmain part2 (start3+readbin+
-                                       asmcode+common) — verified from the
-                                       part2 header at runtime below      */
+#define READBIN_MAX_SIZE 0x4000u   /* IRAM 0x40004000..0x40007fff;
+                                       leave room below the stack at 0x9000 */
 
 /* palette (menu.bin identical) */
 #define COL_BG    0x0000u           /* black                              */
@@ -579,14 +578,18 @@ static void launch_bin(uint32_t clust, uint32_t size, const char *name)
     uint8_t *ram = (uint8_t *)APP_LOAD;
     uint8_t *readbin;
 
-    /* part2 sits right below our (part1) runtime base: the sdboot loads
-     * the whole fpmain.bin contiguously, part2 first. Its header holds
-     * its own size (verified 0x200) — sanity-check it so a layout change
-     * fails loudly instead of executing garbage. */
-    part2 = (uint8_t *)((uintptr_t)__image_start - PART2_SIZE);
+    /* sdboot places the packed image at APP_LOAD, with part2 first and
+     * part1 immediately after it. Read the size from that fixed image
+     * header: different compilers produce different part2 lengths.
+     * Subtracting a guessed length from __image_start can read below RAM. */
+    part2 = (uint8_t *)APP_LOAD;
     p2size = *(uint32_t *)(part2 + 4);
-    if (p2size != PART2_SIZE || p2size <= 8)
-        for (;;) ;                  /* layout mismatch — park */
+    if (p2size <= 8 || p2size > READBIN_MAX_SIZE || (p2size & 3u) ||
+        (uintptr_t)__image_start != APP_LOAD + p2size) {
+        menu_status("LOADER ERROR", "Rebuild fpmain.bin", COL_ERR);
+        sys_wait_ms(1500);
+        return;
+    }
     readbin = part2 + 8;            /* the readbin loader (start3 header +8) */
     menu_status("STARTING...", name, COL_OK);
     memcpy(dst, readbin, p2size - 8);
