@@ -26,7 +26,7 @@ In the on-screen keyboard, Center chooses a character, Right soft deletes,
 DIAL accepts the text and END cancels. Center also accepts the color
 chooser, matching the other settings screens.
 
-The full-player test `tools/rockbox-port/tests/test-idle-power.py --controls`
+The full-player test `ports/rockbox/tests/test-idle-power.py --controls`
 checks playback pause/resume, actual volume changes, track paths, forward
 and backward seeking, and leaving the playing screen through Menu/Back.
 It uses normal emulated keypad input and reads player state without

@@ -26,7 +26,7 @@ if [[ ! -f "$spd/nor_fdl1.bin" ]]; then
     exit 1
 fi
 if [[ ! -f "$osbin" ]]; then
-    echo "ERROR: $osbin not found - run 'make' first (see BUILD.md)" >&2
+    echo "ERROR: $osbin not found - run 'make' first (see build.md)" >&2
     exit 1
 fi
 osbin=$(cd "$(dirname "$osbin")" && pwd)/$(basename "$osbin")

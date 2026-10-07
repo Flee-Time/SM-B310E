@@ -236,7 +236,7 @@ enable bits of §5.
 ## 7. Emulator capture — QEMU Wave-6 bring-up (P1-P7) + keepalive
 
 The stock OS (NOR `FUN_00034ed4`) brings up the audio subsystem in seven phases
-before any codec register write. Captured from `tools/qemu-b310e/logs/w6/
+before any codec register write. Captured from `emulator/qemu/logs/w6/
 stock-sound.csv` (231 rows; boot-mode=warm, NOR = `tools/spd_dump/
 full-backup.bin`); compared against `drivers/audio.c`.
 
@@ -335,7 +335,7 @@ ownership (D5), and sound-data path (D8).
 
 ## 11. The emulator capture status — the chime was NEVER captured
 
-The QEMU machine (`tools/qemu-b310e/`, `./stock/` images) has **no audio output
+The QEMU machine (`emulator/qemu/`, `./stock/` images) has **no audio output
 model** — the VBC/ANA devices are log+store observatories. The emulated stock
 OS has never played a chime: `0x820030xx` has **0 hits** and the codec-DAC
 registers appear only as a `0x82001320` status read. The warm-path stock OS
@@ -436,7 +436,7 @@ read-spy.ps1}`.
 
 - **Protocol + cross-map + NV:** `docs/audio-dsp-protocol.md` (DSP-interface
   §4c/§5/§7, Codec-driver §2/§6, Cross-map rows 1-12 + R1-R5, NV §1/§4).
-- **Captured sequence:** `tools/qemu-b310e/logs/w6/stock-sound.csv` (231 rows;
+- **Captured sequence:** `emulator/qemu/logs/w6/stock-sound.csv` (231 rows;
   P1-P7) + `stock-sound-driver-cycle.csv` (46 rows; the DSP keepalive).
 - **Our chain:** `drivers/audio.c` (`audio_power_on` 103-132, `aud_dac_path_on`
   158-190, `audio_dac_on` 226-265, `audio_dp_dac_on` 197-219, `audio_pa_enable`

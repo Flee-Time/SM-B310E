@@ -31,9 +31,9 @@ tools/pack_reloc/pack_reloc
 # pack_reloc host tool - Windows binary
 tools/pack_reloc/pack_reloc.exe
 # ported menu + game outputs
-tools/fpmain/*.bin
-tools/fpmain/games-out/
-tools/fpmain/.games-stamp
+ports/fpmain/*.bin
+ports/fpmain/games-out/
+ports/fpmain/.games-stamp
 # libc_server test-loop runtime dir (doom1.wad, locally provisioned)
 tools/libc_server/workdir/
 
@@ -45,11 +45,11 @@ tools/spd_dump/unpac
 tools/libc_server/libc_server
 
 # -- Auto-cloned reference trees + logs ------------------------------
-tools/rockbox-port/build.log*
+ports/rockbox/build.log*
 # QEMU clone (UNC breaks meson - lives outside the repo)
-tools/qemu-b310e/qemu-src/
+emulator/qemu/qemu-src/
 # emulator evidence logs
-tools/qemu-b310e/logs/
+emulator/qemu/logs/
 
 # -- SDK / reference caches (NEVER commit) ---------------------------
 # leaked MOCOR vendor SDK (~1 GB, DMCA risk)
@@ -68,9 +68,9 @@ __pycache__/
 
 # -- AI-session knowledge files (kept on disk for local sessions) ----
 AGENTS.md
-arch/AGENTS.md
-kernel/AGENTS.md
-drivers/AGENTS.md
+firmware/arch/AGENTS.md
+firmware/kernel/AGENTS.md
+firmware/drivers/AGENTS.md
 handoff.md
 
 # -- Local tooling / machine-specific config -------------------------
@@ -89,3 +89,6 @@ Thumbs.db
 Desktop.ini
 # literal file from make $(shell) `2>NUL` under a sh shell
 NUL
+
+# Build logs and local emulator captures
+logs/

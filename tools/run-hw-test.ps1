@@ -23,7 +23,7 @@ if (-not (Test-Path (Join-Path $spd "spd_dump.exe"))) {
     exit 1
 }
 if (-not (Test-Path $osbin)) {
-    Write-Host "ERROR: $osbin not found - run 'make' first (see BUILD.md)" -ForegroundColor Red
+    Write-Host "ERROR: $osbin not found - run 'make' first (see build.md)" -ForegroundColor Red
     exit 1
 }
 
