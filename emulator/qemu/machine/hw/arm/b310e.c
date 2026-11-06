@@ -242,6 +242,8 @@
 #define TYPE_SC6530_DSP          "sc6530_dsp"
 #define TYPE_SC6530_USB          "sc6530_usb"
 #define TYPE_SC6530_I2C          "sc6530_i2c"
+#define TYPE_SC6530_SIM          "sc6530_sim"
+#define B310E_SIM_BASE            0x85000000ULL
 #define B310E_I2C1_BASE           0x86001000ULL
 #define TYPE_SC6530_SDIO         "sc6530_sdio"
 #define TYPE_SC6530_UART         "sc6530_uart"
@@ -942,6 +944,18 @@ static void b310e_init(MachineState *machine)
         sysbus_mmio_map_overlap(i2c_sbd, 0, B310E_I2C1_BASE,
                                 B310E_REGION_PRIORITY);
         sysbus_realize_and_unref(i2c_sbd, &error_fatal);
+    }
+
+    /* SC6530 SIM controller @ 0x85000000 with a test GSM card, inserted
+     * with -global sc6530_sim.sim-slots=<mask> (none by default). Polled;
+     * no IRQ 10. */
+    {
+        DeviceState *sim_dev = qdev_new(TYPE_SC6530_SIM);
+        SysBusDevice *sim_sbd = SYS_BUS_DEVICE(sim_dev);
+
+        sysbus_mmio_map_overlap(sim_sbd, 0, B310E_SIM_BASE,
+                                B310E_REGION_PRIORITY);
+        sysbus_realize_and_unref(sim_sbd, &error_fatal);
     }
 
     /* SC6530 UART1 (debug console) @ 0x84000000: stock firmware boot diagnostics */

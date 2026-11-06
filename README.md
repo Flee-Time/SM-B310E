@@ -42,6 +42,10 @@ download mode with `spd_dump`, and can also boot from an SD card.
 - **FM radio in Rockbox** (verified on hardware): the RTC6211N tuner on
   I2C controller 1 with an analog line-in route; the headset cable is the
   antenna. See [docs/rockbox-fmradio.md](docs/rockbox-fmradio.md).
+- **SIM card reader in Rockbox** (verified on hardware): reads a card's ATR,
+  ICCID and IMSI directly, without the modem. See [docs/sim.md](docs/sim.md).
+  For calls and SMS, [docs/gsm-plan.md](docs/gsm-plan.md) surveys the stock
+  GSM stack and lays out a plan.
 - **Torch in Rockbox** (verified on hardware): hold 0 to toggle the torch
   LED on GPIO 7. See
   [docs/rockbox-controls.md](docs/rockbox-controls.md#torch).

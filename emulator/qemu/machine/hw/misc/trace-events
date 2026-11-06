@@ -58,6 +58,8 @@ sc6530_dma_transfer(unsigned channel, size_t bytes, uint32_t remaining) "DMA ch=
 sc6530_dma_write(uint64_t addr, uint64_t value, uint32_t pc) "DMA write addr=0x%" PRIx64 " val=0x%" PRIx64 " pc=0x%08" PRIx32
 sc6530_vbc_bank(unsigned bank, unsigned frames, unsigned queued) "VBC bank=%u frames=%u queued=%u"
 sc6530_vbc_rate(unsigned mode, unsigned rate) "VBC FS mode=%u rate=%u"
+sc6530_sim_reset(unsigned slot, bool card) "SIM cold reset slot=%u card=%d"
+sc6530_sim_apdu(unsigned cla, unsigned ins, unsigned p3, unsigned file) "SIM APDU cla=0x%02x ins=0x%02x p3=%u file=0x%04x"
 sc6530_i2c_cmd(unsigned cmd, unsigned data, bool nack) "I2C1 cmd=0x%04x data=0x%02x nack=%d"
 sc6530_fm_reg(unsigned reg, unsigned value) "RTC6211 reg%02x=0x%04x"
 sc6530_fm_tune(unsigned freq_10khz, unsigned rssi, bool failed) "RTC6211 tuned %u x10kHz rssi=%u failed=%d"

@@ -183,6 +183,7 @@ target/arm/sc6530c/i2c-sc6530c.c
 target/arm/sc6530c/pcm-sc6530c.c
 target/arm/sc6530c/audiohw-sc6530c.c
 target/arm/sc6530c/audio-sc6530c.c
+target/arm/sc6530c/sim-sc6530c.c
 #if CONFIG_TUNER
 target/arm/sc6530c/fmradio-i2c-sc6530c.c
 target/arm/sc6530c/rtc6211.c
