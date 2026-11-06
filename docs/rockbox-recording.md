@@ -328,13 +328,24 @@ phone it read `retries=0 failures=0` after a stall: the card was slow,
 not failing. It also gives the write throughput since boot (`wr_kbps`,
 time spent inside write requests) and the slowest request (`wr_max_ms`).
 
-**Still open: 48 kHz WAV.** With WAV at 48 kHz the phone still shows
-warning `00000001`; MP3 does not. In `pcm_record.c` a full encoder buffer
-makes the encoder wait without a warning of its own, and the PCM buffer
-behind it then overflows. So the warning means **the card writes can't
-keep up** with 192 KB/s, not that a thread starved. The driver writes one
-512-byte block per command (CMD24); a USB copy through the same path
-peaked at about 347 KB/s. Multi-block writes (CMD25) are the likely fix.
+**48 kHz WAV.** With WAV at 48 kHz the phone showed warning
+`00000001`; MP3 did not. In `pcm_record.c` a full encoder buffer makes
+the encoder wait without a warning of its own, and the PCM buffer behind
+it then overflows. So the warning meant **the card writes could not keep
+up** with 192 KB/s. The driver wrote one 512-byte block per command
+(CMD24): about 460–500 KB/s on the phone's card, with stalls up to 1.5 s.
+
+**Multi-block transfers.** Requests now go out in chunks of up to 32
+blocks (16 KB) as one command: CMD25 (write) or CMD18 (read), then CMD12,
+then CMD13 polling (yielding) until the card has programmed them. A card
+writes a run of blocks much faster than the same blocks one command each.
+The IRAM bounce buffer at `0x4000b000` grew from 512 bytes to 16 KB;
+nothing else in Rockbox uses IRAM (the boot stub at `0x40004000` is gone
+once Rockbox runs). The keypad scan stays paused for a whole multi-block
+DMA (only a single block's data phase is known to be over when the wait
+starts) and runs again during the CMD13 wait. A failed chunk is stopped,
+waited out and rewritten whole, up to 4 tries. The recording tests check
+that the WAV goes out as CMD25 (`cmd25` in each result).
 
 ## Debug tools
 

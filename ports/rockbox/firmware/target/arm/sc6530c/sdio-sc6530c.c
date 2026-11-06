@@ -326,6 +326,18 @@ void sdio_init(void)
 #define SDIO_CMD24_TR (SDIO_MAKE_CMD(24, 48) | SDIO_CMD_IND_CHK | \
     SDIO_CMD_CRC_CHK | SDIO_CMD_DMA | SDIO_CMD_DATA)
 
+/* Multi-block (SDHCI transfer mode: block count enable, multi-block). No
+ * auto-CMD12: the driver sends CMD12 itself after every multi-block
+ * transfer, which any SD card and controller understand. */
+#define SDIO_TR_BLKCNT  (1u << 1)
+#define SDIO_TR_MULTI   (1u << 5)
+#define SDIO_CMD18_TR (SDIO_MAKE_CMD(18, 48) | SDIO_CMD_IND_CHK | \
+    SDIO_CMD_CRC_CHK | SDIO_CMD_DMA | SDIO_CMD_DATA_READ | SDIO_CMD_DATA | \
+    SDIO_TR_BLKCNT | SDIO_TR_MULTI)
+#define SDIO_CMD25_TR (SDIO_MAKE_CMD(25, 48) | SDIO_CMD_IND_CHK | \
+    SDIO_CMD_CRC_CHK | SDIO_CMD_DMA | SDIO_CMD_DATA | \
+    SDIO_TR_BLKCNT | SDIO_TR_MULTI)
+
 #define SDIO_CMD6_INT (SDIO_INT_CMD_COMPLETE | SDIO_INT_TARGET_RESP | \
     SDIO_INT_CMD_END | SDIO_INT_CMD_CRC | SDIO_INT_CMD_TIMEOUT | \
     SDIO_INT_DATA_END | SDIO_INT_DATA_CRC | SDIO_INT_DATA_TIMEOUT | \
@@ -338,9 +350,11 @@ void sdio_init(void)
 #define SDIO_ACMD41_INT (SDIO_INT_CMD_COMPLETE | SDIO_INT_TARGET_RESP | \
     SDIO_INT_CMD_END | SDIO_INT_CMD_TIMEOUT)
 
-/* Returns the int_st status word; non-ERR + resp requested -> resp filled. */
-static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
-                         void *data, int size, uint32_t *resp)
+/* Returns the int_st status word; non-ERR + resp requested -> resp filled.
+ * count: blocks of a data command (1 unless multi-block). */
+static uint32_t sdio_cmd_n(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
+                           void *data, int size, unsigned count,
+                           uint32_t *resp)
 {
     sdio_base_t *sdio = SDIO0_BASE;
     uint32_t tmp;
@@ -355,7 +369,7 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
     if (data) {
         commit_discard_dcache();            /* whole-cache clean+inv */
         sdio->dma_addr = (uint32_t)(uintptr_t)data;
-        sdio_blksize(sdio, size, 1, 7);
+        sdio_blksize(sdio, size, count, 7);
     }
     sdio->arg = arg;
     sdio->tr_mode = (sdio->tr_mode & 0xc004ff80u) | cmd_tr;
@@ -376,10 +390,13 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
         } while (!(cmd_int & tmp) && --np != 0);
 
         if (!(cmd_int & tmp)) {
+            /* Only a single block's data phase is surely over here; a
+             * multi-block DMA keeps running, so the keypad stays paused. */
             bool sched = irq_enabled();
+            bool busy_hook = sched && count == 1;
             long end = current_tick + SDIO_DATA_WAIT_TICKS;
 
-            if (sched)
+            if (busy_hook)
                 sd_card_busy_wait(true);
             np = SDIO_DATA_WAIT_BUDGET;
             do {
@@ -390,7 +407,7 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
                 }
                 cmd_int = sdio->int_st;
             } while (!(cmd_int & tmp) && --np != 0);
-            if (sched)
+            if (busy_hook)
                 sd_card_busy_wait(false);
         }
     }
@@ -412,6 +429,12 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
 
     sdio_sdclk_off(sdio);
     return cmd_int;
+}
+
+static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
+                         void *data, int size, uint32_t *resp)
+{
+    return sdio_cmd_n(cmd_tr, arg, cmd_int, data, size, 1, resp);
 }
 
 /* ---- CSD parsing (standard SD) ------------------------------------------
@@ -564,5 +587,35 @@ int sdio_write_block(uint32_t idx, uint8_t *buf)
 
     idx <<= sdio_shl;
     sd_int = sdio_cmd(SDIO_CMD24_TR, idx, SDIO_CMD24_INT, buf, 512, NULL);
+    return !(sd_int & SDIO_INT_ERR) && (sd_int & SDIO_INT_TR_COMPLETE) ? 0 : -1;
+}
+
+/* Multi-block read/write (CMD18/CMD25) of count blocks from/to an IRAM
+ * buffer, always followed by CMD12. A card programs a run of blocks much
+ * faster than the same blocks one command each. The caller waits for the
+ * card to be ready (CMD13) before its next command. */
+int sdio_read_blocks(uint32_t idx, uint8_t *buf, unsigned count)
+{
+    uint32_t sd_int;
+
+    if (count == 1)
+        return sdio_read_block(idx, buf);
+    idx <<= sdio_shl;
+    sd_int = sdio_cmd_n(SDIO_CMD18_TR, idx, SDIO_CMD17_INT, buf, 512, count,
+                        NULL);
+    sdio_stop_transmission();
+    return !(sd_int & SDIO_INT_ERR) && (sd_int & SDIO_INT_TR_COMPLETE) ? 0 : -1;
+}
+
+int sdio_write_blocks(uint32_t idx, uint8_t *buf, unsigned count)
+{
+    uint32_t sd_int;
+
+    if (count == 1)
+        return sdio_write_block(idx, buf);
+    idx <<= sdio_shl;
+    sd_int = sdio_cmd_n(SDIO_CMD25_TR, idx, SDIO_CMD24_INT, buf, 512, count,
+                        NULL);
+    sdio_stop_transmission();
     return !(sd_int & SDIO_INT_ERR) && (sd_int & SDIO_INT_TR_COMPLETE) ? 0 : -1;
 }

@@ -157,7 +157,9 @@ not enumeration, is the problem.
 
 Two suspects:
 - **The SD path:** a single-block CMD17 per 512 bytes, a whole D-cache
-  clean per block, and an IRAM bounce copy.
+  clean per block, and an IRAM bounce copy. (Since 2026-11-06 the SD
+  driver moves up to 32 blocks per command, CMD18/CMD25; see
+  `docs/rockbox-recording.md`.)
 - **The USB path:** one interrupt per 64-byte packet.
 
 The eighth build measures which one before anything changes. Every tick

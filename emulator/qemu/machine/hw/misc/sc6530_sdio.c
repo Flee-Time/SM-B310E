@@ -18,14 +18,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530SdioState, SC6530_SDIO)
 struct Sc6530SdioState {
     SDHCIState parent_obj;
     MemoryRegion slot_status;
-    /* Fault injection for the guest's error recovery: every Nth CMD24
-     * (single-block write) is not sent to the card and fails with a data
-     * CRC error instead, as a write lost on the phone's bus would. */
+    /* Fault injection for the guest's error recovery: every Nth write
+     * command (CMD24 single-block or CMD25 multi-block) is not sent to
+     * the card and fails with a data CRC error instead, as a write lost on
+     * the phone's bus would. */
     uint32_t fail_write_every;
     uint32_t writes, failed;
-    /* Slow card: every Nth CMD24 keeps transfer-complete hidden for
-     * write_busy_ms of virtual time, as a card programming or doing its
-     * housekeeping does (seen as ~1 s stalls on the phone). */
+    /* Slow card: every Nth write command (CMD24/CMD25) keeps
+     * transfer-complete hidden for write_busy_ms of virtual time, as a
+     * card programming or doing its housekeeping does (seen as ~1 s
+     * stalls on the phone). */
     uint32_t write_busy_every, write_busy_ms;
     int64_t busy_until;
     const MemoryRegionOps *sdhci_ops;
@@ -62,18 +64,20 @@ static void sc6530_sdio_write(void *opaque, hwaddr offset, uint64_t val,
     } else if (offset == SDHC_CMDREG && size >= 2) {
         cmd = (val >> 8) & 0x3f;
     }
-    if (cmd == 24) {
+    bool write = cmd == 24 || cmd == 25;     /* single or multi-block */
+
+    if (write) {
         s->writes++;
         s->busy_until = 0;
     }
-    if (cmd == 24 && s->write_busy_every &&
+    if (write && s->write_busy_every &&
         s->writes % s->write_busy_every == 0) {
         s->busy_until = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
                         s->write_busy_ms;
         qemu_log_mask(LOG_UNIMP, "sc6530_sdio: injected write busy %u ms\n",
                       s->write_busy_ms);
     }
-    if (cmd == 24 && s->fail_write_every &&
+    if (write && s->fail_write_every &&
         s->writes % s->fail_write_every == 0) {
         SDHCIState *h = &s->parent_obj;
         s->failed++;

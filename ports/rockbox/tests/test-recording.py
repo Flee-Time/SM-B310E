@@ -91,7 +91,7 @@ def run(args, name, frequency, config, qemu_args, expect):
     port = API["free_port"]()
     command = [str(args.qemu), "-M", "b310e,boot-mode=rockbox", "-display", "none",
                "-serial", "none", "-monitor", "none", "-D", str(out / "trace.log"),
-               "--trace", "sc6530_vbc_ad",
+               "--trace", "sc6530_vbc_ad", "--trace", "sdhci_send_command",
                "-qmp", f"tcp:127.0.0.1:{port},server=on,wait=off",
                "-drive", f"file={args.rockbox.as_posix()},format=raw,if=none,id=os,readonly=on",
                "-drive", f"file={image_path.as_posix()},format=raw,if=none,id=sdcard",
@@ -161,6 +161,12 @@ def run(args, name, frequency, config, qemu_args, expect):
               "channels": channels, "levels": levels,
               "expected": [round(e) for t in expect
                            for _, e in (t if isinstance(t, list) else [t])]}
+    # The WAV goes out as multi-block writes (CMD25, up to 32 blocks each);
+    # single-block CMD24 remains only for lone blocks such as FAT updates.
+    log = (out / "trace.log").read_text(errors="replace")
+    result["cmd25"] = log.count("sdhci_send_command CMD25 ")
+    result["cmd24"] = log.count("sdhci_send_command CMD24 ")
+    assert result["cmd25"] > 0, (name, "no multi-block writes", result)
     if any("fail-write-every" in a for a in qemu_args):
         log = (out / "trace.log").read_text(errors="replace")
         result["injected_write_faults"] = log.count("injected write fault")
@@ -213,23 +219,24 @@ def main():
          "rec left gain: 8\nrec right gain: 8\nfm_region: eu\n",
          ["-global", "sc6530_aux.headset-present=on"],
          [[(600, level(8)), (900, level(8))], [(600, level(8)), (900, level(8))]]),
-        # Every 7th SD block write fails (lost on the bus): the driver has
+        # Every 7th SD write command fails (lost on the bus): the driver has
         # to recover and retry, or the FAT writeback panics (2026-11-06).
         ("sd-write-faults", 16000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
          ["-global", "sc6530_adi.mic-tone-hz=1000",
           "-global", "sc6530_sdio.fail-write-every=7", "-d", "unimp"],
          [(1000, level(8))]),
-        # Slow card: every 1000th block write stays busy for 1 s (the phone
+        # Slow card: every 30th write command stays busy for 1 s (the phone
         # showed ~1 s stalls). At 48 kHz the PCM buffer holds 1.2 s; the
-        # recording must not lose audio (warning 0x1 on the phone).
+        # recording must not lose audio (warning 0x1 on the phone). With
+        # 16 KB multi-block writes there are ~6 write commands a second.
         ("sd-slow-card", 48000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
          ["-global", "sc6530_adi.mic-tone-hz=1000",
-          "-global", "sc6530_sdio.write-busy-every=1000",
+          "-global", "sc6530_sdio.write-busy-every=30",
           "-global", "sc6530_sdio.write-busy-ms=1000", "-d", "unimp"],
          [(1000, level(8))]),
-        # 48 kHz stereo WAV (192 KB/s) on a card that takes 1 ms to program
-        # every block: Rockbox flushes hundreds of blocks at once, and
-        # spinning through each one starved the encoder (warning 0x1 on the
+        # 48 kHz stereo WAV (192 KB/s) on a card that takes 1 ms longer on
+        # every write command: Rockbox flushes hundreds of blocks at once,
+        # and spinning through them starved the encoder (warning 0x1 on the
         # phone with WAV at 48 kHz, not with MP3).
         ("sd-48k-stereo-wav", 48000, "rec source: mic\nrec channels: stereo\nrec mic gain: 8\n",
          ["-global", "sc6530_adi.mic-tone-hz=1000",

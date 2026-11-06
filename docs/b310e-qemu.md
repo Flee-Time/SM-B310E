@@ -339,8 +339,11 @@ list + everything learned since):
   "host never connected". os.bin's USB waits are BOUNDED (10M / 2M budgets) and
   burn out and return; no libc_server connection is possible (see the
   bridge item below).
-- **SD is absent**: SDIO0 is log+store; status reads return 0 = "no card".
-  os.bin's SD probe reports no card and moves on (bounded waits).
+- **SD card**: SDIO0 is QEMU's SDHCI with an SD card when
+  `-drive ...,id=sdcard` is given (the Rockbox tests always attach one);
+  without it, the card is absent and the guest's probe reports no card.
+  `sc6530_sdio.fail-write-every=N` and `write-busy-every=N` /
+  `write-busy-ms=M` inject failed and slow block writes.
 - **Flash writes are logged, not stored**: NOR is read-only XIP RAM; the
   guest's flash/NV writes appear in the log with the guest PC and are
   dropped.

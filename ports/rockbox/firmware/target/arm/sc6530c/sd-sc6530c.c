@@ -35,9 +35,12 @@
  *
  * Rockbox's storage layer over the REAL SC6530 SDIO driver (the ported
  * fpdoom driver in sdio-sc6530c.c). Hardware lessons baked in:
- *  - SDIO DMA into PSRAM HANGS this phone — EVERY block transfer bounces
- *    through the 512-byte IRAM buffer at 0x4000b000 (the proven DMA-safe
- *    window the boot menu stages through).
+ *  - SDIO DMA into PSRAM HANGS this phone — EVERY transfer bounces
+ *    through the IRAM buffer at 0x4000b000 (the DMA-safe window the boot
+ *    menu stages its 512-byte blocks through). It is 16 KB now: requests
+ *    go out as multi-block commands of up to 32 blocks (CMD18/CMD25 +
+ *    CMD12). Nothing else in Rockbox uses IRAM; the boot stub that ran
+ *    from 0x40004000 is gone once Rockbox starts.
  *  - The SD probe must run with the 1 ms tick IRQ MASKED (a live tick
  *    during sdio_init kills the phone on hardware) — sd_init() wraps the
  *    whole probe in disable_irq_save()/restore_irq().
@@ -56,12 +59,15 @@
 #define KEYPAD_BASE_ADDR   0x87000000u
 #define KEYPAD_CTRL        (*(volatile uint32_t *)(KEYPAD_BASE_ADDR + 0x00))
 #define SD_BOUNCE_BUF      0x4000b000u   /* IRAM, 512-byte aligned */
+#define SD_MULTI_BLOCKS    32            /* bounce buffer: 16 KB */
 
 /* ---- sdio-sc6530c.c (ported fpdoom SC6530 SDIO driver) ------------------ */
 extern void sdio_init(void);
 extern int  sdcard_init(void);
 extern int  sdio_read_block(uint32_t idx, uint8_t *buf);
 extern int  sdio_write_block(uint32_t idx, uint8_t *buf);
+extern int  sdio_read_blocks(uint32_t idx, uint8_t *buf, unsigned count);
+extern int  sdio_write_blocks(uint32_t idx, uint8_t *buf, unsigned count);
 extern int  sdio_card_status(uint32_t *status);
 extern void sdio_stop_transmission(void);
 extern unsigned sdio_shl;
@@ -124,30 +130,6 @@ bool sd_present(void)
     return sd_enabled_;
 }
 
-/* One block read/write through the IRAM bounce buffer. The keypad matrix
- * scan is paused first (held key + SDIO DMA contends and hangs) — the
- * exact keypad_pause()/keypad_resume() discipline of the boot menu. */
-static int transfer_block(uint32_t idx, void *buf, bool write)
-{
-    unsigned char *bounce = (unsigned char *)SD_BOUNCE_BUF;
-    int rc;
-
-    KEYPAD_CTRL &= ~1u;                     /* keypad_pause() */
-
-    if (write) {
-        memcpy(bounce, buf, SD_BLOCK_SIZE);
-        rc = sdio_write_block(idx, bounce);
-    } else {
-        rc = sdio_read_block(idx, bounce);
-        if (rc == 0)
-            memcpy(buf, bounce, SD_BLOCK_SIZE);
-    }
-
-    sc6530_keypad_capture();                /* capture + ACK before resume */
-    KEYPAD_CTRL |= 1u;
-    return rc;
-}
-
 /* sdio_cmd: the card is programming a block and the driver is about to
  * yield (begin) or has finished waiting (end). Let the keypad scan run
  * meanwhile; pause it again before the next SDIO DMA. */
@@ -189,6 +171,35 @@ static void wait_card_ready(void)
     }
 }
 
+/* Up to SD_MULTI_BLOCKS blocks through the IRAM bounce buffer, as one
+ * command (CMD17/24 for one block, CMD18/25 + CMD12 for more). The keypad
+ * matrix scan is paused around the SDIO DMA (held key + SDIO DMA contends
+ * and hangs) — the keypad_pause()/keypad_resume() discipline of the boot
+ * menu. After a multi-block command the card may still be programming:
+ * wait for it (CMD13, yielding) with the keypad running again. */
+static int transfer_chunk(uint32_t idx, void *buf, unsigned n, bool write)
+{
+    unsigned char *bounce = (unsigned char *)SD_BOUNCE_BUF;
+    int rc;
+
+    KEYPAD_CTRL &= ~1u;                     /* keypad_pause() */
+
+    if (write) {
+        memcpy(bounce, buf, n * SD_BLOCK_SIZE);
+        rc = sdio_write_blocks(idx, bounce, n);
+    } else {
+        rc = sdio_read_blocks(idx, bounce, n);
+        if (rc == 0)
+            memcpy(buf, bounce, n * SD_BLOCK_SIZE);
+    }
+
+    sc6530_keypad_capture();                /* capture + ACK before resume */
+    KEYPAD_CTRL |= 1u;
+    if (n > 1)
+        wait_card_ready();
+    return rc;
+}
+
 /* File metadata and audio buffering run in different threads. Protect the
  * controller AND its shared IRAM bounce buffer for the entire request. */
 static int transfer_sectors(sector_t start, int count, void *buf, bool write)
@@ -204,12 +215,14 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
     sd_busy_now = true;
     long t0 = current_tick;
     int blocks = count;
-    while (count--) {
+    while (count > 0) {
+        unsigned n = count > SD_MULTI_BLOCKS ? SD_MULTI_BLOCKS : count;
         int tries = 0;
 
-        /* One failed block used to fail the whole request, and a failed
-         * write panics the FAT writeback. Recover and retry instead. */
-        while (transfer_block(idx, p, write)) {
+        /* A failed chunk used to fail the whole request, and a failed
+         * write panics the FAT writeback. Recover and retry instead;
+         * rewriting the same blocks is harmless. */
+        while (transfer_chunk(idx, p, n, write)) {
             if (++tries >= SD_BLOCK_TRIES) {
                 sd_failures++;
                 rc = -1;
@@ -220,8 +233,9 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
         }
         if (rc)
             break;
-        idx++;
-        p += SD_BLOCK_SIZE;
+        idx += n;
+        p += n * SD_BLOCK_SIZE;
+        count -= n;
     }
     sd_activity = current_tick;
     if (write && rc == 0) {
