@@ -241,6 +241,31 @@ void sc6530_keypad_capture(void)
     restore_irq(old);
 }
 
+/* Torch: hold 0 for a second to toggle it, from any screen. No Rockbox
+ * action uses BUTTON_0, so the press still reaches the button queue. */
+#define TORCH_HOLD_TICKS HZ
+volatile unsigned torch_hold_count;    /* shown by the I/O ports screen */
+
+static void torch_hold_check(int held)
+{
+    static long down_tick;
+    static bool armed;
+
+    if (!(held & BUTTON_0)) {
+        armed = false;
+        return;
+    }
+    if (!armed) {
+        armed = true;
+        down_tick = current_tick;
+    } else if (down_tick != 0 &&
+               TIME_AFTER(current_tick, down_tick + TORCH_HOLD_TICKS)) {
+        down_tick = 0;                  /* one toggle per press */
+        torch_hold_count++;
+        torch_set(!torch_get());
+    }
+}
+
 int button_read_device(int *data)
 {
     int old = disable_irq_save();
@@ -253,5 +278,6 @@ int button_read_device(int *data)
     capture_matrix_edges();
     int result = held_mask;
     restore_irq(old);
+    torch_hold_check(result);
     return result;
 }

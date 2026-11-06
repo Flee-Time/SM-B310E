@@ -55,6 +55,12 @@
 #define CHARGER_DISABLE (1u << 6)
 #define CHARGER_PGB     (1u << 8)
 #define CHARGER_CHGSB   (1u << 9)
+/* e52q7a: a long press of Up on the home screen writes GPIO bank0 DATA
+ * bit 7 high, the next one low (QEMU trace, writer pc 0x34e1e). Stock
+ * boot leaves DMSK/DIR bit 7 set (output). The service manual's block
+ * diagram names the net TORCH_EN into U202 (LD6816CX4C33P, active-high
+ * LDO enable) and has no other torch control. */
+#define TORCH_EN        (1u << 7)
 
 static bool charger_present;
 
@@ -104,10 +110,11 @@ void power_init(void)
     adi_write(0x820010e4, 0x20);
     if (adi_read(ANA_EIC_DMSK, &mask))
         adi_write(ANA_EIC_DMSK, mask | CHARGER_EIC_BIT);
-    REG32(0x8b0000a0) = 1u << 19; /* GPIO clock SET */
+    sc6530_gpio_clock_on();
     REG32(GPIO_DIR) &= ~(CHARGER_PGB | CHARGER_CHGSB);
     REG32(GPIO_DMSK) |= CHARGER_PGB | CHARGER_CHGSB;
     restore_irq(old);
+    torch_set(false);
 }
 
 unsigned int power_input_status(void)
@@ -116,6 +123,27 @@ unsigned int power_input_status(void)
     if (adi_read(ANA_EIC_DATA, &data))
         charger_present = (data & CHARGER_EIC_BIT) != 0;
     return charger_present ? POWER_INPUT_MAIN_CHARGER : POWER_INPUT_NONE;
+}
+
+static bool torch_on;
+
+void torch_set(bool on)
+{
+    torch_on = on;
+    int old = disable_irq_save();
+    sc6530_gpio_clock_on();
+    REG32(GPIO_DMSK) |= TORCH_EN;
+    if (on)
+        REG32(GPIO_DATA) |= TORCH_EN;
+    else
+        REG32(GPIO_DATA) &= ~TORCH_EN;
+    REG32(GPIO_DIR) |= TORCH_EN;
+    restore_irq(old);
+}
+
+bool torch_get(void)
+{
+    return torch_on;
 }
 
 bool charging_state(void)
@@ -141,6 +169,7 @@ void power_off(void)
      * removes the CPU/RAM supplies, so do not wait on ADI afterwards. */
     disable_interrupt(IRQ_FIQ_STATUS);
     REG32(0x8000000c) = 0xffffffff;
+    REG32(GPIO_DATA) &= ~TORCH_EN;
     if (!adi_write(ANA_LDO_PD_SET1, 0x1f))
         system_reboot();
     uint32_t budget = ADI_BUDGET;

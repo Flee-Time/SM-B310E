@@ -29,6 +29,7 @@
 #include "file.h"
 #include "pcm-internal.h"
 #include "audio-target.h"
+#include "button.h"
 #include <stdio.h>
 
 /*
@@ -174,6 +175,7 @@ void system_reboot(void)
      * (B310E-OS menu_reboot, arch/diag_menu_main.c). */
     disable_interrupt(IRQ_FIQ_STATUS);
     REG32(INT_DISABLE_REG) = 0xFFFFFFFF;
+    REG32(0x8a000000) &= ~(1u << 7);          /* torch off (GPIO7) */
     /* SC6530 analog and RTC watchdog clock SET aliases; fpdoom's
      * SC6530 reset path and stock clock code use these, not 0x1040. */
     adi_write(0x820010e0, 4);
@@ -244,8 +246,93 @@ int system_memory_guard(int newmode)
 }
 
 /* Debug menu hooks (system.h). */
+/* Torch test (Debug > View I/O ports). GPIO7 drives the torch in the
+ * stock firmware under QEMU, but did not light it on hardware under
+ * Rockbox. This screen shows the live registers, toggles each candidate
+ * and writes a register dump (pinmux reads only, never writes). */
+extern volatile unsigned torch_hold_count;
+#define ANA_LED_CTRL 0x82001220u
+
+static bool torch_dump(const char *what)
+{
+    int fd = open(ROCKBOX_DIR "/torch-b310e.txt", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0)
+        return false;
+    bool ok = fdprintf(fd, "== %s tick=%ld holds=%u torch=%d\n", what, current_tick,
+                       torch_hold_count, torch_get()) >= 0;
+    ok &= fdprintf(fd, "ANA 82001220=%04lx 82001224=%04lx 82001240=%04lx\n",
+                   (unsigned long)adi_read(ANA_LED_CTRL),
+                   (unsigned long)adi_read(0x82001224),
+                   (unsigned long)adi_read(0x82001240)) >= 0;
+    for (unsigned bank = 0; bank < 8; bank++) {
+        uint32_t b = 0x8a000000u + bank * 0x80u;
+        ok &= fdprintf(fd, "GPIO%u D=%04lx M=%04lx R=%04lx IE=%04lx\n", bank,
+                       (unsigned long)REG32(b), (unsigned long)REG32(b + 4),
+                       (unsigned long)REG32(b + 8), (unsigned long)REG32(b + 0x18)) >= 0;
+    }
+    ok &= fdprintf(fd, "APB 8b000000=%08lx 8b0000a0=%08lx\n",
+                   (unsigned long)REG32(0x8b000000), (unsigned long)REG32(0x8b0000a0)) >= 0;
+    for (uint32_t off = 0; off < 0x300; off += 0x20) {
+        ok &= fdprintf(fd, "PIN %03lx:", (unsigned long)off) >= 0;
+        for (uint32_t i = 0; i < 0x20; i += 4)
+            ok &= fdprintf(fd, " %05lx", (unsigned long)(REG32(0x8c000000u + off + i) & 0xfffff)) >= 0;
+        ok &= fdprintf(fd, "\n") >= 0;
+    }
+    return (close(fd) == 0) && ok;
+}
+
 bool dbg_ports(void)
 {
+    uint32_t led_saved = adi_read(ANA_LED_CTRL);
+    int ana_mode = 0;              /* 0 untouched, 1 0x8800/0x4400, 2 clear 0x1100 */
+    const char *status = torch_dump("open") ? "dump saved" : "dump FAILED";
+
+    lcd_setfont(FONT_SYSFIXED);
+    for (;;)
+    {
+        uint32_t led = adi_read(ANA_LED_CTRL);
+        lcd_clear_display();
+        lcd_puts(0, 0, "Torch test");
+        lcd_putsf(0, 2, "GPIO7 torch: %s", torch_get() ? "ON" : "off");
+        lcd_putsf(0, 3, "Hold-0 toggles: %u", torch_hold_count);
+        lcd_putsf(0, 4, "B0 D%04lx M%04lx", (unsigned long)REG32(0x8a000000),
+                  (unsigned long)REG32(0x8a000004));
+        lcd_putsf(0, 5, "B0 R%04lx", (unsigned long)REG32(0x8a000008));
+        lcd_putsf(0, 6, "LED_CTRL %04lx", (unsigned long)led);
+        lcd_putsf(0, 7, "ANA mode %d", ana_mode);
+        lcd_puts(0, 9, "1: GPIO7 on/off");
+        lcd_puts(0, 10, "3: LED 8800 on/off");
+        lcd_puts(0, 11, "5: LED ~1100 on/off");
+        lcd_puts(0, 14, "9: save dump");
+        lcd_puts(0, 15, "Back: exit");
+        lcd_puts(0, 17, status);
+        lcd_update();
+
+        int button = button_get_w_tmo(HZ / 4);
+        if (button & (BUTTON_REL | BUTTON_REPEAT))
+            continue;
+        if (button == BUTTON_BACK)
+            break;
+        if (button == BUTTON_1) {
+            torch_set(!torch_get());
+            status = torch_get() ? "GPIO7 high" : "GPIO7 low";
+        } else if (button == BUTTON_3 || button == BUTTON_5) {
+            int mode = button == BUTTON_3 ? 1 : 2;
+            ana_mode = ana_mode == mode ? 0 : mode;
+            if (ana_mode == 1)
+                adi_write(ANA_LED_CTRL, (led_saved & ~0x4400u) | 0x8800u);
+            else if (ana_mode == 2)
+                adi_write(ANA_LED_CTRL, led_saved & ~0x1100u);
+            else
+                adi_write(ANA_LED_CTRL, led_saved);
+            status = ana_mode ? "LED_CTRL changed" : "LED_CTRL restored";
+        } else if (button == BUTTON_9) {
+            status = torch_dump("key 9") ? "dump saved" : "dump FAILED";
+        }
+    }
+    if (ana_mode)
+        adi_write(ANA_LED_CTRL, led_saved);
+    lcd_setfont(FONT_UI);
     return false;
 }
 

@@ -315,6 +315,11 @@ else
     fi
 fi
 
+# 18. apps/debug_menu.c — "View I/O ports" for SC6530C. The target's
+# dbg_ports() is the torch/GPIO test screen (system-sc6530c.c).
+patch_file "$CLONE_DIR/apps/debug_menu.c" 'B310E-PORT: io ports' \
+  's/(    \|\| CONFIG_CPU == RK27XX \|\| CONFIG_CPU == JZ4760B)\n(        \{ "View I\/O ports", dbg_ports \},)/$1 \\\n    || CONFIG_CPU == SC6530C \/* B310E-PORT: io ports *\/\n$2/' || exit 1
+
 # ---- c. CONFIGURE + BUILD (out-of-tree) ----------------------------------
 export PATH="$TOOLCHAIN:$HOST_CC:$PATH"
 command -v arm-none-eabi-gcc >/dev/null 2>&1 || fail "arm-none-eabi-gcc not on PATH"

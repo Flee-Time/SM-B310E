@@ -97,6 +97,13 @@ live analog base):
 | PA gain +0x9c | `0x00` | `0x70` |
 | GPIO0 output | High | Low |
 
+Until 2026-11-05 the port never enabled the GPIO block's APB clock
+(`0x800080` at `0x8b0000a0`; see `sc6530_gpio_clock_on()`). GPIO0 writes
+were therefore ignored, and the jack routes worked from the codec registers
+alone. With the clock on, GPIO0 is now driven as in stock. The phone owner
+confirmed on 2026-11-06 that speaker/headphone output and jack
+auto-switching still work.
+
 The port mutes while changing routes, disables the previous output, then
 enables the new one and restores mute state. Rockbox's speaker setting
 defaults to Auto; its existing jack debounce/events select speaker or

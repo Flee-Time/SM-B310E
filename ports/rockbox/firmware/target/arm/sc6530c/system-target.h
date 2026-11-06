@@ -46,4 +46,19 @@ void tick_stop(void);
  * iteration loop at 208 MHz, see system-sc6530c.c). */
 void udelay(unsigned int usecs);
 
+/* GPIO block (0x8a000000) APB clock. fpdoom gpio_init: APB_PWR_ON
+ * (0x800080) "GPIO_D" on SC6530. Bit 19 is half of the keypad clock
+ * (0x80040), not GPIO: with only that set, the hardware drops every GPIO
+ * write and reads 0 (torch test dump, 2026-11-05). QEMU does not model
+ * this gate. */
+static inline void sc6530_gpio_clock_on(void)
+{
+    *(volatile unsigned long *)0x8b0000a0 = 0x800080;  /* APB enable SET */
+}
+
+/* Torch LED (power-sc6530c.c): GPIO7 enables the U202 LD6816 LDO that
+ * feeds LED200. Long-press 0 toggles it (button-sc6530c.c). */
+void torch_set(bool on);
+bool torch_get(void);
+
 #endif /* SYSTEM_TARGET_H */

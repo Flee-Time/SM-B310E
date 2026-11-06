@@ -36,6 +36,9 @@ download mode with `spd_dump`, and can also boot from an SD card.
   for the SC6530C.
 - **USB mass storage in Rockbox** (verified on hardware at about 225 KB/s):
   the SD card appears as a drive on a PC. See [docs/usb.md](docs/usb.md).
+- **Torch in Rockbox** (verified on hardware): hold 0 to toggle the torch
+  LED on GPIO 7. See
+  [docs/rockbox-controls.md](docs/rockbox-controls.md#torch).
 - **A QEMU machine** (`emulator/qemu/`) for stock firmware bring-up and
   this OS on the PC. Stock boot reaches time/date setup; an experimental
   external display input allows navigation into its home screen and menus.

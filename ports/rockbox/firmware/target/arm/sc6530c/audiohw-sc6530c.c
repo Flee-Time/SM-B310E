@@ -169,6 +169,7 @@ static void headset_output(bool enable)
      * ID33 instead calls 0x24d24 -> 0x69d00, enabling the on-die speaker
      * PA; no guessed GPIO18/39 is involved in these captured routes. */
     int old = disable_irq_save();
+    sc6530_gpio_clock_on();
     SC_AUDIO_REG(0x8a000018) &= ~1u; /* no pin interrupt */
     SC_AUDIO_REG(0x8a000004) |= 1;   /* data mask */
     SC_AUDIO_REG(0x8a000000) = (SC_AUDIO_REG(0x8a000000) & ~1u) | enable;
