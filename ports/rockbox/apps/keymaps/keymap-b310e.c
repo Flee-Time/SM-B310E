@@ -232,6 +232,37 @@ static const struct button_mapping button_context_recscreen[] = {
     LAST_ITEM_IN_LIST__NEXTLIST(CONTEXT_STD)
 }; /* button_context_recscreen */
 #endif
+
+#if CONFIG_TUNER
+/* Left/Right tune (hold to seek), Up/Down and 2/8 volume, 4/6 presets,
+ * Center switches scan/preset mode (hold for presets), DIAL play/mute,
+ * Left soft key menu, Right soft key leaves (radio keeps playing),
+ * END stops the radio. */
+static const struct button_mapping button_context_radio[] = {
+    {ACTION_STD_PREV,           BUTTON_LEFT,                    BUTTON_NONE},
+    {ACTION_STD_PREVREPEAT,     BUTTON_LEFT|BUTTON_REPEAT,      BUTTON_NONE},
+    {ACTION_STD_NEXT,           BUTTON_RIGHT,                   BUTTON_NONE},
+    {ACTION_STD_NEXTREPEAT,     BUTTON_RIGHT|BUTTON_REPEAT,     BUTTON_NONE},
+    {ACTION_SETTINGS_INC,       BUTTON_UP,                      BUTTON_NONE},
+    {ACTION_SETTINGS_INCREPEAT, BUTTON_UP|BUTTON_REPEAT,        BUTTON_NONE},
+    {ACTION_SETTINGS_DEC,       BUTTON_DOWN,                    BUTTON_NONE},
+    {ACTION_SETTINGS_DECREPEAT, BUTTON_DOWN|BUTTON_REPEAT,      BUTTON_NONE},
+    {ACTION_SETTINGS_INC,       BUTTON_VOL_UP,                  BUTTON_NONE},
+    {ACTION_SETTINGS_INCREPEAT, BUTTON_VOL_UP|BUTTON_REPEAT,    BUTTON_NONE},
+    {ACTION_SETTINGS_DEC,       BUTTON_VOL_DOWN,                BUTTON_NONE},
+    {ACTION_SETTINGS_DECREPEAT, BUTTON_VOL_DOWN|BUTTON_REPEAT,  BUTTON_NONE},
+    {ACTION_FM_PREV_PRESET,     BUTTON_PREV|BUTTON_REL,         BUTTON_PREV},
+    {ACTION_FM_NEXT_PRESET,     BUTTON_NEXT|BUTTON_REL,         BUTTON_NEXT},
+    {ACTION_FM_MODE,            BUTTON_SELECT|BUTTON_REL,       BUTTON_SELECT},
+    {ACTION_FM_PRESET,          BUTTON_SELECT|BUTTON_REPEAT,    BUTTON_SELECT},
+    {ACTION_FM_PLAY,            BUTTON_PLAY|BUTTON_REL,         BUTTON_PLAY},
+    {ACTION_FM_MENU,            BUTTON_MENU|BUTTON_REL,         BUTTON_MENU},
+    {ACTION_FM_EXIT,            BUTTON_BACK|BUTTON_REL,         BUTTON_BACK},
+    {ACTION_FM_STOP,            BUTTON_POWER|BUTTON_REL,        BUTTON_POWER},
+    LAST_ITEM_IN_LIST__NEXTLIST(CONTEXT_STD)
+}; /* button_context_radio */
+#endif
+
 const struct button_mapping* get_context_mapping(int context)
 {
     switch (context)
@@ -271,6 +302,10 @@ const struct button_mapping* get_context_mapping(int context)
 #ifdef HAVE_RECORDING
         case CONTEXT_RECSCREEN:
             return button_context_recscreen;
+#endif
+#if CONFIG_TUNER
+        case CONTEXT_FM:
+            return button_context_radio;
 #endif
     }
     return button_context_standard;

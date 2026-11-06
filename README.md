@@ -39,6 +39,9 @@ download mode with `spd_dump`, and can also boot from an SD card.
 - **Microphone recording in Rockbox** (verified on hardware): Main Menu →
   Recording, through the ARM-owned ADC/VBC capture path; no DSP needed.
   See [docs/rockbox-recording.md](docs/rockbox-recording.md).
+- **FM radio in Rockbox** (verified on hardware): the RTC6211N tuner on
+  I2C controller 1 with an analog line-in route; the headset cable is the
+  antenna. See [docs/rockbox-fmradio.md](docs/rockbox-fmradio.md).
 - **Torch in Rockbox** (verified on hardware): hold 0 to toggle the torch
   LED on GPIO 7. See
   [docs/rockbox-controls.md](docs/rockbox-controls.md#torch).

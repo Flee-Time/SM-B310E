@@ -91,7 +91,13 @@
 /* Main microphone through the on-die ADC and VBC AD0, ARM-owned (no DSP).
  * The ADC clock is rate/4000 (stock 0x81220), so only multiples of 4 kHz. */
 #define HAVE_RECORDING
-#define INPUT_SRC_CAPS SRC_CAP_MIC
+#define INPUT_SRC_CAPS (SRC_CAP_MIC | SRC_CAP_FMRADIO)
+#define REC_SRC_CAPS SRC_CAP_MIC   /* FM plays through an analog bypass */
+
+/* Richwave RTC6211 FM tuner (U101; the N variant on the tested phone)
+ * on I2C controller 1, reset GPIO31,
+ * 32 kHz reference from the IISMCK pad. The headset cable is the antenna. */
+#define CONFIG_TUNER RTC6211
 #define REC_SAMPR_CAPS (SAMPR_CAP_48 | SAMPR_CAP_32 | SAMPR_CAP_24 |                         SAMPR_CAP_16 | SAMPR_CAP_12 | SAMPR_CAP_8)
 #define REC_FREQ_DEFAULT REC_FREQ_16
 #define REC_SAMPR_DEFAULT SAMPR_16

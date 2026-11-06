@@ -24,6 +24,7 @@ fi
 echo "--- staging overlay ---"
 cp -f "$PORT_DIR/firmware/export/config/b310e.h"    "$CLONE_DIR/firmware/export/config/b310e.h"
 cp -f "$PORT_DIR/firmware/export/sc6530c.h"         "$CLONE_DIR/firmware/export/sc6530c.h"
+cp -f "$PORT_DIR/firmware/export/rtc6211.h"         "$CLONE_DIR/firmware/export/rtc6211.h"
 cp -rf "$PORT_DIR/firmware/target/arm/sc6530c/."    "$CLONE_DIR/firmware/target/arm/sc6530c/"
 cp -f "$PORT_DIR/apps/keymaps/keymap-b310e.c"       "$CLONE_DIR/apps/keymaps/keymap-b310e.c"
 echo "staged:"
@@ -182,6 +183,10 @@ target/arm/sc6530c/i2c-sc6530c.c
 target/arm/sc6530c/pcm-sc6530c.c
 target/arm/sc6530c/audiohw-sc6530c.c
 target/arm/sc6530c/audio-sc6530c.c
+#if CONFIG_TUNER
+target/arm/sc6530c/fmradio-i2c-sc6530c.c
+target/arm/sc6530c/rtc6211.c
+#endif
 #endif /* !BOOTLOADER */
 #if defined(HAVE_USBSTACK) && !defined(BOOTLOADER)
 target/arm/sc6530c/usb-drv-sc6530c.c
@@ -327,6 +332,14 @@ patch_file "$CLONE_DIR/apps/debug_menu.c" 'B310E-PORT: io ports' \
 # (PCMREC_W_ENC_BUFFER_OVF, nothing written).
 patch_file "$CLONE_DIR/apps/recorder/pcm_record.c" 'B310E-PORT: 4 MiB RAM' \
   's/\n#if MEMORYSIZE <= 2\n/\n#if MEMORYSIZE <= 4 \/* B310E-PORT: 4 MiB RAM *\/\n/' || exit 1
+
+# 20. RTC6211 tuner type: config.h flag, tuner.h header, tuner.c case.
+patch_file "$CLONE_DIR/firmware/export/config.h" '#define RTC6211' \
+  's/(#define STFM1000   0x100[^\n]*\n)/$1#define RTC6211    0x200 \/* Richwave, B310E-PORT *\/\n/' || exit 1
+patch_file "$CLONE_DIR/firmware/export/tuner.h" '#include "rtc6211.h"' \
+  's/(#if \(CONFIG_TUNER & STFM1000\)\n#include "stfm1000.h"\n#endif\n)/$1\n\/* Richwave RTC6211, B310E-PORT *\/\n#if (CONFIG_TUNER & RTC6211)\n#include "rtc6211.h"\n#endif\n/' || exit 1
+patch_file "$CLONE_DIR/firmware/tuner.c" 'TUNER_TYPE_CASE(RTC6211' \
+  's/(                        stfm1000_init\(\)\)\n    #endif\n)/$1    #if (CONFIG_TUNER & RTC6211)\n        TUNER_TYPE_CASE(RTC6211,\n                        rtc6211_set,\n                        rtc6211_get,\n                        rtc6211_init())\n    #endif\n/' || exit 1
 
 # ---- c. CONFIGURE + BUILD (out-of-tree) ----------------------------------
 export PATH="$TOOLCHAIN:$HOST_CC:$PATH"

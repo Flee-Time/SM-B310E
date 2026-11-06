@@ -4,12 +4,16 @@
  */
 #include "config.h"
 #include "system.h"
+#include "kernel.h"
 #include "audiohw.h"
 #include "audio.h"
 #include <string.h>
 #include "pcm_sampr.h"
 #include "pcm_sw_volume.h"
 #include "audio-target.h"
+#if CONFIG_TUNER
+#include "tuner.h"
+#endif
 
 /* The running stock codec pointer at 0x042354b0 contains 0x82001a00.
  * 0x82001280 in the older port belongs to a different register layout. */
@@ -21,6 +25,7 @@
 #define EIC_CLOCKS ((1u << 25) | (1u << 26))
 static bool initialized, adi_failed;
 static bool speaker_enabled;
+static bool fm_on;           /* analog FM line-in bypass active */
 #ifdef HAVE_RECORDING
 static bool recording_on;
 #endif
@@ -166,6 +171,11 @@ static void apply_pcm_volume(int gain)
 
 static void apply_volume(bool speaker)
 {
+#if CONFIG_TUNER
+    /* Software PCM volume cannot reach the analog FM path. */
+    if (fm_on)
+        rtc6211_set_volume_db(MIN(current_volume, 0));
+#endif
     int gain = speaker ? 0 : (headphone_gain() - 4) * 30;
     /* The speaker stays at its proven stock PA gain. Positive headphone
      * volume settings saturate at the speaker's existing maximum. */
@@ -218,6 +228,21 @@ static void select_output(bool speaker)
         adi_update(CODEC + 0x8c, 0x80, 0);
         adi_update(CODEC + 0x7c, 0xff, 0x84);
         adi_update(CODEC + 0x84, 0xfc, 0xc4);
+    }
+    if (fm_on)
+    {
+        /* Analog FM: the DAC leaves the outputs; line-in PGA buffers feed
+         * them instead (stock 0x80dea HP, 0x80cf4 SPK, 0x80c54 buffers):
+         * HP gets PGAL_BUFP->HPL and PGAR_BUFP->HPR, the speaker gets
+         * both PGAs on SP+/SP-. */
+        adi_update(CODEC + 0x7c, 0xff, 0);
+        adi_update(CODEC + 0x78, 0xff, speaker ? 0x33 : 0x84);
+        adi_update(CODEC + 0x60, 0x0f, speaker ? 0x0f : 0x0a);
+    }
+    else
+    {
+        adi_update(CODEC + 0x78, 0xff, 0);
+        adi_update(CODEC + 0x60, 0x0f, 0);
     }
     speaker_enabled = speaker;
     apply_volume(speaker);
@@ -425,6 +450,43 @@ void audiohw_set_monitor(bool enable)
     (void)enable;                             /* no analog mic monitor */
 }
 #endif /* HAVE_RECORDING */
+
+#if CONFIG_TUNER
+/* FM line-in bypass: AIL/AIR -> ADC PGAs -> PGA output buffers -> HP or
+ * speaker mixer, no ADC/DAC data path and no DSP (stock sprd_codec v0
+ * LINEIN function). See docs/rockbox-fmradio.md. */
+#define FM_LINE_GAIN 0x88           /* +0x70 L/R PGA step; NV value unknown */
+
+void audiohw_fm_route(bool on)
+{
+    if (on == fm_on)
+        return;
+    if (on)
+    {
+        if (!initialized)
+            audiohw_init();
+        adi_update(CODEC + 0x5c, 0x80, 0);       /* ADC input buffer */
+        adi_update(CODEC + 0x60, 0xa0, 0);       /* PGA L/R power */
+        adi_update(CODEC + 0x70, 0xff, FM_LINE_GAIN);
+        adi_update(CODEC + 0x6c, 0xfc, 0xac);    /* AIL->L, AIR->R, VCM */
+        sleep(HZ / 4);                           /* stock line-in settle */
+        fm_on = true;
+    }
+    else
+    {
+        fm_on = false;
+        adi_update(CODEC + 0x6c, 0xfc, 0);
+#ifdef HAVE_RECORDING
+        if (!recording_on)
+#endif
+        {
+            adi_update(CODEC + 0x60, 0xa0, 0xa0);
+            adi_update(CODEC + 0x5c, 0x80, 0x80);
+        }
+    }
+    select_output(speaker_enabled);
+}
+#endif /* CONFIG_TUNER */
 
 void audiohw_preinit(void) {}
 void audiohw_postinit(void) {}

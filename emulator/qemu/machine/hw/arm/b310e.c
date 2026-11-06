@@ -241,6 +241,8 @@
 #define TYPE_SC6530_KEYPAD       "sc6530_keypad"
 #define TYPE_SC6530_DSP          "sc6530_dsp"
 #define TYPE_SC6530_USB          "sc6530_usb"
+#define TYPE_SC6530_I2C          "sc6530_i2c"
+#define B310E_I2C1_BASE           0x86001000ULL
 #define TYPE_SC6530_SDIO         "sc6530_sdio"
 #define TYPE_SC6530_UART         "sc6530_uart"
 #define TYPE_SC6530_SFC          "sc6530_sfc"
@@ -929,6 +931,17 @@ static void b310e_init(MachineState *machine)
                                  &error_fatal);
         sysbus_realize_and_unref(usb_sbd, &error_fatal);
         sysbus_connect_irq(usb_sbd, 0, qdev_get_gpio_in(s->intc, 25));
+    }
+
+    /* SC6530 I2C controller 1 @ 0x86001000 with the RTC6211S FM tuner
+     * (U101, address 0x64) on its bus. Polled; no IRQ wired. */
+    {
+        DeviceState *i2c_dev = qdev_new(TYPE_SC6530_I2C);
+        SysBusDevice *i2c_sbd = SYS_BUS_DEVICE(i2c_dev);
+
+        sysbus_mmio_map_overlap(i2c_sbd, 0, B310E_I2C1_BASE,
+                                B310E_REGION_PRIORITY);
+        sysbus_realize_and_unref(i2c_sbd, &error_fatal);
     }
 
     /* SC6530 UART1 (debug console) @ 0x84000000: stock firmware boot diagnostics */

@@ -45,4 +45,7 @@ bool sc6530_rec_route(void);
 void sc6530_rec_set_route(bool set);
 void sc6530_rec_debug(uint16_t regs[8], bool at_start);
 
+/* Analog FM route on/off (audiohw-sc6530c.c). */
+void audiohw_fm_route(bool on);
+
 #endif

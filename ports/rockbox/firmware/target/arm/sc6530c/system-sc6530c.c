@@ -30,6 +30,11 @@
 #include "pcm-internal.h"
 #include "audio-target.h"
 #include "button.h"
+#if CONFIG_TUNER
+#include "fmradio_i2c.h"
+#include "tuner.h"
+#include "power.h"
+#endif
 #include <stdio.h>
 
 /*
@@ -237,6 +242,9 @@ void system_init(void)
     REG32(INT_DISABLE_REG) = 0xFFFFFFFF;
 
     watchdog_stop();
+#if CONFIG_TUNER
+    fmradio_i2c_init();
+#endif
 }
 
 int system_memory_guard(int newmode)
@@ -286,6 +294,18 @@ static bool torch_dump(const char *what)
                        (unsigned long)REG32(0x8a002000), (unsigned long)REG32(0x8a002018),
                        sc6530_rec_route()) >= 0;
     }
+#if CONFIG_TUNER
+    {
+        struct rtc6211_dbg_info fm;
+        rtc6211_dbg_info(&fm);
+        ok &= fdprintf(fd, "FM present=%d N=%d powered=%d nor_tables=%d pin17c=%08lx regs",
+                       rtc6211_get(RADIO_PRESENT), fm.chip_n, tuner_powered(), fm.nor_tables,
+                       (unsigned long)REG32(0x8c00017c)) >= 0;
+        for (int i = 0; i < 16; i++)
+            ok &= fdprintf(fd, " %04x", fm.regs[i]) >= 0;
+        ok &= fdprintf(fd, "\n") >= 0;
+    }
+#endif
     ok &= fdprintf(fd, "APB 8b000000=%08lx 8b0000a0=%08lx\n",
                    (unsigned long)REG32(0x8b000000), (unsigned long)REG32(0x8b0000a0)) >= 0;
     for (uint32_t off = 0; off < 0x300; off += 0x20) {
