@@ -217,6 +217,8 @@ def main():
     parser.add_argument('--fat32', action='store_true', help='also compatible with the fpdoom SD boot menu')
     parser.add_argument('--fpmain', type=Path, help='include this menu as fpbin/fpmain.bin; requires FAT32')
     parser.add_argument('--config', type=Path, help='JSON menu configuration; required with --fpmain')
+    parser.add_argument('--add', action='append', default=[], metavar='DEST=SRC',
+                        help='also store file SRC as DEST (a path on the card); repeatable')
     args = parser.parse_args()
     if not args.runtime.is_dir() or not args.rockbox.is_file():
         parser.error('build Rockbox first to stage the runtime and binary')
@@ -236,6 +238,11 @@ def main():
     if args.fpmain:
         add_file(root, 'fpbin/fpmain.bin', args.fpmain.read_bytes())
         add_file(root, 'fpbin/config.json', args.config.read_bytes())
+    for item in args.add:
+        dest, sep, src = item.partition('=')
+        if not sep or not dest or not Path(src).is_file():
+            parser.error(f'--add {item!r}: expected DEST=SRC with an existing SRC')
+        add_file(root, dest.strip('/'), Path(src).read_bytes())
     add_file(root, '.rockbox/config.cfg', b'volume: 0\nstart in screen: files\nstart directory: /\n')
     args.output.parent.mkdir(parents=True, exist_ok=True)
     print(json.dumps(write_image(args.output, root, args.size_mib, args.fat32), indent=2))

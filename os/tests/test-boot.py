@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
-"""Boot the B310E OS in QEMU and check milestone 1.
+"""Boot the B310E OS in QEMU and check milestones 1 and 2 and the UI.
 
 Reads the OS's `os_status` block (address from the ELF symbol table)
-through QTest while the guest runs:
-  - the kernel self-test passes (sleep, semaphore, priority inheritance,
-    queue, heap);
-  - the tick runs and the CPU is mostly idle;
-  - injected key presses arrive as down/up events;
-  - holding END for 2.5 s reboots through the watchdog;
-and saves screenshots.
+through QTest while the guest runs, and drives it with key presses:
+  - the card (a FAT32 image whose FSINFO has no free count) mounts, the
+    self-test passes (kernel objects plus a 32 KB card write and read),
+    the free space is counted after boot and written back to FSINFO;
+  - the CPU is mostly idle on the home screen;
+  - Menu -> Apps lists the card's apps and opens the Stopwatch app, which
+    is freed again when closed; Files lists the card, System and Settings
+    open, Settings changes the brightness and the screen timeout, END
+    returns home;
+  - the screen dims and then goes dark (panel asleep), a key wakes it;
+  - the clock governor runs 104 MHz at rest and 26 MHz with the panel
+    asleep, and the idle share stays high while dark (the accounting);
+  - Power -> Power off -> Yes powers the machine off;
+then checks the card image for the self-test file, the saved setting and
+the card log, and saves a screenshot of every screen.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -20,7 +28,6 @@ from pathlib import Path
 import runpy
 import shutil
 import socket
-import struct
 import subprocess
 import sys
 import time
@@ -33,8 +40,13 @@ capture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(capture)
 
 FIELDS = ('magic ticks idle_permille selftest_done selftest_pass pi_wait_ms '
-          'sem_rounds_per_s keys last_key worker_loops heap_free stray_irqs cycles idle_cycles').split()
+          'sem_rounds_per_s keys last_key worker_loops heap_free stray_irqs cycles idle_cycles '
+          'sd_code fs_mounted fs_free_kib sd_retries sd_failures fs_write_kib_per_s '
+          'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz').split()
 MAGIC = 0x534f3342
+MENU = ['Apps', 'Files', 'Sound', 'FM radio', 'Tools', 'System', 'Settings', 'Power']
+ST_ALL = 0x3f
+FS_PATTERN = bytes((i * 7 + (i >> 8)) & 0xff for i in range(512))
 
 
 def free_port():
@@ -53,8 +65,27 @@ def symbol(elf, name):
     raise KeyError(name)
 
 
+def fsinfo_free(image):
+    """(offset, free count) of the FAT32 FSINFO sector's free count."""
+    for at in range(0, min(len(image), 64 << 20), 512):
+        if image[at:at + 4] == b'RRaA' and image[at + 484:at + 488] == b'rrAa':
+            return at + 488, int.from_bytes(image[at + 488:at + 492], 'little')
+    raise AssertionError('no FSINFO sector in the card image')
+
+
 def status(qt, base):
     return {name: qt.read(base + 4 * i) for i, name in enumerate(FIELDS)}
+
+
+def string(qt, addr, limit=64):
+    out = b''
+    while addr and len(out) < limit:
+        word = qt.read(addr & ~3).to_bytes(4, 'little')[addr & 3:]
+        if b'\0' in word:
+            return (out + word.split(b'\0')[0]).decode(errors='replace')
+        out += word
+        addr = (addr & ~3) + 4
+    return out.decode(errors='replace')
 
 
 def wait_for(qt, base, test, seconds, what):
@@ -72,16 +103,31 @@ def main():
     parser.add_argument('--qemu', type=Path, default=REPO / 'build/qemu/build/qemu-system-arm.exe')
     parser.add_argument('--elf', type=Path, default=REPO / 'build/os/b310e-os.elf')
     parser.add_argument('--image', type=Path, default=REPO / 'build/os/b310e-os.bin')
+    parser.add_argument('--app', type=Path, default=REPO / 'build/os/modules/stopwatch.app')
     parser.add_argument('--output', type=Path, default=REPO / 'build/os/test-boot')
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     base = symbol(args.elf, 'os_status')
+    card = out / 'card.img'
+    subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
+                    '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
+                    '--runtime', str(REPO / 'sdcard/.rockbox'),
+                    '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--add', f'b310e-os/apps/stopwatch.app={args.app.resolve()}',
+                    '--output', str(card)], check=True, capture_output=True)
+    # No free count in FSINFO (as on the phone's card, whose first boot took
+    # 15 s counting): the OS must count in the background, not at boot.
+    image = bytearray(card.read_bytes())
+    fsinfo_at, _ = fsinfo_free(image)
+    image[fsinfo_at:fsinfo_at + 4] = bytes([0xff] * 4)
+    card.write_bytes(image)
 
     qmp_port, qtest_port = free_port(), free_port()
     command = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
                '-display', 'none', '-serial', 'none', '-monitor', 'none',
                '-drive', f'file={args.image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
+               '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
                '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
                '-qtest', f'tcp:127.0.0.1:{qtest_port},server=on,wait=off',
                '-global', 'sc6530_adi.watchdog=on',
@@ -103,51 +149,127 @@ def main():
                     time.sleep(0.1)
             assert qmp and qt, 'QEMU did not start'
 
-            s = wait_for(qt, base, lambda s: s['magic'] == MAGIC, 10, 'OS never started')
-            s = wait_for(qt, base, lambda s: s['selftest_done'] == 0x1f, 30, 'self-test incomplete')
+            def screen():
+                s = status(qt, base)
+                return string(qt, s['ui_title']), s
+
+            def shot(name):
+                qmp.command('screendump', {'filename': str(out / f'{name}.png'), 'format': 'png'})
+
+            def press(key, title, hold=100, seconds=6):
+                qmp.hmp(f'sendkey {key} {hold}')
+                end = time.monotonic() + seconds
+                while time.monotonic() < end:
+                    t, s = screen()
+                    if t == title:
+                        time.sleep(0.4)         # let it draw
+                        return s
+                    time.sleep(0.1)
+                raise AssertionError(f'after {key}: screen {screen()[0]!r}, wanted {title!r}')
+
+            wait_for(qt, base, lambda s: s['magic'] == MAGIC, 10, 'OS never started')
+            s = wait_for(qt, base, lambda s: s['selftest_done'] == ST_ALL, 60, 'self-test incomplete')
+            result.update({k: s[k] for k in ('pi_wait_ms', 'sd_code', 'fs_mounted',
+                                             'fs_free_kib', 'fs_write_kib_per_s',
+                                             'fs_read_kib_per_s')})
             result['selftest_pass'] = hex(s['selftest_pass'])
-            result['pi_wait_ms'] = s['pi_wait_ms']
-            result['sem_rounds_per_s'] = s['sem_rounds_per_s']
-            assert s['selftest_pass'] == 0x1f, f'self-test failed: {s}'
+            assert s['fs_mounted'] == 1, f'card not mounted: {s}'
+            assert s['selftest_pass'] == ST_ALL, f'self-test failed: {s}'
 
-            s1 = wait_for(qt, base, lambda s: s['ticks'] > 0, 5, 'status thread silent')
-            time.sleep(2.5)
-            s2 = status(qt, base)
-            result['ticks_per_s'] = round((s2['ticks'] - s1['ticks']) / 2.5)
-            result['idle_permille'] = s2['idle_permille']
-            assert s2['ticks'] > s1['ticks'], 'tick stopped'
-            assert s2['idle_permille'] > 800, f'not idle: {s2}'
-            qmp.command('screendump', {'filename': str(out / 'boot.png'), 'format': 'png'})
-
-            keys0 = s2['keys']
-            for key, code in (('5', 0x35), ('ret', 0x0d), ('up', 0x04)):
-                qmp.hmp(f'sendkey {key} 100')
-                s = wait_for(qt, base, lambda s, k=keys0 + 2: s['keys'] >= k, 5,
-                             f'key {key} not seen')
-                assert s['last_key'] & 0xff == code, (key, hex(s['last_key']))
-                keys0 = s['keys']
-            result['keys'] = keys0
-
-            # '5' turned the background load on: idle must drop, the UI stay live
-            time.sleep(2.5)
+            s = wait_for(qt, base, lambda s: s['ui_depth'] == 1, 10, 'no UI')
+            assert screen()[0] == 'B310E OS'
+            s = wait_for(qt, base, lambda s: s['fs_count_ms'], 20, 'free space never counted')
+            result['fs_count_ms'] = s['fs_count_ms'] - 1
+            result['fs_free_kib'] = s['fs_free_kib']
+            assert s['fs_free_kib'] > 0, s
+            time.sleep(3)
             s = status(qt, base)
-            result['idle_permille_loaded'] = s['idle_permille']
-            result['worker_loops'] = s['worker_loops']
-            assert s['worker_loops'] > 0 and s['idle_permille'] < 100, s
-            qmp.command('screendump', {'filename': str(out / 'keys.png'), 'format': 'png'})
+            result['idle_permille'] = s['idle_permille']
+            result['battery_mv'] = s['battery_mv']
+            assert s['idle_permille'] > 800, f'not idle: {s}'
+            s = wait_for(qt, base, lambda s: s['cpu_mhz'] == 104, 5, 'not 104 MHz at rest')
+            result['mhz_at_rest'] = s['cpu_mhz']
+            shot('home')
 
-            # hold END: reboot (QEMU's tick runs slower than real time on
-            # Windows, so hold well past the OS's 2 s)
-            qmp.hmp('sendkey esc 4000')
-            time.sleep(6)
-            text = (out / 'qemu.log').read_text(errors='replace')
-            result['rebooted'] = 'watchdog expired' in text
-            assert result['rebooted'], 'no watchdog reboot after holding END'
-            s = wait_for(qt, base, lambda s: s['magic'] == MAGIC and s['ticks'] < 3000,
-                         10, 'OS did not come back after the reboot')
-            result['stray_irqs'] = s['stray_irqs']
-            qmp.command('quit')
-            process.wait(timeout=10)
+            s = press('ret', 'Menu')
+            assert s['ui_list_count'] == len(MENU), s
+            shot('menu')
+            s = press('ret', 'Apps')
+            assert s['ui_list_count'] == 1, f'apps listed: {s}'
+            shot('apps')
+            time.sleep(1.2)                  # heap_free is published each second
+            heap_before = status(qt, base)['heap_free']
+            s = press('ret', 'Stopwatch')
+            assert s['apps_loaded'] == 1, s
+            press('ret', 'Stopwatch')        # start
+            time.sleep(1.5)
+            press('f1', 'Stopwatch')         # lap
+            time.sleep(0.5)
+            shot('stopwatch')
+            press('f2', 'Apps')              # close: the app is freed
+            wait_for(qt, base, lambda s: s['apps_loaded'] == 0, 5, 'app not freed')
+            time.sleep(1.2)
+            result['app_heap_leak'] = heap_before - status(qt, base)['heap_free']
+            assert result['app_heap_leak'] == 0, result
+            press('f2', 'Menu')
+            press('down', 'Menu')
+            s = press('ret', '/')
+            result['files_root'] = s['ui_list_count']
+            assert s['ui_list_count'] > 0, 'empty card listing'
+            shot('files')
+            press('f2', 'Menu')
+            for _ in range(MENU.index('System') - MENU.index('Files')):
+                press('down', 'Menu')
+            press('ret', 'System')
+            time.sleep(1.2)
+            shot('system')
+            press('f2', 'Menu')
+            press('down', 'Menu')
+            press('ret', 'Settings')
+            press('ret', 'Settings')         # brightness 60 -> 80, saved
+            press('down', 'Settings')
+            for _ in range(4):               # timeout 30 -> 60 -> 120 -> never -> 15
+                press('ret', 'Settings')
+            shot('settings')
+            s = press('esc', 'B310E OS')     # END: home
+            assert s['ui_depth'] == 1, s
+            # 15 s to dim, 10 s more to dark (QEMU runs ~0.7x real time)
+            wait_for(qt, base, lambda s: s['ui_light'] == 1, 40, 'never dimmed')
+            wait_for(qt, base, lambda s: s['ui_light'] == 2, 30, 'never went dark')
+            time.sleep(0.5)
+            led = qt.read(0x82001220)        # stock: bit 5 off, bit 6 on
+            result['led_dark'] = hex(led)
+            assert led & 0x60 == 0x20, f'backlight not switched off: {led:#x}'
+            result['went_dark'] = True
+            s = wait_for(qt, base, lambda s: s['cpu_mhz'] == 26, 5, 'not 26 MHz while dark')
+            result['mhz_dark'] = s['cpu_mhz']
+            time.sleep(2.5)                  # a full second counted while dark
+            result['idle_dark'] = status(qt, base)['idle_permille']
+            assert result['idle_dark'] > 900, f'not idle while dark: {result}'
+            qmp.hmp('sendkey down 100')      # only wakes
+            wait_for(qt, base, lambda s: s['ui_light'] == 0, 5, 'no wake')
+            time.sleep(0.5)
+            led = qt.read(0x82001220)
+            result['led_woken'] = hex(led)
+            result['mhz_woken'] = status(qt, base)['cpu_mhz']
+            assert result['mhz_woken'] >= 104, result
+            assert led & 0x60 == 0x40, f'backlight not back on: {led:#x}'
+            assert screen()[0] == 'B310E OS' and status(qt, base)['ui_depth'] == 1
+            shot('woken')
+            press('ret', 'Menu')
+            for _ in range(MENU.index('Power')):
+                press('down', 'Menu')
+            press('ret', 'Power')
+            press('ret', 'Power off')        # the confirmation
+            shot('confirm')
+            result['stray_irqs'] = status(qt, base)['stray_irqs']
+            qmp.hmp('sendkey f1 100')        # Yes
+            try:
+                process.wait(timeout=15)
+                result['powered_off'] = True
+            except subprocess.TimeoutExpired:
+                result['powered_off'] = False
+            assert result['powered_off'], 'no power-off after Power off -> Yes'
         except Exception:
             print(json.dumps(result, indent=2))
             raise
@@ -159,6 +281,24 @@ def main():
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
+
+    image = card.read_bytes()
+    result['selftest_file'] = FS_PATTERN in image
+    result['fsinfo_free_clusters'] = fsinfo_free(image)[1]
+    result['settings_saved'] = b'brightness=80\nscreen_timeout=15\n' in image
+    log_at = image.find(b'lcd: transfer spacing')      # the first line,
+    log_at = log_at // 512 * 512 if log_at >= 0 else -1  # at a sector start
+    end = image.find(b'\0', log_at) if log_at >= 0 else -1
+    log_text = image[log_at:end].decode(errors='replace') if log_at >= 0 else ''
+    result['card_log'] = log_text.splitlines()[:10]
+    (out / 'card-log.txt').write_text(log_text)
+    assert result['selftest_file'], 'self-test file not on the card image'
+    assert result['fsinfo_free_clusters'] != 0xffffffff, 'free count not written back to FSINFO'
+    assert result['settings_saved'], 'brightness setting not saved'
+    assert 'self-test card ok' in log_text and 'power off' in log_text, log_text
+    assert 'boot: B310E OS built' in log_text and 'counted in' in log_text, log_text
+    assert 'app: Stopwatch loaded' in log_text and 'stopwatch: started' in log_text, log_text
+    assert 'app: Stopwatch closed' in log_text, log_text
     (out / 'result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2))
 

@@ -39,6 +39,35 @@ void arch_reboot(void)
         arch_wait_for_irq();
 }
 
+/* Cut the supplies (stock 0x1a448: SET1 = 0x1f, then SET0 = 0x3fff; the
+ * last store removes the CPU and RAM supplies). The LEDs and vibrator
+ * live in the analog die, which runs from the battery and keeps its
+ * state: turn them off first, or the keypad light stays lit (found with
+ * Rockbox). Callers flush the filesystem before. */
+#define LDO_PD_SET0  0x82001180u
+#define LDO_PD_SET1  0x82001184u
+
+void arch_power_off(void)
+{
+    uint32_t n = 1000000;
+
+    keylight_set(false);
+    backlight_set(0);
+    vibrator_set(0);
+    torch_set(false);
+    arch_irq_save();
+    REG32(INTC_DISABLE) = 0xffffffffu;
+    if (!adi_write(LDO_PD_SET1, 0x1f))
+        arch_reboot();
+    while ((REG32(0x82000020) & (1u << 9)) && --n)
+        ;
+    if (!n)
+        arch_reboot();
+    REG32(LDO_PD_SET0) = 0x3fff;
+    for (;;)
+        arch_wait_for_irq();
+}
+
 /* Undefined instruction, aborts, FIQ: show the registers and stop. */
 void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
 {

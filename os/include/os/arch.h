@@ -40,6 +40,8 @@ void irq_enable_line(unsigned line);
 void irq_disable_line(unsigned line);
 void irq_dispatch(void);            /* called from the IRQ vector */
 extern volatile uint32_t irq_stray_count;
+extern volatile uint32_t irq_count;
+extern volatile uint32_t irq_line_count[32];
 
 /* ---- CPU (arch/sc6530c/cpu.S) ------------------------------------------ */
 uint32_t arch_irq_save(void);       /* masks IRQ, returns the old CPSR */
@@ -55,7 +57,16 @@ void dcache_flush_range(void *addr, size_t len);   /* clean + invalidate */
 void dcache_clean_all(void);
 void icache_invalidate_all(void);
 
-void udelay(unsigned us);
+void udelay(unsigned us);           /* busy wait, scaled to the CPU clock */
+
+/* CPU clock (arch/sc6530c/clock.c): level 0 26 MHz, 1 104 MHz, 2 208 MHz */
+#define CLOCK_LEVELS 3
+void clock_init(void);
+bool clock_scalable(void);          /* false: unknown boot clock, left alone */
+int clock_level(void);
+int clock_mhz(void);
+int clock_level_mhz(int level);
+void clock_set_level(int level);
 
 /* ---- analog die through the ADI mailbox (arch/sc6530c/adi.c) ----------- */
 uint32_t adi_read(uint32_t addr);
@@ -65,12 +76,14 @@ bool adi_write(uint32_t addr, uint32_t value);
 #define TIMER_HZ 26000000u
 void timer_init(unsigned hz, void (*tick)(void));
 uint32_t timer_count(void);         /* the tick's 26 MHz down-counter */
+uint32_t timer_cycles(void);        /* 26 MHz cycles since start (irqs off) */
 uint32_t timer_load(void);          /* its reload value */
 uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
 
 /* ---- power (arch/sc6530c/power.c) -------------------------------------- */
 void watchdog_stop(void);
 void arch_reboot(void) __attribute__((noreturn));
+void arch_power_off(void) __attribute__((noreturn));
 
 #endif /* __ASSEMBLER__ */
 #endif

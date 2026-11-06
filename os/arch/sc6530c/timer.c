@@ -16,11 +16,13 @@
 
 static void (*tick_fn)(void);
 static uint32_t load;
+static volatile uint32_t periods;       /* timer periods since timer_init */
 
 static void timer2_isr(void)
 {
     if (REG32(T2_INT) & 4)
         REG32(T2_INT) = 9;
+    periods++;
     tick_fn();
 }
 
@@ -46,6 +48,24 @@ void timer_init(unsigned hz, void (*tick)(void))
 uint32_t timer_count(void)
 {
     return REG32(T2_COUNT);
+}
+
+/* 26 MHz cycles since timer_init (wraps after 165 s; use differences).
+ * Interrupts off. A period that ended but whose interrupt has not run yet
+ * (bit 2 pending) is counted, so the value never steps back. Until
+ * 2026-11-07 the kernel measured time as the countdown's difference
+ * modulo one period, which lost every whole period the idle thread slept
+ * through: the phone showed 10% load and 17000 timer interrupts a second
+ * at rest. */
+uint32_t timer_cycles(void)
+{
+    uint32_t p = periods, c = REG32(T2_COUNT);
+
+    if (REG32(T2_INT) & 4) {
+        c = REG32(T2_COUNT);
+        p++;
+    }
+    return p * load + (load - c);
 }
 
 uint32_t timer_load(void)

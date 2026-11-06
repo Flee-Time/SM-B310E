@@ -12,6 +12,8 @@
 
 static void (*handlers[32])(void);
 volatile uint32_t irq_stray_count;
+volatile uint32_t irq_count;            /* handled interrupts (statistics) */
+volatile uint32_t irq_line_count[32];   /* the same per line */
 
 void irq_register(unsigned line, void (*handler)(void))
 {
@@ -39,6 +41,8 @@ void irq_dispatch(void)
         unsigned line = 31 - __builtin_clz(pending);
 
         if (handlers[line]) {
+            irq_count++;
+            irq_line_count[line]++;
             handlers[line]();
         } else {
             REG32(INTC_DISABLE) = 1u << line;

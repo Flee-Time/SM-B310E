@@ -93,3 +93,13 @@ char *strncpy(char *dst, const char *src, size_t n)
         dst[i] = 0;
     return dst;
 }
+
+char *strchr(const char *s, int c)
+{
+    for (;; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+        if (!*s)
+            return NULL;
+    }
+}

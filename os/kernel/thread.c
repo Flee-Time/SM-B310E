@@ -31,7 +31,7 @@ static bool running;
 static bool need_resched;
 static bool rotate;                 /* yield: move the running thread on */
 static unsigned slice_left;
-static uint32_t acct_mark;          /* timer count at the last accounting */
+static uint32_t acct_mark;          /* timer_cycles() at the last accounting */
 static uint32_t idle_window_cycles, idle_permille;
 
 #define SLICE_TICKS 10
@@ -196,11 +196,13 @@ void k_set_prio(thread_t *t, int prio)
 
 static void account(void)
 {
-    uint32_t now = timer_count(), load = timer_load();
-    uint32_t d = acct_mark >= now ? acct_mark - now : acct_mark + load - now;
+    uint32_t now = timer_cycles();
+    int32_t d = (int32_t)(now - acct_mark);
 
-    kernel_current->cycles += d;
-    total_cycles += d;
+    if (d <= 0)                         /* never count backwards */
+        return;
+    kernel_current->cycles += (uint32_t)d;
+    total_cycles += (uint32_t)d;
     acct_mark = now;
 }
 
@@ -241,6 +243,17 @@ void kernel_tick(void)
             ready[cur->prio] = cur->next;
             need_resched = true;
         }
+    }
+
+    if (ticks % 50 == 0) {           /* the clock governor's window */
+        static uint32_t win_idle, win_total;
+        uint32_t idle = idle_thread->cycles - win_idle;
+        uint32_t all = total_cycles - win_total;
+
+        win_idle = idle_thread->cycles;
+        win_total = total_cycles;
+        if (all >= 1000)
+            cpufreq_window(idle >= all ? 0 : 1000 - idle / (all / 1000));
     }
 
     if (ticks % 1000 == 0) {         /* idle share of the cycles counted */
@@ -406,6 +419,6 @@ void kernel_start(void)
     running = true;
     kernel_current = ready[highest_ready()];
     slice_left = SLICE_TICKS;
-    acct_mark = timer_count();
+    acct_mark = timer_cycles();
     arch_start_first();
 }

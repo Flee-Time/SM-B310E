@@ -122,4 +122,12 @@ void kernel_reschedule(void);   /* svc and irq exit, interrupts off */
 void kernel_irq_exit(void);
 void kernel_tick(void);
 
+/* CPU clock governor (kernel/cpufreq.c) */
+enum { CPUFREQ_AUTO, CPUFREQ_MAX };
+void cpufreq_set_mode(int mode);
+void cpufreq_hold(void);            /* at least 104 MHz until released */
+void cpufreq_release(void);
+void cpufreq_allow_low(bool on);    /* 26 MHz allowed (the panel asleep) */
+void cpufreq_window(uint32_t busy_permille);   /* the tick, every 50 ms */
+
 #endif

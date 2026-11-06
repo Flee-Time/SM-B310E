@@ -297,13 +297,17 @@ icache_invalidate_all:
     mcr     p15, 0, r0, c7, c5, 0
     bx      lr
 
-/* About 1 us per 64 iterations at 208 MHz with the I-cache on (4 cycles a
- * loop); slower is harmless for the panel delays that use it. */
+/* 4 cycles a loop with the I-cache on: 2^udelay_shift loops per us, set
+ * by clock.c for the CPU clock (64 at 208 MHz, a little slow on purpose;
+ * slower is harmless for the delays that use it). */
     .global udelay
     .type   udelay, %function
 udelay:
-    lsls    r0, r0, #6
+    ldr     r1, =udelay_shift
+    ldr     r1, [r1]
+    movs    r0, r0, lsl r1
     bxeq    lr
 1:  subs    r0, r0, #1
     bne     1b
     bx      lr
+    .ltorg

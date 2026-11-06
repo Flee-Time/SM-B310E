@@ -5,8 +5,12 @@
  * (Unlicense):
  *   LCM  0x20800000: command/data window at 0x60000000 (CS0)
  *   LCDC 0x20d00000: DMA from the frame buffer to the panel
- * The frame buffer is FRAME_ADDR, cached; lcd_update() cleans it from the
- * D-cache before the transfer. Every wait is bounded.
+ * Drawing goes to a back buffer (lcd_fb); lcd_update() copies it to
+ * FRAME_ADDR, the LCDC's source, cleans that from the D-cache and starts
+ * the transfer. Drawing straight into FRAME showed dark horizontal lines
+ * on the phone (2026-11-07, the stopwatch at 10 Hz): the LCDC read half
+ * redrawn lines (background filled, text not yet), as Rockbox avoids by
+ * the same copy. Every wait is bounded.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -20,6 +24,7 @@
 #define LCM_WIN_CS0   0x60000000u
 #define LCD_RST_REG   0x8b000224u
 #define AHB_PWR_ON    0x20500060u
+#define AHB_PWR_OFF   0x20500070u
 #define AHB_RST_SET   0x20500020u
 #define AHB_RST_CLR   0x20500030u
 #define B310E_MADCTL  0x10u          /* the BOE panel's mount orientation */
@@ -137,6 +142,8 @@ static const panel_t panels[] = {
 };
 
 static uint32_t panel_id;
+static uint32_t transfer_ms = 16;       /* a full frame, with margin (lcm_set_freq) */
+static uint32_t measured_us;            /* the done flag after one frame, 0 unknown */
 
 static void lcm_wait_idle(void)
 {
@@ -205,6 +212,11 @@ static void lcm_set_freq(uint32_t clk, const panel_t *p)
 #undef CYC
     lcm_wait_idle();
     LCM_CR(0x14) = sum;
+    /* t2 bus clocks per write, two writes a pixel: the BOE panel's 150 ns
+     * timing gives 27 clocks at 104 MHz, 10.6 ms a frame. A quarter more
+     * and a millisecond for the start. */
+    transfer_ms = (uint32_t)t2 * 2u * LCD_WIDTH * LCD_HEIGHT / clk / 1000u;
+    transfer_ms += transfer_ms / 4 + 2;
 }
 
 static void lcm_exec(const uint8_t *p)
@@ -277,6 +289,7 @@ void lcd_init(void)
     unsigned i;
 
     memset(lcd_fb, 0, LCD_WIDTH * LCD_HEIGHT * 2);
+    memset((void *)FRAME_ADDR, 0, LCD_WIDTH * LCD_HEIGHT * 2);
 
     REG32(AHB_PWR_ON) = 0x40;            /* LCM clock */
     LCM_CR(0) = 0;
@@ -309,18 +322,29 @@ void lcd_init(void)
     lcd_update();
 }
 
-/* Start one transfer of the frame and return. The panel takes about 6 ms;
- * a new transfer waits (sleeping) until the previous one has had 8 ms,
- * so two never overlap. Polling for the LCDC's done flag instead cost
- * up to half the CPU (it does not report reliably, as Rockbox found). */
-#define TRANSFER_MS 8
+/* Copy the back buffer to the frame, start one transfer and return. A new
+ * copy and transfer wait (sleeping) until the previous one has had
+ * transfer_ms, computed from the bus timing (14 ms for the BOE panel), so
+ * the copy never overwrites a frame being sent and a kick is never lost
+ * in a running transfer. Until 2026-11-07 the spacing was 8, then 10 ms
+ * against a 10.6 ms frame: the phone showed half-drawn frames and screens
+ * that lagged until the next redraw. Polling the LCDC's done flag instead
+ * cost up to half the CPU (Rockbox found it unreliable); lcd_measure()
+ * only times it once for the log. */
+#define TRANSFER_MS transfer_ms
+
+uint16_t lcd_back[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(32)));
+
+static bool asleep;
+static uint32_t last_kick;
+static bool kicked;
 
 void lcd_update(void)
 {
-    static uint32_t last_kick;
-    static bool kicked;
     lcdc_t *lc = LCDC;
 
+    if (asleep)
+        return;
     if (kicked) {
         uint32_t since = kernel_ticks() - last_kick;
 
@@ -331,9 +355,98 @@ void lcd_update(void)
                 udelay((TRANSFER_MS - since) * 1000);
         }
     }
-    dcache_clean_range(lcd_fb, LCD_WIDTH * LCD_HEIGHT * 2);
+    memcpy((void *)FRAME_ADDR, lcd_back, sizeof(lcd_back));
+    dcache_clean_range((void *)FRAME_ADDR, sizeof(lcd_back));
     lc->irq.clr |= 1;
     lc->ctrl |= 8;
     last_kick = kernel_ticks();
     kicked = true;
+}
+
+/* Panel sleep, as Rockbox does it on the phone (docs/rockbox-power.md):
+ * let the last transfer finish, stop the LCDC, switch the DBI to command
+ * mode, display off (0x28), sleep in (0x10), then gate the LCDC's AHB
+ * clock (stock 0x27d54..60). The panel keeps its settings; wake sends
+ * sleep out (0x11), waits the panel's 120 ms, display on (0x29), restores
+ * the window and RAMWR and hands the bus back to the LCDC. The LED is the
+ * caller's (backlight_set). Called from a thread: both sleep. */
+#define PANEL_SETTLE_MS 121
+
+void lcd_sleep(void)
+{
+    lcdc_t *lc = LCDC;
+
+    if (asleep)
+        return;
+    asleep = true;
+    thread_sleep(TRANSFER_MS + 12);
+    lc->ctrl &= ~(1u | 8u);
+    lc->irq.en &= ~1u;
+    lc->irq.clr = 1;
+    lcm_set_mode(1);
+    lcm_send(0, 0x28);
+    lcm_send(0, 0x10);
+    thread_sleep(PANEL_SETTLE_MS);
+    REG32(AHB_PWR_OFF) = 0x1000;
+    cpufreq_allow_low(true);
+}
+
+void lcd_wake(void)
+{
+    if (!asleep)
+        return;
+    cpufreq_allow_low(false);           /* back to the AHB the timing assumes */
+    REG32(AHB_PWR_ON) = 0x1000;
+    lcm_set_mode(1);
+    lcm_send(0, 0x11);
+    thread_sleep(PANEL_SETTLE_MS);
+    lcm_send(0, 0x29);
+    lcm_exec(init_window);              /* a command ends RAMWR */
+    lcm_set_mode(0x28);
+    LCDC->ctrl |= 1;
+    asleep = false;
+    kicked = false;
+    lcd_update();
+}
+
+bool lcd_asleep(void)
+{
+    return asleep;
+}
+
+/* Time one full transfer by the LCDC's done flag (interrupt enabled in
+ * the LCDC only, not in the INTC) for the boot log: microseconds, or 0
+ * when the flag did not come within 50 ms. Call from a thread. */
+uint32_t lcd_measure(void)
+{
+    lcdc_t *lc = LCDC;
+    uint32_t s, start, us = 0;
+
+    if (asleep)
+        return 0;
+    lcd_update();                       /* waits out the previous transfer */
+    thread_sleep(TRANSFER_MS + 2);
+    s = arch_irq_save();
+    lc->irq.en |= 1;
+    lc->irq.clr |= 1;
+    start = timer_cycles();
+    lc->ctrl |= 8;
+    while (timer_cycles() - start < 50u * 26000u) {
+        if (lc->irq.raw & 1) {
+            us = (timer_cycles() - start) / 26u;
+            break;
+        }
+    }
+    lc->irq.clr |= 1;
+    lc->irq.en &= ~1u;
+    arch_irq_restore(s);
+    last_kick = kernel_ticks();
+    kicked = true;
+    measured_us = us;
+    return us;
+}
+
+uint32_t lcd_transfer_ms(void)
+{
+    return transfer_ms;
 }

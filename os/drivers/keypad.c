@@ -5,14 +5,18 @@
  * row/column of each is in key_status, one byte per edge slot. Ported
  * from the Rockbox port's button-sc6530c.c (verified on the phone) and
  * fpdoom (Unlicense). END is not in the matrix: it is a level on analog
- * EIC channel 3, polled every 20 ms by a small thread.
+ * EIC channel 3, polled every 20 ms by a small thread, which also polls
+ * the headset (EIC channel 4, the in-line button comparator, and the jack;
+ * drivers/audio.c classifies the buttons) and posts KEY_HS_* events.
  *
  * Events go to a queue; keypad_get() takes them.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
+#include "os/audio.h"
 #include "os/drivers.h"
+#include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
 
@@ -21,6 +25,8 @@
 #define EIC_DATA    0x82001900u
 #define EIC_DMSK    0x82001904u
 #define EIC_END     3
+#define EIC_HOOK    4                   /* headset button, stock EIC 20 */
+#define END_FAILSAFE_MS 8000
 
 typedef volatile struct {
     uint32_t ctrl, int_en, int_raw, int_mask;
@@ -48,7 +54,8 @@ static void post(uint8_t code, bool down)
 {
     key_event_t ev = { code, down, kernel_ticks() };
 
-    queue_send_isr(&events, &ev);
+    if (events.buf)
+        queue_send_isr(&events, &ev);
 }
 
 static void keypad_isr(void)
@@ -71,17 +78,51 @@ static void keypad_isr(void)
     }
 }
 
+void keypad_pause(void)
+{
+    KPD->ctrl &= ~1u;
+}
+
+void keypad_resume(void)
+{
+    uint32_t s = arch_irq_save();
+
+    keypad_isr();                       /* collect, acknowledge */
+    KPD->ctrl |= 1u;
+    arch_irq_restore(s);
+}
+
 static void end_key_main(void *arg)
 {
+    static const struct { unsigned bit; uint8_t code; } hs[] = {
+        { AUDIO_HS_CENTER, KEY_HS_CENTER }, { AUDIO_HS_PLUS, KEY_HS_PLUS },
+        { AUDIO_HS_MINUS, KEY_HS_MINUS },
+    };
     bool was = false;
+    unsigned hs_was = 0;
+    uint32_t end_since = 0;
 
     for (;;) {
-        bool now = (adi_read(EIC_DATA) >> EIC_END) & 1;
+        uint32_t eic = adi_read(EIC_DATA), t = kernel_ticks();
+        bool now = (eic >> EIC_END) & 1;
+        unsigned held = audio_headset_tick((eic >> EIC_HOOK) & 1, t);
 
         if (now != was) {
             was = now;
+            end_since = t;
             post(KEY_END, now);
         }
+        /* The UI powers off after 2 s of END. If it has not after 8 s, it
+         * is stuck (an FM seek once blocked it for minutes): power off from
+         * here, without touching the card. */
+        if (now && t - end_since >= END_FAILSAFE_MS) {
+            klog("END held %u s: the UI did not respond, power off", END_FAILSAFE_MS / 1000);
+            arch_power_off();
+        }
+        for (unsigned i = 0; i < ARRAY_SIZE(hs); i++)
+            if ((held ^ hs_was) & hs[i].bit)
+                post(hs[i].code, (held & hs[i].bit) != 0);
+        hs_was = held;
         thread_sleep(20);
     }
 }
@@ -114,7 +155,7 @@ void keypad_init(void)
 
     adi_write(0x820010e4, 0x20);         /* EIC clocks, END channel */
     adi_write(0x820010e0, 0x80);
-    adi_write(EIC_DMSK, adi_read(EIC_DMSK) | 1u << EIC_END);
+    adi_write(EIC_DMSK, adi_read(EIC_DMSK) | 1u << EIC_END | 1u << EIC_HOOK);
 
     irq_register(IRQ_KEYPAD, keypad_isr);
     irq_enable_line(IRQ_KEYPAD);
@@ -135,7 +176,8 @@ const char *keypad_name(uint8_t code)
         { KEY_CENTER, "Center" }, { KEY_HASH, "#" }, { KEY_STAR, "*" },
         { KEY_0, "0" }, { KEY_1, "1" }, { KEY_2, "2" }, { KEY_3, "3" },
         { KEY_4, "4" }, { KEY_5, "5" }, { KEY_6, "6" }, { KEY_7, "7" },
-        { KEY_8, "8" }, { KEY_9, "9" },
+        { KEY_8, "8" }, { KEY_9, "9" }, { KEY_HS_CENTER, "Headset" },
+        { KEY_HS_PLUS, "Headset +" }, { KEY_HS_MINUS, "Headset -" },
     };
 
     for (unsigned i = 0; i < ARRAY_SIZE(names); i++)

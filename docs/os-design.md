@@ -91,12 +91,29 @@ contained in `kernel/`.
 
 ## Modules
 
-- **Format:** position-dependent ELF linked at a fixed virtual base and
-  relocated at load time (as `tools/pack_reloc` already does for test
-  images), with an import table resolved against the OS's exported
-  symbol table. Only the exported API is visible to modules.
-- **Apps** run as threads at app priority, have their own heap from the
-  page pool, and are unloaded on exit.
+*Built 2026-11-07 (milestone 3, in QEMU).*
+
+- **Format** (`os/include/os/app.h`): a `.app` file is a 48-byte header
+  (magic, API version, sizes, CRC-32, name), the image linked at address
+  0 (`os/sdk/app.ld`, with `app_info` first) and a list of word offsets
+  to relocate. `os/sdk/mkapp.py` makes it from the ELF linked with `-q`:
+  it keeps only R_ARM_ABS32 against image symbols (PC-relative types stay
+  valid anywhere) and refuses anything else, so a module cannot need an
+  import table.
+- **API:** apps call nothing in the OS directly. `start()` gets a
+  versioned table of function pointers (`os_api_t`: C library, memory,
+  time, log, battery, drawing, screens and widgets, FatFs). Minor versions
+  only append; the SDK header (`os/sdk/app.h`) maps the usual names to the
+  table, so app code reads like OS code.
+- **Apps** run in the UI thread as screens, not as threads: `start()`
+  returns the first screen, and every callback runs with the app marked
+  current. Screens it pushes and memory from `api->malloc` belong to it;
+  when its last screen leaves the stack, `stop()` runs and the app and
+  its memory are freed (the unload waits for the UI loop, never inside the
+  app's own code). Threads for apps come with the first app that needs
+  one.
+- **Card:** `/b310e-os/apps/*.app`, listed under Menu → Apps by the name
+  in the header. The first one is a stopwatch (`os/modules/stopwatch`).
 - **Drivers and services** are linked into the OS image at first; the
   same format can load optional ones later.
 - **Isolation:** none at first (single address space). The MMU could give
@@ -173,8 +190,17 @@ license either way.
    tick and four status redraws a second), 0.0% with the load thread on.
    The tick is still periodic; tickless comes with power work.*
 2. **Storage and logging:** SD driver, FAT (FatFs, BSD-style license),
-   card log, power-off.
+   card log, power-off. *Verified on the phone 2026-11-07 (15 GB FAT32
+   card: self-test, Files, clock, battery, colours, power-off). The first
+   boot sat 15 s in the free-space count (the card's FSINFO had none, and
+   FatFs read the FAT one ~1 ms sector at a time); the FAT is now read
+   ahead 32 sectors at a time and the count runs after boot.* A first UI
+   came with it (home, menu, files, system, settings, power; `os/ui`,
+   `os/apps`), ahead of milestone 7.
 3. **Modules:** loader, exported API, a first app loaded from the card.
+   *Verified on the phone 2026-11-07 (the stopwatch).* CPU clock scaling
+   (208/104/26 MHz by load, 26 MHz only with the panel asleep) came next:
+   *runs on the phone (2026-11-07): 1.3% load at rest, 0.2% dark.*
 4. **Layer-1 power scan:** DSP boot from the NOR blob, layer-1 start-up,
    signal levels per channel on screen. Receive only.
 5. **USB:** mass storage and CDC-ACM (L1CTL to a PC).
