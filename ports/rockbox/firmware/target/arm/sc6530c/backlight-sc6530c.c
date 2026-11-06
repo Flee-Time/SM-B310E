@@ -35,9 +35,11 @@
  *
  * TWO ANA channels, both dimmable:
  *   - 0x82001220  ANA_LED_CTRL — the REAL LCD backlight. fpdoom
- *     sys_brightness duty: bits 0-5 duty, bit 6 ON, and the 0x1100
- *     "flash off / pwr" invariant bits. The crt0 boot markers and os.bin
- *     both use this channel. 0..100 percent -> duty 1..32 (+ bit 6).
+ *     sys_brightness duty: bits 0-4 duty, bit 6 ON, and the 0x1100
+ *     "flash off / pwr" invariant bits. Bit 5 is OFF: the stock on/off
+ *     function (NOR 0x1a186) clears bits 5-6, then sets bit 6 (on) or
+ *     bit 5 (off). The crt0 boot markers and os.bin both use this
+ *     channel. 0..100 percent -> duty 1..32 (+ bit 6).
  *   - 0x82001224  ANA_KEYLIGHT — the 4-bit KEYPAD light. level (value-1)<<4
  *     in bits 4-7, bit 5 = ON, bit 4 = OFF. Driven as Rockbox's button
  *     light with its own timeout. The level field has no visible effect
@@ -54,7 +56,9 @@
 #define REG32(a) (*(volatile uint32_t *)(a))
 
 #define LED_ANA_LED_CTRL     0x82001220u   /* LCD backlight (fpdoom duty) */
-#define LED_BL_MASK          0x5fu         /* duty bits 0-5 + enable bit 6 */
+#define LED_BL_MASK          0x7fu         /* duty 0-4, OFF bit 5, ON bit 6 */
+#define LED_BL_OFF           0x20u
+#define LED_BL_ON            0x40u
 #define LED_FLASH_OFF        0x1100u       /* flash-off / pwr invariant   */
 
 #define LED_ANA_KEYLIGHT     0x82001224u   /* keypad light (4-bit)       */
@@ -94,9 +98,11 @@ static void adi_write(uint32_t addr, uint32_t val)
         if (--n == 0) return;
 }
 
-/* LCD backlight, 0..100 percent — led_backlight_set VERBATIM (fpdoom
- * sys_brightness, syscode.c:225-238): 0..100 -> duty 1..32 (+ bit 6 ON);
- * level 0 -> duty 0, ON clear = off. */
+/* LCD backlight, 0..100 percent: fpdoom sys_brightness's duty
+ * (syscode.c:225-238, 0..100 -> duty 1..32) with the stock on/off order
+ * (NOR 0x1a186): clear ON and OFF, then set ON, or OFF for level 0.
+ * fpdoom's off only cleared ON; with neither bit set the LED kept a faint
+ * glow on the phone (seen in the B310E OS, 2026-11-07). */
 static void backlight_set(int percent)
 {
     uint32_t tmp, v;
@@ -106,10 +112,11 @@ static void backlight_set(int percent)
 
     v = (uint32_t)((percent * 32 + 50) / 100);
     tmp = adi_read(LED_ANA_LED_CTRL) & ~(uint32_t)LED_BL_MASK;
+    tmp |= LED_FLASH_OFF;
     if (v)
-        v += 0x40u - 1u;                  /* bit 6 (ON) + duty (v-1) */
-    tmp |= LED_FLASH_OFF | v;
-    adi_write(LED_ANA_LED_CTRL, tmp);
+        tmp |= v - 1u;                    /* duty (v-1) */
+    adi_write(LED_ANA_LED_CTRL, tmp);     /* neither on nor off */
+    adi_write(LED_ANA_LED_CTRL, tmp | (v ? LED_BL_ON : LED_BL_OFF));
 }
 
 /* Keypad light, 0 = off, 1..15 = level (led_keylight_set verbatim logic).

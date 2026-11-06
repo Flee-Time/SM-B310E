@@ -8,7 +8,8 @@ The test holds END until Rockbox shuts down (the press also turns the
 button light on), waits for QEMU to exit on the LDO power-down write
 (ANA 0x82001180), and reads the ANA write trace: the last keypad-light
 write (0x82001224) before the power-down must clear the on bit (0x20),
-and the backlight (0x82001220) must have its enable bit (0x40) clear.
+and the backlight (0x82001220) must be switched off: on bit (0x40) clear
+and off bit (0x20) set, as the stock on/off function does (NOR 0x1a186).
 """
 import argparse
 import json
@@ -101,7 +102,7 @@ def main():
     result = {"keylight_last": hex(keylight[-1]), "keylight_was_on": hex(lit[-1]),
               "backlight_last": hex(backlight[-1]) if backlight else None}
     assert not keylight[-1] & 0x20, ("keypad light left on at power-off", result)
-    assert backlight and not backlight[-1] & 0x40, ("backlight left on at power-off", result)
+    assert backlight and backlight[-1] & 0x60 == 0x20, ("backlight left on at power-off", result)
     print("PASS " + json.dumps(result), flush=True)
     (out / "results.json").write_text(json.dumps(result, indent=2))
 

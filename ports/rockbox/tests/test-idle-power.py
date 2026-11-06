@@ -217,7 +217,8 @@ def main():
 
             def asleep():
                 s = state()
-                return not (s["lcdc"] & 1 or s["backlight"] & 0x40) and s["lcm_mode"] == 1
+                return (not s["lcdc"] & 1 and s["backlight"] & 0x60 == 0x20
+                        and s["lcm_mode"] == 1)
 
             def wait_for(condition, name, timeout=8):
                 deadline = time.monotonic() + timeout
@@ -250,7 +251,8 @@ def main():
 
             def awake():
                 s = state()
-                return s["lcdc"] & 1 and s["backlight"] & 0x40 and s["lcm_mode"] == 0x28
+                return (s["lcdc"] & 1 and s["backlight"] & 0x60 == 0x40
+                        and s["lcm_mode"] == 0x28)
 
             def idle(name, playing):
                 wait_for(asleep, name)

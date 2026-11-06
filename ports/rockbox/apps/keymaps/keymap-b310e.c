@@ -285,6 +285,12 @@ const struct button_mapping* get_context_mapping(int context)
 
         case CONTEXT_SETTINGS:
             return button_context_settings;
+        /* Set Time/Date: Up/Down change the field, Left/Right move between
+         * fields, Select sets, Back cancels. Without this the screen fell
+         * back to the standard map, which has no increment at all (and
+         * Right means OK): the time could not be changed (2026-11-07). */
+        case CONTEXT_SETTINGS_TIME:
+            return button_context_settings;
         case CONTEXT_CUSTOM|CONTEXT_SETTINGS:
             return button_context_settings_right_is_inc;
 

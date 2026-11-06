@@ -11,7 +11,8 @@ and reads the LCDC refresh trace (sc6530_lcdc_refresh, timestamped with
 -msg timestamp=on) and the LED writes (sc6530_ana_write to 0x82001220):
 - headset mic: <= 2.5 refreshes/s in seconds 1.5-4.5 of the recording,
   none in the quiet window (6 s until the key), one within 0.5 s of the
-  key, and the LED switched off (enable bit 0x40 clear) in between;
+  key, and the LED switched off (off bit 0x20 set, on bit 0x40 clear) in
+  between;
 - phone mic and FM: more than 3 refreshes/s in both windows.
 """
 import argparse
@@ -108,7 +109,7 @@ def run(args, name, config, qemu_args, quiet):
     early = count(t0 + 1.5, t0 + 4.5) / 3.0
     quiet_window = count(t0 + 6, t1)
     after_key = count(t1, t1 + 0.5)
-    led_off = any(t0 + 4 <= t < t1 and not v & 0x40 for t, v in led)
+    led_off = any(t0 + 4 <= t < t1 and v & 0x60 == 0x20 for t, v in led)
     result = {"case": name, "early_per_s": round(early, 2),
               "quiet_window_refreshes": quiet_window,
               "after_key_refreshes": after_key, "led_off_in_quiet": led_off}

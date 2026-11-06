@@ -52,9 +52,24 @@ RTC reads no longer poll raw-status bit0 at `0x82001634`: that is a latched
 second interrupt, while time-update acknowledgements occupy bits8–11.
 The old read path could burn its million-read budget on each clock/status
 refresh. Counter reads also protect the shared ADI mailbox against the
-button interrupt. The older calendar conversion and write protocol still
-need reconciliation with the stock day counter; this change does not
-claim working calendar setting or retention after battery removal.
+button interrupt.
+
+**Calendar (2026-11-07).** The date register at `0x8200160c` is a 16-bit
+day counter, day 0 = 1980-01-01 (a Tuesday), not packed day/month/year
+fields; the stock time manager (NOR `0x19594..0x19b9e`, base date at
+`0xc48b8`) counts from it and stops at 2099-12-31. New values go to
+`+0x10..+0x1c`; the RTC acknowledges each in raw status bits 8–11, cleared
+at `+0x38`. The set path follows stock RTC_SetTime (`0x35f9a`): clear old
+acknowledgements, clear the minute-interrupt enable (`+0x30` bit 1, which
+the old driver took for a latch), write the four values, wait up to 2 s
+for the acknowledgements, clear them, restore the enable. Decoded for the
+B310E OS (`os/drivers/rtc.c`); `rtc-sc6530c.c` now uses the same. The
+keymap also mapped no keys for the Set Time/Date screen
+(`CONTEXT_SETTINGS_TIME` fell back to the standard map, without increment
+or decrement): Up and Down now change a field, Left and Right move between
+fields, Select sets. `ports/rockbox/tests/test-rtc.py` presets the RTC
+model, raises the hour in that screen and checks the counters. Retention
+after battery removal is not claimed.
 
 ## Shutdown and USB charging
 
@@ -85,6 +100,14 @@ all three off before the LDO writes. `ports/rockbox/tests/test-poweroff.py`
 holds END in QEMU and checks the last keypad-light and backlight writes
 before the power-down leave both off. The build before the fix fails it
 (keypad light `0xe0`, backlight `0x1159` at power-off).
+
+**Backlight off bit (2026-11-07).** "Off" (from fpdoom) only cleared the
+on bit (0x40) of `0x82001220`. The B310E OS showed on the phone that this
+leaves a faint glow. The stock on/off function (NOR `0x1a186`) clears
+bits 5 and 6, then sets bit 6 to switch on or bit 5 (0x20) to switch off.
+`backlight_set()` now does the same, for the backlight timeout, the quiet
+display while recording and power-off. The power-off, idle-power and
+recording-display tests check for `value & 0x60 == 0x20` when off.
 
 The paused idle-timeout test also reproduced a filesystem panic before
 `power_off()`: `Updating size on empty dir entry 55`. FAT passes interior
