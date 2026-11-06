@@ -21,6 +21,7 @@
 #include "config.h"
 #include "cpu.h"
 #include "system.h"
+#include "kernel.h"
 #include "backlight-target.h"
 #include "backlight.h"
 #include "lcd.h"
@@ -154,6 +155,77 @@ bool backlight_hw_init(void)
     return true;
 }
 
+/* ---- quiet display during headset-mic recording -------------------------
+ * The headset mic picks up the LCD bus: clicks stopped on the phone only
+ * with the display off (2026-11-06). While recording from the headset
+ * mic, panel transfers are limited to 2 Hz, run at full rate for 0.5 s
+ * after any key, and stop after 5 s without keys, with the backlight LED
+ * off; a key brings both back. The panel keeps its last picture, so the
+ * frame is still copied to FRAME, only the transfer is skipped. Phone
+ * mic and FM recordings are left alone. */
+#define QUIET_REFRESH_TICKS  (HZ / 2)
+#define QUIET_KEY_TICKS      (HZ / 2)
+#define QUIET_AFTER_TICKS    (HZ * 5)
+static bool bl_rockbox_on = true;   /* Rockbox's backlight state */
+static bool bl_quiet;               /* LED off for a quiet recording */
+static long quiet_last_kick;
+static unsigned quiet_kicks, quiet_skipped, quiet_periods;
+
+static bool quiet_gated(void)
+{
+#ifdef HAVE_RECORDING
+    return sc6530_headset_mic_recording();
+#else
+    return false;
+#endif
+}
+
+void sc6530_display_quiet_tick(void)
+{
+    bool quiet = quiet_gated() &&
+                 TIME_AFTER(current_tick, sc6530_key_tick + QUIET_AFTER_TICKS);
+
+    if (quiet == bl_quiet)
+        return;
+    bl_quiet = quiet;
+    if (quiet)
+        quiet_periods++;
+    if (bl_rockbox_on)
+        backlight_set(quiet ? 0 :
+                      backlight_brightness * 100 / MAX_BRIGHTNESS_SETTING);
+}
+
+bool sc6530_lcd_kick_allowed(void)
+{
+    bool ok = true;
+
+    if (quiet_gated())
+    {
+        if (bl_quiet)
+            ok = false;
+        else if (TIME_BEFORE(current_tick, sc6530_key_tick + QUIET_KEY_TICKS))
+            ok = true;
+        else
+            ok = current_tick - quiet_last_kick >= QUIET_REFRESH_TICKS;
+    }
+    if (ok)
+    {
+        quiet_last_kick = current_tick;
+        quiet_kicks++;
+    }
+    else
+        quiet_skipped++;
+    return ok;
+}
+
+void sc6530_display_stats(unsigned *kicks, unsigned *skipped,
+                          unsigned *quiet_periods_out)
+{
+    *kicks = quiet_kicks;
+    *skipped = quiet_skipped;
+    *quiet_periods_out = quiet_periods;
+}
+
 void backlight_hw_on(void)
 {
     /* Restore the panel and current framebuffer before illuminating it. */
@@ -165,11 +237,14 @@ void backlight_hw_on(void)
      * re-apply never runs. Hardcoding DEFAULT here reverted the user's
      * brightness on every menu activity — apply the CURRENT setting
      * (backlight.h's extern, kept in sync by backlight_set_brightness). */
-    backlight_set(backlight_brightness * 100 / MAX_BRIGHTNESS_SETTING);
+    bl_rockbox_on = true;
+    if (!bl_quiet)
+        backlight_set(backlight_brightness * 100 / MAX_BRIGHTNESS_SETTING);
 }
 
 void backlight_hw_off(void)
 {
+    bl_rockbox_on = false;
     backlight_set(0);
 }
 

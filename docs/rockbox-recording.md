@@ -181,8 +181,21 @@ clicking stopped with the display off but not with only the backlight
 off. With `LCD_SLEEP_TIMEOUT 0` the panel sleeps when the backlight times
 out, which stops the LCD controller's DMA transfers to the panel. The
 recording screen redraws constantly (peak meters, time), and that bus
-traffic couples into the headset mic line. Workaround: a short backlight
-timeout during headset recordings. No DSP filtering is used.
+traffic couples into the headset mic line. No DSP filtering is used.
+
+**Quiet display while recording from the headset mic** (only then; phone
+mic and FM recordings are untouched). The LCD driver copies each frame
+to `FRAME` as usual, but the transfer to the panel (the LCDC kick) is
+gated by `sc6530_lcd_kick_allowed()` in `backlight-sc6530c.c`:
+- at most one panel refresh every 0.5 s (2 Hz);
+- full rate for 0.5 s after any key, so keys never feel laggy;
+- after 5 s without keys, no refreshes at all and the backlight LED off
+  (the panel keeps its last picture); a key brings both back.
+Rockbox's own backlight timeout still applies on top. The dump's `LCD`
+line counts kicks, skipped kicks and quiet periods.
+`ports/rockbox/tests/test-recording-display.py` measures the refresh
+rate from the timestamped `sc6530_lcdc_refresh` trace: 2.0/s and none
+while quiet for a headset-mic recording, ~18.7/s for phone-mic and FM.
 
 ## Sources: phone mic, headset mic, FM radio
 

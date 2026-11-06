@@ -318,14 +318,11 @@ static bool torch_dump(const char *what)
                            wr_max_ticks * 1000 / HZ) >= 0;
         }
         {
-            int16_t rmin, rmax, rhead[4];
+            unsigned kicks, skipped, quiet;
 
-            sc6530_rec_right_raw(&rmin, &rmax, rhead);
-            ok &= fdprintf(fd, "REC adcr_variant=%d banks=%u right_railed=%u "
-                           "r_min=%d r_max=%d r_head=%d,%d,%d,%d\n",
-                           sc6530_adcr_variant(), sc6530_rec_banks(),
-                           sc6530_rec_right_railed(), rmin, rmax,
-                           rhead[0], rhead[1], rhead[2], rhead[3]) >= 0;
+            sc6530_display_stats(&kicks, &skipped, &quiet);
+            ok &= fdprintf(fd, "LCD kicks=%u skipped=%u quiet_periods=%u\n",
+                           kicks, skipped, quiet) >= 0;
         }
         ok &= fdprintf(fd, "MIC path=%02x mic_adc_at_start=%d mic_adc_now=%d headphones=%d hook_eic4=%d eic=%04lx\n",
                        sc6530_rec_mic_path(), sc6530_headset_mic_raw(),

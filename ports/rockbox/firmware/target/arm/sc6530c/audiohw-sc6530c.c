@@ -716,6 +716,12 @@ int sc6530_headset_mic_raw(void)
     return headset_mic_raw;
 }
 
+/* Recording from the headset mic (codec +0x64 bits 0x0c). */
+bool sc6530_headset_mic_recording(void)
+{
+    return recording_on && rec_mic_path == 0x0c;
+}
+
 int sc6530_rec_mic_path(void)
 {
     return rec_mic_path;

@@ -24,6 +24,7 @@
 #include "kernel.h"
 #include "lcd.h"
 #include "lcd-target.h"
+#include "backlight-target.h"
 #include <string.h>
 
 /*
@@ -564,13 +565,18 @@ void lcd_copy_buffer_rect(fb_data *dst, const fb_data *src,
      * fits easily between Rockbox's ~20-33 ms frame cadence, so a short
      * bounded spin (~50 µs) is only there to avoid stacking two kicks on
      * the same frame; we proceed regardless. */
-    lc->irq.en |= 1;
-    lc->ctrl |= 8;
+    /* Headset-mic recording: FRAME stays current, but the transfer to the
+     * panel may be skipped (sc6530_lcd_kick_allowed, backlight driver). */
+    if (sc6530_lcd_kick_allowed())
     {
-        uint32_t wait = 10000u;
+        lc->irq.en |= 1;
+        lc->ctrl |= 8;
+        {
+            uint32_t wait = 10000u;
 
-        while (!(lc->irq.raw & 1) && --wait) ;
-        lc->irq.clr |= 1;
+            while (!(lc->irq.raw & 1) && --wait) ;
+            lc->irq.clr |= 1;
+        }
     }
     mutex_unlock(&lcd_mutex);
 }

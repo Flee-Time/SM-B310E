@@ -143,6 +143,7 @@ static int button_code(uint8_t code)
 /* Accumulated held-button mask. */
 static volatile int held_mask;
 volatile bool hook_level;       /* headset in-line button, raw EIC ch4 */
+volatile long sc6530_key_tick;  /* last tick any key was down */
 volatile uint32_t s_keypad_irq_count;
 
 void button_init_device(void)
@@ -301,6 +302,9 @@ int button_read_device(int *data)
     unsigned headset = sc6530_headset_tick(hook_level);
     capture_matrix_edges();
     int result = held_mask | headset;
+    if (result)
+        sc6530_key_tick = current_tick;
+    sc6530_display_quiet_tick();
     restore_irq(old);
     torch_hold_check(result);
     return result;
