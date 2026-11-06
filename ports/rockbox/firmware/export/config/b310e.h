@@ -87,6 +87,17 @@
 #define HW_SAMPR_CAPS (SAMPR_CAP_96 | SAMPR_CAP_ALL_48)
 #define HAVE_HEADPHONE_DETECTION
 #define HAVE_SPEAKER
+
+/* Main microphone through the on-die ADC and VBC AD0, ARM-owned (no DSP).
+ * The ADC clock is rate/4000 (stock 0x81220), so only multiples of 4 kHz. */
+#define HAVE_RECORDING
+#define INPUT_SRC_CAPS SRC_CAP_MIC
+#define REC_SAMPR_CAPS (SAMPR_CAP_48 | SAMPR_CAP_32 | SAMPR_CAP_24 |                         SAMPR_CAP_16 | SAMPR_CAP_12 | SAMPR_CAP_8)
+#define REC_FREQ_DEFAULT REC_FREQ_16
+#define REC_SAMPR_DEFAULT SAMPR_16
+#define DEFAULT_REC_MIC_GAIN 8
+#define DEFAULT_REC_LEFT_GAIN 0
+#define DEFAULT_REC_RIGHT_GAIN 0
 #define DEFAULT_SPEAKER_MODE 2 /* Rockbox Auto: speaker when jack is empty */
 
 /* Battery: SM-B310E packs an 800 mAh Li-ion (BATTERY_CAPACITY_DEFAULT).

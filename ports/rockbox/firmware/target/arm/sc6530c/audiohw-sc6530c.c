@@ -5,6 +5,8 @@
 #include "config.h"
 #include "system.h"
 #include "audiohw.h"
+#include "audio.h"
+#include <string.h>
 #include "pcm_sampr.h"
 #include "pcm_sw_volume.h"
 #include "audio-target.h"
@@ -19,6 +21,9 @@
 #define EIC_CLOCKS ((1u << 25) | (1u << 26))
 static bool initialized, adi_failed;
 static bool speaker_enabled;
+#ifdef HAVE_RECORDING
+static bool recording_on;
+#endif
 static unsigned current_fsel = HW_FREQ_DEFAULT;
 static int current_volume = -1000;
 static int digital_volume = -1000;
@@ -108,6 +113,12 @@ void audiohw_set_frequency(int fsel)
     };
     current_fsel = (unsigned)fsel < HW_NUM_FREQ ? (unsigned)fsel : HW_FREQ_DEFAULT;
     unsigned rate = hw_freq_sampr[current_fsel];
+#ifdef HAVE_RECORDING
+    /* Stock 0x81220/0x811f8: ADC_CTL[3:0] = rate / 4000, 1..15. Rates
+     * that are not multiples of 4 kHz keep the previous ADC rate. */
+    if (rate % 4000 == 0 && rate / 4000 >= 1 && rate / 4000 <= 15)
+        SC_AUDIO_REG(0x8a002018) = (SC_AUDIO_REG(0x8a002018) & ~15u) | rate / 4000;
+#endif
     for (unsigned mode = 0; mode < sizeof(rates) / sizeof(rates[0]); mode++)
         if (rates[mode] == rate)
         {
@@ -303,11 +314,126 @@ void audiohw_init(void)
         audiohw_close();
 }
 
+#ifdef HAVE_RECORDING
+/* Main microphone capture, from the stock ARM-side codec driver (no DSP):
+ * mic input path 0x80eec, bias 0x80876/0x80846, ADC power 0x80b4e (ADC L
+ * only, as stock records mono), ADC rate 0x81220. Register names are
+ * inferred from the stock call structure; see docs/rockbox-recording.md. */
+static bool vbc_ad_route = false;
+static int mic_gain = DEFAULT_REC_MIC_GAIN;
+
+/* VBC +0x80 bits 0x30 (stock 0xb08ce via 0xa7e28) route AD to the DSP.
+ * Hardware 2026-11-06: with them set the ARM FIFO reads all zeros; with
+ * them clear the mic records cleanly. Debug > View I/O ports key 7 still
+ * toggles them for experiments. */
+bool sc6530_rec_route(void)
+{
+    return vbc_ad_route;
+}
+
+void sc6530_rec_set_route(bool set)
+{
+    vbc_ad_route = set;
+    if (recording_on)
+        SC_AUDIO_REG(SC_VBC_BASE + 0x80) =
+            (SC_AUDIO_REG(SC_VBC_BASE + 0x80) & ~0x30u) | (set ? 0x30u : 0);
+}
+
+static uint16_t rec_snap[8];   /* codec state right after recording start */
+
+static void rec_read(uint16_t regs[8])
+{
+    static const uint16_t offs[7] = { 0x00, 0x40, 0x5c, 0x60, 0x64, 0x70, 0xac };
+    for (unsigned i = 0; i < 7; i++)
+        regs[i] = adi_read(CODEC + offs[i]);
+    regs[7] = adi_read(0x82001164);
+}
+
+void sc6530_rec_debug(uint16_t regs[8], bool at_start)
+{
+    if (at_start)
+        memcpy(regs, rec_snap, sizeof(rec_snap));
+    else
+        rec_read(regs);
+}
+
+void audiohw_set_recvol(int left, int right, int type)
+{
+    (void)right;
+    if (type != AUDIO_GAIN_MIC)
+        return;
+    mic_gain = left < 0 ? 0 : left > 15 ? 15 : left;
+    if (initialized)
+        adi_update(CODEC + 0x70, 0xf0, mic_gain << 4);
+}
+
+void audiohw_enable_recording(bool source_mic)
+{
+    if (!source_mic || recording_on)
+        return;
+    if (!initialized)
+        audiohw_init();
+    /* Stock capture DAI modes are 0x30xxxxxx: both AD channels are
+     * ARM-owned and enabled, DMA drains AD0 only. */
+    SC_AUDIO_REG(0x8b0001c4) |= 0x18;
+    SC_AUDIO_REG(SC_VBC_BASE + 0x80) =
+        (SC_AUDIO_REG(SC_VBC_BASE + 0x80) & ~0x30u) | (vbc_ad_route ? 0x30u : 0);
+    audiohw_set_frequency(current_fsel);      /* ADC fs before ADC enable */
+    adi_update(CODEC + 0x70, 0xf0, mic_gain << 4);
+    adi_update(CODEC + 0x64, 0xc0, 0xc0);     /* main mic -> ADC L */
+    adi_update(0x82001164, 0x200, 0);         /* mic bias supply on */
+    adi_update(CODEC + 0x40, 0x04, 0x04);     /* mic bias */
+    udelay(20000);                            /* stock has no wait */
+    /* ADC core, stock power state 5 (0x820d4 -> 0x8153e, 0x80af8). Stock
+     * will not enter the ADC state (0x82146) without it; skipping it left
+     * the ADC pinned at full scale on hardware. */
+    adi_write(0x82001440, 1);
+    adi_write(0x82001440, 2);
+    adi_update(CODEC + 0x5c, 0x80, 0);
+    adi_update(CODEC + 0x60, 0xa0, 0);
+    adi_update(CODEC + 0xac, 0x40, 0);
+    adi_update(CODEC + 0x5c, 0x02, 0);
+    SC_AUDIO_REG(0x8a002000) |= 0x02;         /* digital ADC L */
+    adi_update(CODEC + 0x00, 0x02, 0x02);     /* analog ADC L */
+    adi_update(CODEC + 0x5c, 0x20, 0);        /* ADC L power-down off */
+    SC_AUDIO_REG(SC_VBC_BASE + 0x10) =
+        (SC_AUDIO_REG(SC_VBC_BASE + 0x10) & ~0xffu) | (SC_VBC_FRAMES - 1);
+    rec_read(rec_snap);
+    recording_on = true;
+}
+
+void audiohw_disable_recording(void)
+{
+    if (!recording_on)
+        return;
+    adi_update(CODEC + 0x5c, 0x20, 0x20);
+    adi_update(CODEC + 0x00, 0x02, 0);
+    SC_AUDIO_REG(0x8a002000) &= ~0x02u;
+    adi_update(CODEC + 0x5c, 0x80, 0x80);     /* ADC core off */
+    adi_update(CODEC + 0x60, 0xa0, 0xa0);
+    adi_update(CODEC + 0xac, 0x40, 0x40);
+    adi_update(CODEC + 0x64, 0xc0, 0);
+    adi_update(CODEC + 0x40, 0x04, 0);
+    adi_update(0x82001164, 0x200, 0x200);
+    SC_AUDIO_REG(0x8b0001c4) &= ~0x18u;
+    SC_AUDIO_REG(SC_VBC_BASE + 0x80) &= ~0x30u;
+    recording_on = false;
+}
+
+void audiohw_set_monitor(bool enable)
+{
+    (void)enable;                             /* no analog mic monitor */
+}
+#endif /* HAVE_RECORDING */
+
 void audiohw_preinit(void) {}
 void audiohw_postinit(void) {}
 
 void audiohw_close(void)
 {
+#ifdef HAVE_RECORDING
+    audiohw_disable_recording();
+#endif
     audiohw_mute(true);
     SC_VBC_CTRL &= ~SC_VBC_PLAY;
     headset_output(false);

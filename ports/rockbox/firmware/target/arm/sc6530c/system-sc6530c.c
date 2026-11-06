@@ -270,6 +270,22 @@ static bool torch_dump(const char *what)
                        (unsigned long)REG32(b), (unsigned long)REG32(b + 4),
                        (unsigned long)REG32(b + 8), (unsigned long)REG32(b + 0x18)) >= 0;
     }
+    {
+        uint16_t c[8];
+        for (int at_start = 1; at_start >= 0; at_start--) {
+            sc6530_rec_debug(c, at_start);
+            ok &= fdprintf(fd, "CODEC %s +00=%04x +40=%04x +5c=%04x +60=%04x "
+                           "+64=%04x +70=%04x +ac=%04x 1164=%04x\n",
+                           at_start ? "recstart" : "now", c[0], c[1], c[2], c[3],
+                           c[4], c[5], c[6], c[7]) >= 0;
+        }
+        ok &= fdprintf(fd, "VBC +10=%08lx +18=%08lx +80=%08lx owner=%08lx "
+                       "DP +00=%08lx +18=%08lx route=%d\n",
+                       (unsigned long)REG32(0x82003010), (unsigned long)REG32(0x82003018),
+                       (unsigned long)REG32(0x82003080), (unsigned long)REG32(0x8b0001c4),
+                       (unsigned long)REG32(0x8a002000), (unsigned long)REG32(0x8a002018),
+                       sc6530_rec_route()) >= 0;
+    }
     ok &= fdprintf(fd, "APB 8b000000=%08lx 8b0000a0=%08lx\n",
                    (unsigned long)REG32(0x8b000000), (unsigned long)REG32(0x8b0000a0)) >= 0;
     for (uint32_t off = 0; off < 0x300; off += 0x20) {
@@ -303,6 +319,7 @@ bool dbg_ports(void)
         lcd_puts(0, 9, "1: GPIO7 on/off");
         lcd_puts(0, 10, "3: LED 8800 on/off");
         lcd_puts(0, 11, "5: LED ~1100 on/off");
+        lcd_putsf(0, 12, "7: VBC+80 bits30 %s", sc6530_rec_route() ? "on" : "off");
         lcd_puts(0, 14, "9: save dump");
         lcd_puts(0, 15, "Back: exit");
         lcd_puts(0, 17, status);
@@ -326,6 +343,9 @@ bool dbg_ports(void)
             else
                 adi_write(ANA_LED_CTRL, led_saved);
             status = ana_mode ? "LED_CTRL changed" : "LED_CTRL restored";
+        } else if (button == BUTTON_7) {
+            sc6530_rec_set_route(!sc6530_rec_route());
+            status = "VBC+80 toggled";
         } else if (button == BUTTON_9) {
             status = torch_dump("key 9") ? "dump saved" : "dump FAILED";
         }

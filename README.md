@@ -36,6 +36,9 @@ download mode with `spd_dump`, and can also boot from an SD card.
   for the SC6530C.
 - **USB mass storage in Rockbox** (verified on hardware at about 225 KB/s):
   the SD card appears as a drive on a PC. See [docs/usb.md](docs/usb.md).
+- **Microphone recording in Rockbox** (verified on hardware): Main Menu →
+  Recording, through the ARM-owned ADC/VBC capture path; no DSP needed.
+  See [docs/rockbox-recording.md](docs/rockbox-recording.md).
 - **Torch in Rockbox** (verified on hardware): hold 0 to toggle the torch
   LED on GPIO 7. See
   [docs/rockbox-controls.md](docs/rockbox-controls.md#torch).

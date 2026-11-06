@@ -181,6 +181,7 @@ target/arm/sc6530c/i2c-sc6530c.c
 #ifndef BOOTLOADER
 target/arm/sc6530c/pcm-sc6530c.c
 target/arm/sc6530c/audiohw-sc6530c.c
+target/arm/sc6530c/audio-sc6530c.c
 #endif /* !BOOTLOADER */
 #if defined(HAVE_USBSTACK) && !defined(BOOTLOADER)
 target/arm/sc6530c/usb-drv-sc6530c.c
@@ -319,6 +320,13 @@ fi
 # dbg_ports() is the torch/GPIO test screen (system-sc6530c.c).
 patch_file "$CLONE_DIR/apps/debug_menu.c" 'B310E-PORT: io ports' \
   's/(    \|\| CONFIG_CPU == RK27XX \|\| CONFIG_CPU == JZ4760B)\n(        \{ "View I\/O ports", dbg_ports \},)/$1 \\\n    || CONFIG_CPU == SC6530C \/* B310E-PORT: io ports *\/\n$2/' || exit 1
+
+# 19. apps/recorder/pcm_record.c - use the small-memory recording buffers
+# on this 4 MiB target. The default (>2 MiB) profile reserves a 2 MiB PCM
+# FIFO, which leaves the encoder buffer smaller than one chunk
+# (PCMREC_W_ENC_BUFFER_OVF, nothing written).
+patch_file "$CLONE_DIR/apps/recorder/pcm_record.c" 'B310E-PORT: 4 MiB RAM' \
+  's/\n#if MEMORYSIZE <= 2\n/\n#if MEMORYSIZE <= 4 \/* B310E-PORT: 4 MiB RAM *\/\n/' || exit 1
 
 # ---- c. CONFIGURE + BUILD (out-of-tree) ----------------------------------
 export PATH="$TOOLCHAIN:$HOST_CC:$PATH"

@@ -44,8 +44,11 @@
 /* Stereo volume lets sound.c apply balance independently to left/right.
  * Positive headphone settings share analog gain, with per-channel PCM
  * attenuation preserving the requested levels. */
-#define AUDIOHW_CAPS 0
+#define AUDIOHW_CAPS MIC_GAIN_CAP
 
 AUDIOHW_SETTING(VOLUME, "dB", 0, 1, -100, 24, -30)
+/* Codec +0x70 bits 7:4 (stock gain ioctl 0x69bfa). The dB step is not
+ * known, so the setting shows the raw 0..15 step. */
+AUDIOHW_SETTING(MIC_GAIN, "", 0, 1, 0, 15, 8)
 
 #endif /* AUDIOHW_SC6530C_H */

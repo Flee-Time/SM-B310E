@@ -92,6 +92,7 @@
 #include "system/runstate.h"
 #include "target/arm/cpu.h"
 #include "trace.h"
+#include <math.h>
 
 #define TYPE_SC6530_ADI "sc6530_adi"
 OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AdiState, SC6530_ADI)
@@ -100,6 +101,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AdiState, SC6530_ADI)
  * raises/lowers bit 3 of EIC_DBNC_DATA inside the ANA bank. */
 void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
 size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes);
+size_t sc6530_dma_hw_request(Object *obj, unsigned request, size_t bytes);
 bool sc6530_dsp_arm_audio_owned(Object *obj);
 
 /* ---------------------------------------------------------------------- */
@@ -185,6 +187,17 @@ struct Sc6530AdiState {
     unsigned pcm_count;
     bool dma_filling;
     bool analog_audio_clock;
+
+    /* VBC AD capture (stock audio_dai_vbc/vbc_phy_v5): AD0 FIFO +0x0c on
+     * DMA request 14, AD1 FIFO +0x08 on request 13. The microphone is a
+     * synthetic tone so guest drivers can be checked deterministically. */
+    QEMUTimer *rec_timer;
+    int64_t rec_deadline;
+    int16_t rec_bank[VBC_BANK_FRAMES];
+    unsigned rec_pos[2];
+    uint64_t rec_sample;
+    uint32_t mic_tone_hz;
+    uint16_t mic_level;
 
     /* Index-echo state: the last ADI_ARM_RD_CMD write (addr & 0xFFF). */
     uint32_t rd_index;
@@ -602,12 +615,85 @@ static const MemoryRegionOps sc6530_adi_ana_ops = {
 /* "Cross-map" row 12).                                                   */
 /* ---------------------------------------------------------------------- */
 
+#define VBC_AD0 (1u << 12)
+#define VBC_AD1 (1u << 11)
+
+static unsigned sc6530_ad_frames(Sc6530AdiState *s)
+{
+    /* NOR 0xb075c..: AD size-1 occupies bits [7:0]. */
+    return MIN((s->vbc_regs[0x10 / 4] & 0xff) + 1, VBC_BANK_FRAMES);
+}
+
+static unsigned sc6530_ad_rate(Sc6530AdiState *s)
+{
+    /* Stock 0x81220: ADC_CTL 0x8a002018[3:0] = rate / 4000. */
+    return (s->dp_regs[0x18 / 4] & 0xf) * 4000;
+}
+
+static bool sc6530_mic_live(Sc6530AdiState *s)
+{
+    /* Codec analog block at ANA +0xa00. The tone only reaches the ADC
+     * when every stage the stock driver powers is on: the ADC core (stock
+     * power state 5: +0x5c bit7, +0x60 bit7, +0xac bit6 power-downs
+     * clear), digital and analog ADC L, ADC L power-down clear, main-mic
+     * path, mic bias and its supply. With the core off the phone's ADC
+     * reads a constant full-scale rail; the model returns silence. */
+    const uint32_t *codec = &s->ana_regs[0xa00 / 4];
+    return !(codec[0x5c / 4] & 0x80) && !(codec[0x60 / 4] & 0x80) &&
+           !(codec[0xac / 4] & 0x40) &&
+           (s->dp_regs[0] & 2) && (codec[0x00 / 4] & 2) &&
+           !(codec[0x5c / 4] & 0x20) && (codec[0x64 / 4] & 0xc0) &&
+           (codec[0x40 / 4] & 4) && !(s->ana_regs[0x164 / 4] & 0x200);
+}
+
+static void sc6530_rec_tick(void *opaque)
+{
+    Sc6530AdiState *s = opaque;
+    uint32_t ctl = s->vbc_regs[0x18 / 4];
+    unsigned frames = sc6530_ad_frames(s), rate = sc6530_ad_rate(s);
+    /* VBC +0x80 bit 0x20 routes AD0 to the DSP; the ARM FIFO then reads
+     * zeros (hardware, 2026-11-06). */
+    bool live = sc6530_mic_live(s) && !(s->vbc_regs[0x80 / 4] & 0x20);
+    /* Codec +0x70[7:4] is the mic gain step; scale the tone with it. */
+    unsigned gain = (s->ana_regs[(0xa00 + 0x70) / 4] >> 4) & 0xf;
+    double level = s->mic_level * (gain + 1) / 16.0;
+
+    if (!(ctl & VBC_ENABLE) || !(ctl & (VBC_AD0 | VBC_AD1)) || !rate) {
+        return;
+    }
+    for (unsigned i = 0; i < frames; i++, s->rec_sample++) {
+        double t = (double)s->rec_sample * s->mic_tone_hz / rate;
+        s->rec_bank[i] = live ? (int16_t)lrint(level * sin(2 * M_PI * t)) : 0;
+    }
+    s->rec_pos[0] = s->rec_pos[1] = 0;
+    if (s->dma) {
+        size_t moved0 = 0, moved1 = 0;
+        if (ctl & VBC_AD0) {
+            moved0 = sc6530_dma_hw_request(s->dma, 14, frames * 2);
+        }
+        if (ctl & VBC_AD1) {
+            moved1 = sc6530_dma_hw_request(s->dma, 13, frames * 2);
+        }
+        trace_sc6530_vbc_ad(frames, rate, live, moved0, moved1);
+    }
+    s->rec_deadline += (int64_t)frames * NANOSECONDS_PER_SECOND / rate;
+    timer_mod(s->rec_timer, s->rec_deadline);
+}
+
 static uint64_t sc6530_adi_vbc_read(void *opaque, hwaddr offset,
                                     unsigned size)
 {
     Sc6530AdiState *s = opaque;
     uint32_t word = s->vbc_regs[offset / 4];
     uint64_t val;
+
+    if ((offset & ~3) == 0x08 || (offset & ~3) == 0x0c) {
+        unsigned *pos = &s->rec_pos[(offset & ~3) == 0x0c ? 0 : 1];
+        word = (uint16_t)(*pos < sc6530_ad_frames(s) ?
+                          s->rec_bank[(*pos)++] : 0);
+        /* Data FIFO reads are DMA traffic; do not trace each sample. */
+        return extract32(word, (offset & 3) * 8, size * 8);
+    }
 
     if ((offset & ~3) == 0x18 && (word & VBC_ENABLE)) {
         word = (word & ~VBC_RAM_BANK) | (s->play_bank << 9);
@@ -651,6 +737,16 @@ static void sc6530_adi_vbc_write(void *opaque, hwaddr offset,
             if (!s->pcm_count) {
                 audio_be_set_active_out(s->audio_be, s->voice, false);
             }
+        }
+        if ((ctl & VBC_ENABLE) && (ctl & (VBC_AD0 | VBC_AD1)) &&
+            !((old_ctl & VBC_ENABLE) && (old_ctl & (VBC_AD0 | VBC_AD1)))) {
+            unsigned rate = sc6530_ad_rate(s);
+            s->rec_deadline = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                (rate ? (int64_t)sc6530_ad_frames(s) *
+                        NANOSECONDS_PER_SECOND / rate : 0);
+            timer_mod(s->rec_timer, s->rec_deadline);
+        } else if (!(ctl & VBC_ENABLE) || !(ctl & (VBC_AD0 | VBC_AD1))) {
+            timer_del(s->rec_timer);
         }
         if ((old_ctl ^ ctl) & (VBC_RAM_BANK | VBC_RAM_ACCESS)) {
             unsigned bank = !!(ctl & VBC_RAM_BANK);
@@ -719,6 +815,11 @@ static void sc6530_adi_reset(DeviceState *dev)
 
     memset(s->mailbox_regs, 0, sizeof(s->mailbox_regs));
     memset(s->ana_regs, 0, sizeof(s->ana_regs));
+    /* ADC power-downs start set: ADC core (+0x5c bit7, +0x60 bits 7/5,
+     * +0xac bit6) and ADC L/R (+0x5c bits 5/3). */
+    s->ana_regs[(0xa00 + 0x5c) / 4] = 0xa8;
+    s->ana_regs[(0xa00 + 0x60) / 4] = 0xa0;
+    s->ana_regs[(0xa00 + 0xac) / 4] = 0x40;
     memset(s->vbc_regs, 0, sizeof(s->vbc_regs));
     memset(s->dp_regs, 0, sizeof(s->dp_regs));
     memset(s->bank, 0, sizeof(s->bank));
@@ -726,6 +827,9 @@ static void sc6530_adi_reset(DeviceState *dev)
     s->pcm_head = s->pcm_count = s->play_pos = s->play_bank = 0;
     s->analog_audio_clock = false;
     timer_del(s->audio_timer);
+    timer_del(s->rec_timer);
+    s->rec_sample = 0;
+    s->rec_pos[0] = s->rec_pos[1] = 0;
     audio_be_set_active_out(s->audio_be, s->voice, false);
     s->rate = 8000;
     sc6530_audio_open(s);
@@ -768,6 +872,7 @@ static void sc6530_adi_init(Object *obj)
     sysbus_init_mmio(sbd, &s->dp_iomem);
     s->rate = 8000;
     s->audio_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_audio_tick, s);
+    s->rec_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_rec_tick, s);
     s->rtc_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sc6530_rtc_tick, s);
     sysbus_init_irq(sbd, &s->analog_irq);
     object_property_add_link(obj, "dma", "sc6530_dma", &s->dma,
@@ -784,6 +889,7 @@ static void sc6530_audio_exit(Notifier *notifier, void *data)
     /* Sysbus devices need not be unrealized on process exit. Close the last
      * voice explicitly so the WAV backend finalizes its RIFF/data lengths. */
     timer_del(s->audio_timer);
+    timer_del(s->rec_timer);
     timer_del(s->rtc_timer);
     audio_be_close_out(s->audio_be, s->voice);
     s->voice = NULL;
@@ -821,12 +927,15 @@ static void sc6530_adi_unrealize(DeviceState *dev)
 static void sc6530_adi_finalize(Object *obj)
 {
     timer_free(SC6530_ADI(obj)->audio_timer);
+    timer_free(SC6530_ADI(obj)->rec_timer);
     timer_free(SC6530_ADI(obj)->rtc_timer);
 }
 
 static const Property sc6530_adi_properties[] = {
     DEFINE_PROP_UINT16("battery-adc", Sc6530AdiState, battery_adc, 900),
     DEFINE_PROP_BOOL("charger-present", Sc6530AdiState, charger_present, false),
+    DEFINE_PROP_UINT32("mic-tone-hz", Sc6530AdiState, mic_tone_hz, 1000),
+    DEFINE_PROP_UINT16("mic-level", Sc6530AdiState, mic_level, 8192),
     DEFINE_AUDIO_PROPERTIES(Sc6530AdiState, audio_be),
 };
 

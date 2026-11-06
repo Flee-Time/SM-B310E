@@ -38,4 +38,11 @@ struct sc6530_audio_debug {
 void sc6530_audio_debug(struct sc6530_audio_debug *info);
 void sc6530_pcm_debug(uint32_t *banks, unsigned peak[2]);
 
+/* VBC +0x80 bits 0x30 for capture (unconfirmed; toggled from Debug >
+ * View I/O ports) and codec readback: +0x00, +0x40, +0x5c, +0x60, +0x64,
+ * +0x70, +0xac, then 0x82001164. */
+bool sc6530_rec_route(void);
+void sc6530_rec_set_route(bool set);
+void sc6530_rec_debug(uint16_t regs[8], bool at_start);
+
 #endif

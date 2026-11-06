@@ -341,5 +341,5 @@ without that loader; it does not validate DSP-controlled phone services.
 QEMU does not emulate analog gain, PA electrical behavior or DAC ramps.
 Jack hotplug and the extended gain are confirmed on the phone; quantitative
 gain fidelity, pop suppression and hardware timing remain to be measured.
-No microphone/recording
-capability is advertised by this port. Vendor DSP execution is unimplemented.
+Microphone recording is
+described separately in [rockbox-recording.md](rockbox-recording.md). Vendor DSP execution is unimplemented.

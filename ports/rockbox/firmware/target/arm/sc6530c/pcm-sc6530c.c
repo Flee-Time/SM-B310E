@@ -29,6 +29,18 @@ static unsigned lock_depth, completed;
 static bool running, requesting, eof, draining;
 static uint32_t bank_count;
 static unsigned peak_sample[2];
+static bool rec_running;
+static unsigned rec_lock_depth;
+
+/* The DMA IRQ line is shared by playback and capture. It is enabled only
+ * while one of them runs and neither side holds its lock. */
+static void dma_irq_update(void)
+{
+    if ((running || rec_running) && !lock_depth && !rec_lock_depth)
+        SC_AUDIO_REG(0x80000008) |= DMA_IRQ;
+    else
+        SC_AUDIO_REG(0x8000000c) = DMA_IRQ;
+}
 
 void sc6530_pcm_debug(uint32_t *banks, unsigned peak[2])
 {
@@ -42,23 +54,25 @@ void sc6530_pcm_debug(uint32_t *banks, unsigned peak[2])
 static void sink_lock(void)
 {
     int old = disable_irq_save();
-    if (lock_depth++ == 0)
-        SC_AUDIO_REG(0x8000000c) = DMA_IRQ;
+    lock_depth++;
+    dma_irq_update();
     restore_irq(old);
 }
 
 static void sink_unlock(void)
 {
     int old = disable_irq_save();
-    if (lock_depth && --lock_depth == 0 && running)
-        SC_AUDIO_REG(0x80000008) |= DMA_IRQ;
+    if (lock_depth)
+        lock_depth--;
+    dma_irq_update();
     restore_irq(old);
 }
 
 static void stop_hardware(void)
 {
-    SC_AUDIO_REG(0x8000000c) = DMA_IRQ;
-    SC_VBC_CTRL &= ~SC_VBC_PLAY;
+    /* VB enable (bit15) is shared with capture; clear only DA0/DA1 while
+     * a recording runs. */
+    SC_VBC_CTRL &= rec_running ? ~(SC_VBC_PLAY & ~0x8000u) : ~SC_VBC_PLAY;
     DMA_REG(DMA_LEFT, 8) = 0;
     DMA_REG(DMA_RIGHT, 8) = 0;
     DMA_REG(DMA_LEFT, 12) = DMA_ACK;
@@ -66,6 +80,7 @@ static void stop_hardware(void)
     audiohw_mute(true);
     running = false;
     completed = 0;
+    dma_irq_update();
 }
 
 static void sink_stop(void)
@@ -145,8 +160,15 @@ static void arm_stereo(void)
     arm_channel(DMA_RIGHT, plane[1], SC_VBC_BASE + 4);
 }
 
+#ifdef HAVE_RECORDING
+static void rec_irq(void);
+#endif
+
 void DMA(void)
 {
+#ifdef HAVE_RECORDING
+    rec_irq();
+#endif
     uint32_t pending = SC_AUDIO_REG(0x20100010) & DMA_CHANNELS;
     bool error = false;
     for (unsigned ch = DMA_RIGHT; ch <= DMA_LEFT; ch++)
@@ -217,8 +239,7 @@ static void sink_play(const void *addr, size_t size)
     running = true;
     audiohw_mute(false);
     SC_VBC_CTRL = (SC_VBC_CTRL & ~SC_VBC_CPU_ACCESS) | SC_VBC_PLAY;
-    if (!lock_depth)
-        SC_AUDIO_REG(0x80000008) |= DMA_IRQ;
+    dma_irq_update();
 }
 
 struct pcm_sink builtin_pcm_sink = {
@@ -238,3 +259,138 @@ struct pcm_sink builtin_pcm_sink = {
         .stop = sink_stop,
     },
 };
+
+#ifdef HAVE_RECORDING
+/* Mono microphone capture through VBC AD0 (stock audio_dai_vbc/vbc_phy_v5):
+ * FIFO 0x8200300c, DMA request 14 bound at 0x20102034. Like stock, both
+ * AD channels are enabled (VBC_CTRL bits 12/11, owner 0x18 set by
+ * audiohw_enable_recording) and only AD0 is drained. The VBC hands over
+ * 160-frame halfword banks; each completed bank is widened to Rockbox's
+ * interleaved stereo with the same sample on both channels. */
+#define DMA_REC      4                      /* channel 5, one-based */
+#define REC_REQ_MAP  0x20102034u            /* AD0 = request 14 */
+#define REC_FIFO     (SC_VBC_BASE + 0x0c)   /* AD0 */
+#define SC_VBC_REC   ((1u << 12) | (1u << 11)) /* stock enables AD0+AD1 */
+
+static int16_t rec_bank[2][SC_VBC_FRAMES] __attribute__((aligned(32)));
+static unsigned rec_next;
+static uint32_t *rec_addr;
+static size_t rec_size;
+
+static void rec_arm(void)
+{
+    int16_t *bank = rec_bank[rec_next];
+    discard_dcache_range(bank, sizeof(rec_bank[0]));
+    DMA_REG(DMA_REC, 8) = 0;
+    DMA_REG(DMA_REC, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+    DMA_REG(DMA_REC, 16) = REC_FIFO;
+    DMA_REG(DMA_REC, 20) = (uintptr_t)bank;
+    /* Halfword widths, source fixed (bit20 without bit21), 320 bytes. */
+    DMA_REG(DMA_REC, 24) = 0x50100140u;
+    DMA_REG(DMA_REC, 28) = SC_VBC_FRAMES * 2;
+    DMA_REG(DMA_REC, 8) = 0x3001u;
+}
+
+static void rec_hw_stop(void)
+{
+    rec_running = false;
+    DMA_REG(DMA_REC, 8) = 0;
+    DMA_REG(DMA_REC, 12) = DMA_ACK;
+    SC_VBC_CTRL &= running ? ~SC_VBC_REC : ~(SC_VBC_REC | 0x8000u);
+    SC_AUDIO_REG(REC_REQ_MAP) = 0;
+    dma_irq_update();
+}
+
+static void rec_irq(void)
+{
+    if (!(SC_AUDIO_REG(0x20100010) & (1u << DMA_REC)))
+        return;
+    uint32_t status = DMA_REG(DMA_REC, 12);
+    DMA_REG(DMA_REC, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+    if (!rec_running)
+        return;
+    if (status & (1u << 12))
+    {
+        rec_hw_stop();
+        pcm_rec_dma_complete_callback(PCM_DMAST_ERR_DMA, (void **)&rec_addr,
+                                      &rec_size);
+        return;
+    }
+    if (!(status & (1u << 9)))
+        return;
+    const int16_t *bank = rec_bank[rec_next];
+    rec_next ^= 1;
+    rec_arm();                      /* keep the VBC drained first */
+    discard_dcache_range(bank, sizeof(rec_bank[0]));
+    for (unsigned n = 0; n < SC_VBC_FRAMES; n++)
+    {
+        if (rec_size < 4)
+        {
+            void *addr = NULL;
+            size_t size = 0;
+            if (!pcm_rec_dma_complete_callback(PCM_DMAST_OK, &addr, &size))
+            {
+                rec_hw_stop();
+                return;
+            }
+            rec_addr = addr;
+            rec_size = size;
+            pcm_rec_dma_status_callback(PCM_DMAST_STARTED);
+        }
+        uint16_t sample = bank[n];
+        *rec_addr++ = sample | (uint32_t)sample << 16;
+        rec_size -= 4;
+    }
+}
+
+void pcm_rec_lock(void)
+{
+    int old = disable_irq_save();
+    rec_lock_depth++;
+    dma_irq_update();
+    restore_irq(old);
+}
+
+void pcm_rec_unlock(void)
+{
+    int old = disable_irq_save();
+    if (rec_lock_depth)
+        rec_lock_depth--;
+    dma_irq_update();
+    restore_irq(old);
+}
+
+void pcm_rec_dma_init(void)
+{
+    rec_hw_stop();
+}
+
+void pcm_rec_dma_close(void)
+{
+    rec_hw_stop();
+}
+
+void pcm_rec_dma_start(void *addr, size_t size)
+{
+    rec_hw_stop();
+    rec_addr = addr;
+    rec_size = size & ~3u;
+    rec_next = 0;
+    /* Stock 0xa78e4 order: VBC AD enable, then the DMA channel. */
+    SC_AUDIO_REG(REC_REQ_MAP) = DMA_REC + 1;
+    SC_VBC_CTRL = (SC_VBC_CTRL & ~SC_VBC_CPU_ACCESS) | 0x8000u | SC_VBC_REC;
+    rec_arm();
+    rec_running = true;
+    dma_irq_update();
+}
+
+void pcm_rec_dma_stop(void)
+{
+    rec_hw_stop();
+}
+
+const void *pcm_rec_dma_get_peak_buffer(void)
+{
+    return rec_addr;
+}
+#endif /* HAVE_RECORDING */

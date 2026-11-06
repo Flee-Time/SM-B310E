@@ -1,0 +1,160 @@
+# B310E Rockbox microphone recording
+
+The port records from the main microphone through the on-die ADC and the
+VBC capture FIFO, with the ARM owning the path. Rockbox's normal recording
+screen (Main Menu → Recording) writes WAV, AIFF, WavPack or MP3 files to
+`/Recordings`.
+
+**Status: verified on the phone (2026-11-06).** It records clean speech at
+16 kHz: peaks around ±22,000, no clipping, DC offset about −60. The owner
+rates the quality well above the stock recorder. It took three hardware
+rounds:
+
+1. **Constant full-scale rail** (0x8000 from AD0, 0x7fff from AD1, no LSB
+   noise); DMA and file writing worked. The cause was the missing "ADC
+   core" power-up described below.
+2. **ADC core powered, VBC `+0x80` bits `0x30` set:** all-zero samples.
+   Those bits route AD to the DSP.
+3. **Bits cleared** (Debug → View I/O ports, key 7): working audio. The
+   driver now clears them by default.
+
+Both failures reproduce in the QEMU model.
+
+## Why not the stock recorder path
+
+The stock Voice Recorder sends commands to the audio DSP through shared
+memory: the IIS pins are set to `0x188`, then the DSP is started. The DSP
+owns the VBC capture and does the encoding. QEMU does not execute DSP
+code, so a trace of the stock recorder stops there.
+
+The stock VBC and codec drivers also contain an ARM-owned capture path,
+the mirror of the ARM playback route this port already uses. That is the
+path implemented here. No vendor DSP firmware is involved.
+
+## Register sequence
+
+Every value below comes from the unmodified `e52q7a` firmware. The
+function addresses are NOR offsets. The codec analog block is at ADI
+`0x82001a00`, the digital codec at `0x8a002000`, and the VBC at
+`0x82003000`.
+
+| Step | Write | Stock source |
+|---|---|---|
+| AD0 and AD1 owned by ARM | `0x8b0001c4 \|= 0x18` (stock capture DAI modes are all `0x30xxxxxx`) | `0xb0656`, mode table RAM `0x4238680` (init image NOR `0x12ac50`) |
+| AD not routed to DSP | VBC `+0x80 &= ~0x30` (when set, the ARM FIFO reads zeros on hardware) | `0xb08ce` via `0xa7e28` |
+| ADC rate first | `0x8a002018[3:0] = rate / 4000` | codec open `0x69c92` |
+| Mic gain | codec `+0x70` bits 7:4 | gain ioctl `0x69bfa` → `0x80a4e` |
+| Main mic → ADC L | codec `+0x64 \|= 0xc0` | input path 8, `0x80eec` |
+| Mic bias supply | `0x82001164 &= ~0x200` (LDO id 0x1b) | `0x80876` → `0x80846`, table `0xca4f4` |
+| Mic bias | codec `+0x40 \|= 0x04` | same |
+| **ADC core** | ADI `0x82001440 = 1`, then `2`; codec `+0x5c &= ~0x80`; `+0x60 &= ~0xa0`; `+0xac &= ~0x40` | power state 5 `0x820d4` → `0x8153e`, `0x80af8` (`0x80a1c`, `0x80a30`, `0x80ae4`) |
+| ADC L power | codec `+0x5c &= ~0x02`; `0x8a002000 \|= 0x02`; codec `+0x00 \|= 0x02`; codec `+0x5c &= ~0x20` | `0x80b4e(1, 1)`: `0x80b24`, `0x814f8`, `0x809fe` |
+| AD bank size | VBC `+0x10[7:0] = 159` | `0xb071a` via `0xa8494` |
+| DMA request | `0x20102034 = channel` (AD0, request 14); `0x20102030` for AD1 (request 13) | bind `0xa7b96`, unbind `0xa7c58` |
+| VBC enable | `VBC_CTRL \|= 0x8000 \| 0x1800` (both AD channels; DMA drains AD0 only) | `0xb06d6`, `0xb0874` |
+| DMA channel | source = FIFO `0x8200300c` (AD0) / `0x82003008` (AD1), destination = RAM, `+0x18 = 0x50100140`, 320-byte blocks | `0xb0950`, `0x32a68` |
+
+Stopping reverses these steps.
+
+**The ADC core step is required.** Stock's codec state machine has a
+separate capture power state (5) that `0x81cfc` requires before it will
+enter the ADC state (6, `0x82146`). Playback never requests state 5. The
+first hardware build skipped it, and the ADC returned a constant rail.
+The QEMU model now starts these power-down bits set (`+0x5c` = `0xa8`,
+`+0x60` = `0xa0`, `+0xac` = `0x40`) and records silence until they are
+cleared, so the test fails on that earlier build.
+
+The digital codec window is only `0x8a002000`–`0x8a002028`. Stock writes
+no ADC reset, sinc or DMIC bits there.
+
+**Sample rates:** the ADC rate field is `rate / 4000`, so recording offers
+only 8, 12, 16, 24, 32 and 48 kHz. The default is 16 kHz.
+
+**Mono:** stock powers only ADC L, so recording is mono. Each sample is
+written to both channels of Rockbox's stereo buffer, and the encoder's
+mono setting then stores a single channel.
+
+## Driver layout
+
+- `audiohw-sc6530c.c`:
+  - `audiohw_enable_recording()` / `audiohw_disable_recording()` handle
+    ownership, mic path, bias and ADC power.
+  - `audiohw_set_recvol()` sets the mic gain.
+  - `audiohw_set_frequency()` also sets the ADC rate.
+- `pcm-sc6530c.c`:
+  - Capture DMA on channel 5 into two 160-frame banks.
+  - The DMA interrupt, shared with playback, re-arms the next bank first,
+    then widens the finished one into Rockbox's buffer.
+  - Playback stop clears only the DA enables while a recording runs.
+  - The shared DMA interrupt mask honours both the playback and the
+    recording locks.
+- `audio-sc6530c.c`: `audio_input_mux()` switches between playback and
+  mic.
+- `apps/keymaps/keymap-b310e.c`: the recording-screen keys.
+- `scripts/targets/rockbox.sh`, patch 19: `pcm_record.c` uses Rockbox's
+  small-memory buffer profile (about 224 KB of PCM FIFO). The default
+  profile wants a 2 MB FIFO, which on this 4 MB phone left the encoder
+  buffer smaller than one chunk. The recording screen then showed
+  `Warning: 00000002` and wrote nothing.
+
+## Recording screen keys
+
+| Key | Action |
+|---|---|
+| Center | Start recording; then pause / resume |
+| DIAL | Start a new file |
+| Up / Down | Choose a line (volume, gain, …) |
+| Left / Right, 2 / 8 | Change the chosen value |
+| Right soft key / END | Stop; press again to leave |
+| Left soft key | Recording settings |
+
+## QEMU model
+
+`sc6530_adi.c` models VBC capture:
+- Each AD bank period it fills a 160-frame bank and raises DMA request 14
+  (AD0) and/or 13 (AD1). The DMA reads the samples from the FIFO
+  registers.
+- The bank holds a synthetic sine (`-global sc6530_adi.mic-tone-hz=1000`,
+  `mic-level=8192`). The level is scaled by the mic gain step
+  (`(gain + 1) / 16`).
+- The tone appears only while the ADC core, ADC L (digital and analog),
+  the ADC L power-down clear, the main-mic path, the bias and the bias
+  supply are all on, and VBC `+0x80` bit `0x20` (AD0 → DSP) is clear.
+  Otherwise the bank is silent, so a driver that skips a step records
+  silence. Both hardware failures reproduce this way.
+- The trace event `sc6530_vbc_ad` logs each bank.
+
+The test `ports/rockbox/tests/test-recording.py` (`--qemu`, `--rockbox`,
+`--runtime`, `--output`):
+- builds a private SD image whose config starts in the recording screen;
+- presses Center, waits, then presses Back;
+- finds the new WAV in the image;
+- checks it is mono 16-bit at the configured rate, and that the tone's
+  amplitude matches the gain within 5% with no energy off the tone.
+
+It runs two cases: 16 kHz with gain 8, and 8 kHz with gain 15. Both pass.
+With `-icount` the guest runs ahead of wall time, so a few seconds of
+waiting produce a recording a few minutes long.
+
+## Debug tools
+
+The View I/O ports dump (opening the screen, or key 9) appends two
+`CODEC` lines and a `VBC` line to `.rockbox/torch-b310e.txt`:
+- `recstart`: the codec registers right after the last recording power-up;
+- `now`: the live values;
+- the VBC line adds VBC `+0x10`/`+0x18`/`+0x80`, the owner register and
+  the digital ADC registers.
+
+Key 7 toggles VBC `+0x80` bits `0x30` for experiments. Leave them off to
+record.
+
+## Still open
+
+1. **Mic gain scale.** `+0x70` bits 7:4 changes the level, but its dB
+   step is unknown, so the setting shows raw steps 0–15.
+2. **The DMA field `0x50100140`** is derived rather than traced; it works
+   on the phone.
+3. **Bias settling.** The driver waits 20 ms after enabling the mic bias;
+   stock waits 0 ms.
+4. **Headset mic.** Path `0x20` (codec `+0x64` bits `0x0c`) is probably
+   the headset mic. It is not implemented.
