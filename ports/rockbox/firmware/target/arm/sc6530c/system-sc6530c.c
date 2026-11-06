@@ -30,6 +30,8 @@
 #include "pcm-internal.h"
 #include "audio-target.h"
 #include "button.h"
+#include "backlight-target.h"
+#include "sim-target.h"
 #if CONFIG_TUNER
 #include "fmradio_i2c.h"
 #include "tuner.h"
@@ -259,7 +261,22 @@ int system_memory_guard(int newmode)
  * Rockbox. This screen shows the live registers, toggles each candidate
  * and writes a register dump (pinmux reads only, never writes). */
 extern volatile unsigned torch_hold_count;
+extern void sc6530_sd_errors(unsigned *retries, unsigned *failures);
+extern void sc6530_sd_write_stats(unsigned long *blocks, unsigned long *ticks,
+                                  unsigned long *max_ticks);
+extern volatile bool hook_level;
 #define ANA_LED_CTRL 0x82001220u
+
+static struct sim_info sim_last[2];
+static bool sim_done;
+
+static const char *sim_status_name(enum sim_status s)
+{
+    static const char *const names[] = {
+        "no card", "bad ATR", "ATR only", "ICCID", "ICCID+IMSI",
+    };
+    return names[s];
+}
 
 static bool torch_dump(const char *what)
 {
@@ -287,6 +304,51 @@ static bool torch_dump(const char *what)
                            at_start ? "recstart" : "now", c[0], c[1], c[2], c[3],
                            c[4], c[5], c[6], c[7]) >= 0;
         }
+        {
+            unsigned retries, failures;
+            unsigned long wr_blocks, wr_ticks, wr_max_ticks;
+            unsigned long kbps;
+
+            sc6530_sd_errors(&retries, &failures);
+            sc6530_sd_write_stats(&wr_blocks, &wr_ticks, &wr_max_ticks);
+            kbps = wr_ticks ? wr_blocks * HZ / 2 / wr_ticks : 0;
+            ok &= fdprintf(fd, "SD retries=%u failures=%u wr_blocks=%lu "
+                           "wr_kbps=%lu wr_max_ms=%lu\n",
+                           retries, failures, wr_blocks, kbps,
+                           wr_max_ticks * 1000 / HZ) >= 0;
+        }
+        {
+            int16_t rmin, rmax, rhead[4];
+
+            sc6530_rec_right_raw(&rmin, &rmax, rhead);
+            ok &= fdprintf(fd, "REC adcr_variant=%d banks=%u right_railed=%u "
+                           "r_min=%d r_max=%d r_head=%d,%d,%d,%d\n",
+                           sc6530_adcr_variant(), sc6530_rec_banks(),
+                           sc6530_rec_right_railed(), rmin, rmax,
+                           rhead[0], rhead[1], rhead[2], rhead[3]) >= 0;
+        }
+        ok &= fdprintf(fd, "MIC path=%02x mic_adc_at_start=%d mic_adc_now=%d headphones=%d hook_eic4=%d eic=%04lx\n",
+                       sc6530_rec_mic_path(), sc6530_headset_mic_raw(),
+                       sc6530_adc_headset_raw(), headphones_inserted(), hook_level,
+                       (unsigned long)adi_read(0x82001900)) >= 0;
+        {
+            struct sc6530_headset_info hs;
+
+            sc6530_headset_debug(&hs);
+            ok &= fdprintf(fd, "HOOK enabled=%d check_mic_adc=%d check_level=%d "
+                           "state=%d level_now=%d idle=%d raw=%d held=%c "
+                           "last_press_raw=%d presses=%u/%u/%u "
+                           "taps=%u/%u holds=%u/%u muted=%u\n",
+                           hs.enabled, hs.check_raw, hs.check_level, hs.state,
+                           hs.level, hs.idle, hs.raw, hs.button, hs.press_raw,
+                           hs.presses[0], hs.presses[1], hs.presses[2],
+                           hs.taps[0], hs.taps[1], hs.holds[0], hs.holds[1],
+                           hs.muted) >= 0;
+            ok &= fdprintf(fd, "HOOKLOG") >= 0;
+            for (unsigned i = 0; i < hs.log_n; i++)
+                ok &= fdprintf(fd, " %c%d", hs.log_cls[i], hs.log_raw[i]) >= 0;
+            ok &= fdprintf(fd, "\n") >= 0;
+        }
         ok &= fdprintf(fd, "VBC +10=%08lx +18=%08lx +80=%08lx owner=%08lx "
                        "DP +00=%08lx +18=%08lx route=%d\n",
                        (unsigned long)REG32(0x82003010), (unsigned long)REG32(0x82003018),
@@ -298,14 +360,26 @@ static bool torch_dump(const char *what)
     {
         struct rtc6211_dbg_info fm;
         rtc6211_dbg_info(&fm);
-        ok &= fdprintf(fd, "FM present=%d N=%d powered=%d nor_tables=%d pin17c=%08lx regs",
+        ok &= fdprintf(fd, "FM present=%d N=%d powered=%d nor_tables=%d i2c_errors=%u retries=%u pin17c=%08lx regs",
                        rtc6211_get(RADIO_PRESENT), fm.chip_n, tuner_powered(), fm.nor_tables,
+                       fm.i2c_errors, fm.start_retries,
                        (unsigned long)REG32(0x8c00017c)) >= 0;
         for (int i = 0; i < 16; i++)
             ok &= fdprintf(fd, " %04x", fm.regs[i]) >= 0;
         ok &= fdprintf(fd, "\n") >= 0;
     }
 #endif
+    for (int s = 0; sim_done && s < 2; s++)
+    {
+        const struct sim_info *si = &sim_last[s];
+        ok &= fdprintf(fd, "SIM%d %s %s pin=%d sw=%04x/%04x/%04x iccid=%s imsi=%s atr",
+                       s, sim_status_name(si->status), si->three_volt ? "3V" : "1.8V",
+                       si->pin_required, si->sw_select, si->sw_iccid, si->sw_imsi,
+                       si->iccid, si->imsi) >= 0;
+        for (int i = 0; i < si->atr_len; i++)
+            ok &= fdprintf(fd, " %02x", si->atr[i]) >= 0;
+        ok &= fdprintf(fd, "\n") >= 0;
+    }
     ok &= fdprintf(fd, "APB 8b000000=%08lx 8b0000a0=%08lx\n",
                    (unsigned long)REG32(0x8b000000), (unsigned long)REG32(0x8b0000a0)) >= 0;
     for (uint32_t off = 0; off < 0x300; off += 0x20) {
@@ -317,32 +391,91 @@ static bool torch_dump(const char *what)
     return (close(fd) == 0) && ok;
 }
 
+/* ADC R bit sweep (key 0): see sc6530_adcr_sweep in audiohw. One line per
+ * flipped bit; "R-LIVE" marks a right channel that is no longer pinned. */
+static struct sc6530_sweep sweep_res[140];
+
+static const char *adcr_sweep(void)
+{
+    int n = sc6530_adcr_sweep(sweep_res, ARRAYLEN(sweep_res));
+    int fd, live = 0;
+    bool ok = true;
+
+    if (n < 0)
+        return "stop recording first";
+    fd = open(ROCKBOX_DIR "/adcr-sweep.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+        return "sweep: file FAILED";
+    ok &= fdprintf(fd, "ADC R sweep variant=%d tuner=%d\n",
+                   sc6530_adcr_variant(), (int)tuner_powered()) >= 0;
+    for (int i = 0; i < n; i++)
+    {
+        const struct sc6530_sweep *r = &sweep_res[i];
+        bool r_live = r->banks && r->min[1] > -32000 && r->max[1] < 32000 &&
+                      r->max[1] - r->min[1] >= 16;
+        bool l_live = r->banks && r->min[0] > -32000 && r->max[0] < 32000 &&
+                      r->max[0] - r->min[0] >= 16;
+        live += r_live;
+        ok &= fdprintf(fd, "%s %08lx m=%04x v=%04x L=%d..%d R=%d..%d banks=%u%s%s%s\n",
+                       r->addr ? "BIT" : "BASE", (unsigned long)r->addr,
+                       r->mask, r->value, r->min[0], r->max[0],
+                       r->min[1], r->max[1], r->banks,
+                       r->banks ? "" : " STALL", l_live ? "" : " L-DEAD",
+                       r_live ? " R-LIVE" : "") >= 0;
+    }
+    ok &= fdprintf(fd, "END entries=%d r_live=%d\n", n, live) >= 0;
+    ok &= close(fd) == 0;
+    if (!ok)
+        return "sweep: write FAILED";
+    return live ? "sweep done: R LIVE found!" : "sweep done: R dead";
+}
+
 bool dbg_ports(void)
 {
-    uint32_t led_saved = adi_read(ANA_LED_CTRL);
-    int ana_mode = 0;              /* 0 untouched, 1 0x8800/0x4400, 2 clear 0x1100 */
+    bool vib = false, keys = false;
     const char *status = torch_dump("open") ? "dump saved" : "dump FAILED";
 
     lcd_setfont(FONT_SYSFIXED);
     for (;;)
     {
-        uint32_t led = adi_read(ANA_LED_CTRL);
         lcd_clear_display();
-        lcd_puts(0, 0, "Torch test");
+        lcd_puts(0, 0, "I/O test");
         lcd_putsf(0, 2, "GPIO7 torch: %s", torch_get() ? "ON" : "off");
         lcd_putsf(0, 3, "Hold-0 toggles: %u", torch_hold_count);
         lcd_putsf(0, 4, "B0 D%04lx M%04lx", (unsigned long)REG32(0x8a000000),
                   (unsigned long)REG32(0x8a000004));
         lcd_putsf(0, 5, "B0 R%04lx", (unsigned long)REG32(0x8a000008));
-        lcd_putsf(0, 6, "LED_CTRL %04lx", (unsigned long)led);
-        lcd_putsf(0, 7, "ANA mode %d", ana_mode);
-        lcd_puts(0, 9, "1: GPIO7 on/off");
-        lcd_puts(0, 10, "3: LED 8800 on/off");
-        lcd_puts(0, 11, "5: LED ~1100 on/off");
-        lcd_putsf(0, 12, "7: VBC+80 bits30 %s", sc6530_rec_route() ? "on" : "off");
+        lcd_putsf(0, 6, "Vibrator: %s", vib ? "ON" : "off");
+        lcd_putsf(0, 7, "Keypad light: %s", keys ? "full" : "off");
+        {
+            /* Headset buttons: live mic-line ADC, idle level, comparator
+             * and the class held; last press's raw value and counts
+             * (Play / Vol+ / Vol-) for calibrating the bands. */
+            struct sc6530_headset_info hs;
+
+            sc6530_headset_debug(&hs);
+            lcd_putsf(0, 1, "Hs %s r%d i%d %s %c", hs.enabled ? "on" : "off",
+                      hs.raw, hs.idle, hs.level ? "EIC" : "", hs.button);
+            lcd_putsf(0, 8, "Hs last%d C%u +%u -%u", hs.press_raw,
+                      hs.presses[0], hs.presses[1], hs.presses[2]);
+        }
+        lcd_puts(0, 9, "1: torch on/off");
+        lcd_puts(0, 10, "3: vibrator on/off");
+        lcd_puts(0, 11, "5: keypad light test");
+        lcd_putsf(0, 12, "7: ADC R variant %d", sc6530_adcr_variant());
+        lcd_puts(0, 13, "#: read SIM cards");
         lcd_puts(0, 14, "9: save dump");
         lcd_puts(0, 15, "Back: exit");
+        lcd_puts(0, 16, "0: ADC R bit sweep");
         lcd_puts(0, 17, status);
+        for (int s = 0; sim_done && s < 2; s++)
+        {
+            const struct sim_info *si = &sim_last[s];
+            lcd_putsf(0, 18 + s, "SIM%d %s%s", s,
+                      si->imsi[0] ? si->imsi : si->iccid[0] ? si->iccid :
+                      sim_status_name(si->status),
+                      si->pin_required ? " PIN" : "");
+        }
         lcd_update();
 
         int button = button_get_w_tmo(HZ / 4);
@@ -353,25 +486,35 @@ bool dbg_ports(void)
         if (button == BUTTON_1) {
             torch_set(!torch_get());
             status = torch_get() ? "GPIO7 high" : "GPIO7 low";
-        } else if (button == BUTTON_3 || button == BUTTON_5) {
-            int mode = button == BUTTON_3 ? 1 : 2;
-            ana_mode = ana_mode == mode ? 0 : mode;
-            if (ana_mode == 1)
-                adi_write(ANA_LED_CTRL, (led_saved & ~0x4400u) | 0x8800u);
-            else if (ana_mode == 2)
-                adi_write(ANA_LED_CTRL, led_saved & ~0x1100u);
-            else
-                adi_write(ANA_LED_CTRL, led_saved);
-            status = ana_mode ? "LED_CTRL changed" : "LED_CTRL restored";
+        } else if (button == BUTTON_3) {
+            vib = !vib;
+            vibrator_set(vib ? 4 : 0);
+            status = vib ? "vibrator on" : "vibrator off";
+        } else if (button == BUTTON_5) {
+            keys = !keys;
+            keylight_set(keys ? MAX_BRIGHTNESS_SETTING : 0);
+            status = keys ? "keypad light full" : "keypad light off";
         } else if (button == BUTTON_7) {
-            sc6530_rec_set_route(!sc6530_rec_route());
-            status = "VBC+80 toggled";
+            sc6530_set_adcr_variant(sc6530_adcr_variant() + 1);
+            status = "ADC R variant changed";
+        } else if (button == BUTTON_HASH) {
+            lcd_puts(0, 17, "reading SIM...   ");
+            lcd_update();
+            sim_read(0, &sim_last[0]);
+            sim_read(1, &sim_last[1]);
+            sim_done = true;
+            status = torch_dump("sim") ? "SIM read, dump saved" : "SIM read";
+        } else if (button == BUTTON_0) {
+            lcd_puts(0, 17, "sweeping ~25 s... ");
+            lcd_update();
+            status = adcr_sweep();
         } else if (button == BUTTON_9) {
             status = torch_dump("key 9") ? "dump saved" : "dump FAILED";
         }
     }
-    if (ana_mode)
-        adi_write(ANA_LED_CTRL, led_saved);
+    if (vib)
+        vibrator_set(0);
+    buttonlight_hw_on();               /* back to the configured level */
     lcd_setfont(FONT_UI);
     return false;
 }

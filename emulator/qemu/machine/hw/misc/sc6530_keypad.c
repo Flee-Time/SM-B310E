@@ -153,6 +153,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530KeypadState, SC6530_KEYPAD)
  * the END key level in the ADI's ANA bank at EIC_DBNC_DATA 0x82001900
  * bit 3, the register the guest's mailbox read observes. */
 extern void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
+extern void sc6530_adi_set_headset_button(Object *adi_obj, unsigned button,
+                                          bool held);
 
 /* ---------------------------------------------------------------------- */
 /* Host-key -> SC6530 matrix mapping (see the header comment for the      */
@@ -193,6 +195,9 @@ static const Sc6530KeyMapEntry sc6530_keymap[] = {
     { KEY_RIGHT,      "right",        4,  4,  0x07 },
     { KEY_ESC,        "esc",         -1, -1,  0x02 }, /* END (EIC bit 3) */
     { KEY_END,        "end",         -1, -1,  0x02 }, /* END (alias) */
+    { KEY_H,          "h",           -2,  1,  0x00 }, /* headset centre (EIC bit 4) */
+    { KEY_J,          "j",           -2,  2,  0x00 }, /* headset volume up */
+    { KEY_K,          "k",           -2,  3,  0x00 }, /* headset volume down */
 };
 
 static const Sc6530KeyMapEntry *sc6530_keymap_lookup(unsigned int lnx)
@@ -380,7 +385,11 @@ static void sc6530_keypad_event(DeviceState *dev, QemuConsole *src,
                  evt->key.down ? "down" : "up");
         return;
     }
-    if (m->row < 0) {
+    if (m->row == -2) {
+        if (s->adi) {
+            sc6530_adi_set_headset_button(s->adi, m->col, evt->key.down);
+        }
+    } else if (m->row < 0) {
         sc6530_keypad_end(s, evt->key.down);
     } else if (evt->key.down) {
         sc6530_keypad_press(s, m);

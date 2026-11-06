@@ -172,12 +172,12 @@ static int bat_adc_wait_done(void)
 }
 
 /* One conversion attempt (stock adc_read @0x20ef6 verbatim order). */
-static uint32_t bat_adc_convert(void)
+static uint32_t adc_convert(uint32_t ch)
 {
     uint32_t raw;
 
     adi_write(BAT_ADC_START, adi_read(BAT_ADC_START) | 1u);
-    bat_adc_select(BAT_CH_VBAT);
+    bat_adc_select(ch);
     bat_adc_mode0();
     adi_write(BAT_ADC_ENABLE, adi_read(BAT_ADC_ENABLE) | 2u);
 
@@ -191,18 +191,40 @@ static uint32_t bat_adc_convert(void)
     return raw;
 }
 
-/* Returns battery voltage in millivolts (0 if wedged). */
-static uint32_t battery_read_mv(void)
+/* Raw 10-bit reading of one ADC channel, or BAT_CONV_TIMEOUT. The ADC is
+ * shared by the battery gauge and the headset check, so a conversion runs
+ * with interrupts off (it takes microseconds when the ADC is healthy). */
+static uint32_t adc_read_raw(uint32_t ch)
 {
-    uint32_t raw = bat_adc_convert();
+    int old = disable_irq_save();
+    uint32_t raw = adc_convert(ch);
 
     if (raw == BAT_CONV_TIMEOUT) {
         /* Stock @0x20f34: timeout -> recovery -> retry once. */
         bat_adc_recovery();
-        raw = bat_adc_convert();
-        if (raw == BAT_CONV_TIMEOUT)
-            return 0;
+        raw = adc_convert(ch);
     }
+    restore_irq(old);
+    return raw;
+}
+
+/* Headset mic line (stock ADC_CheckHeadsetStatus 0x22d7a: channel 1, the
+ * mean of two conversions). Returns the raw value, or -1 if wedged. */
+int sc6530_adc_headset_raw(void)
+{
+    uint32_t a = adc_read_raw(1), b = adc_read_raw(1);
+    if (a == BAT_CONV_TIMEOUT || b == BAT_CONV_TIMEOUT)
+        return -1;
+    return (int)((a + b) / 2);
+}
+
+/* Returns battery voltage in millivolts (0 if wedged). */
+static uint32_t battery_read_mv(void)
+{
+    uint32_t raw = adc_read_raw(BAT_CH_VBAT);
+
+    if (raw == BAT_CONV_TIMEOUT)
+        return 0;
     return (raw * BAT_CONV_NUM + BAT_CONV_DEN / 2u) / BAT_CONV_DEN;
 }
 

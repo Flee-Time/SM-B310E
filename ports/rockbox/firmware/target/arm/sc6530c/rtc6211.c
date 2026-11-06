@@ -79,6 +79,8 @@ static const uint32_t n_tables[5] = {
 #define N_TURNON  0x96aa
 
 static bool tuner_present, tables_ok, chip_n;
+static unsigned i2c_errors;              /* failed transfers, all time */
+static unsigned start_retries;           /* power-ups that needed a retry */
 static uint16_t cache[16];
 static int band_base = 8750, band_space = 10;   /* 10 kHz units */
 static uint16_t band_bits = 0, space_bits = 1u << 10;
@@ -89,9 +91,18 @@ static void rtc_read(int count)
 {
     unsigned char buf[32];
     if (fmradio_i2c_read(I2C_ADR, buf, count * 2) < 0)
+    {
+        i2c_errors++;
         return;
+    }
+    /* Like stock, keep reads apart from the write shadow (reg02..09):
+     * only status and ID registers (0A..0F, 00, 01) are taken. */
     for (int i = 0; i < count; i++)
-        cache[(STATUS + i) & 15] = buf[2 * i] << 8 | buf[2 * i + 1];
+    {
+        int reg = (STATUS + i) & 15;
+        if (reg >= STATUS || reg <= CHIPID)
+            cache[reg] = buf[2 * i] << 8 | buf[2 * i + 1];
+    }
 }
 
 static void rtc_write(int count)
@@ -103,7 +114,8 @@ static void rtc_write(int count)
         buf[2 * i] = value >> 8;
         buf[2 * i + 1] = value;
     }
-    fmradio_i2c_write(I2C_ADR, buf, count * 2);
+    if (fmradio_i2c_write(I2C_ADR, buf, count * 2) < 0)
+        i2c_errors++;
 }
 
 static bool check_nor_tables(void)
@@ -129,7 +141,8 @@ static void write_nor_table(int index)
            sizeof(buf));
     if (!chip_n && index == 5)
         buf[0x16] = 0x10;               /* stock forces this byte */
-    fmradio_i2c_write(I2C_ADR, buf, sizeof(buf));
+    if (fmradio_i2c_write(I2C_ADR, buf, sizeof(buf)) < 0)
+        i2c_errors++;
 }
 
 static void write_raw(const uint16_t *regs, int count)
@@ -140,7 +153,8 @@ static void write_raw(const uint16_t *regs, int count)
         buf[2 * i] = regs[i] >> 8;
         buf[2 * i + 1] = regs[i];
     }
-    fmradio_i2c_write(I2C_ADR, buf, count * 2);
+    if (fmradio_i2c_write(I2C_ADR, buf, count * 2) < 0)
+        i2c_errors++;
 }
 
 /* N only: reg02..0F = 0, then reg00 (the stream wraps 0x0F -> 0x00). */
@@ -257,6 +271,29 @@ static void rtc6211_start(void)
     apply_powercfg();
 }
 
+/* Power up and run the start sequence. A start that hit an I2C error,
+ * or after which the chip does not read back awake, leaves it silent
+ * until the next power cycle, so retry from reset (up to 3 attempts). */
+static void power_up(void)
+{
+    for (int attempt = 0; attempt < 3; attempt++)
+    {
+        unsigned errors = i2c_errors;
+        tuner_power(true);
+        rtc6211_start();
+        rtc_read(16);
+        bool awake = cache[DEVICEID] == 0x1688 &&
+                     (cache[CHIPID] >> 10) == (chip_n ? 4 : 3);
+        if (awake && i2c_errors == errors)
+            return;
+        start_retries++;
+        logf("rtc6211: start attempt %d failed (errors %u)", attempt,
+             i2c_errors - errors);
+        tuner_power(false);
+        sleep(HZ / 20);
+    }
+}
+
 void rtc6211_init(void)
 {
     tuner_power(true);
@@ -354,10 +391,7 @@ int rtc6211_set(int setting, int value)
             tuner_power(false);
         }
         else if (!tuner_powered())
-        {
-            tuner_power(true);
-            rtc6211_start();
-        }
+            power_up();
         break;
     case RADIO_FREQUENCY:
         set_frequency(value);
@@ -407,5 +441,7 @@ void rtc6211_dbg_info(struct rtc6211_dbg_info *nfo)
         rtc_read(16);
     memcpy(nfo->regs, cache, sizeof(nfo->regs));
     nfo->nor_tables = tables_ok;
+    nfo->i2c_errors = i2c_errors;
+    nfo->start_retries = start_retries;
     nfo->chip_n = chip_n;
 }

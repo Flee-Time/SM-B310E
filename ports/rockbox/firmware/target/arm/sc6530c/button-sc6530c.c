@@ -25,6 +25,7 @@
 #include "kernel.h"
 #include "button-target.h"
 #include "backlight-target.h"
+#include "audio-target.h"
 
 /*
  * B310E-OS Rockbox port — b310e/target/arm/sc6530c/button-sc6530c.c
@@ -66,6 +67,7 @@ typedef volatile struct {
 #define KEYPAD_EIC_DBNC_DATA  0x82001900u
 #define KEYPAD_EIC_DBNC_DMSK  0x82001904u
 #define KEYPAD_EIC_PB_CH      3u
+#define KEYPAD_EIC_HOOK_CH    4u    /* headset button, stock EIC 20 */
 
 /* ---- bounded ADI mailbox (B310E-OS drivers/keypad.c, fpdoom) ----------- */
 #define ADI_RD_CMD      0x82000018
@@ -140,6 +142,7 @@ static int button_code(uint8_t code)
 
 /* Accumulated held-button mask. */
 static volatile int held_mask;
+volatile bool hook_level;       /* headset in-line button, raw EIC ch4 */
 volatile uint32_t s_keypad_irq_count;
 
 void button_init_device(void)
@@ -177,7 +180,8 @@ void button_init_device(void)
     adi_write(0x820010e4, 0x20);
     adi_write(0x820010e0, 0x80);
     adi_write(KEYPAD_EIC_DBNC_DMSK,
-              adi_read(KEYPAD_EIC_DBNC_DMSK) | (1u << KEYPAD_EIC_PB_CH));
+              adi_read(KEYPAD_EIC_DBNC_DMSK) | (1u << KEYPAD_EIC_PB_CH) |
+              (1u << KEYPAD_EIC_HOOK_CH));
 
     held_mask = 0;
     s_keypad_irq_count = 0;
@@ -285,12 +289,18 @@ int button_read_device(int *data)
     int old = disable_irq_save();
     *data = 0;
     /* END remains an analog EIC level, sampled by the 100 Hz tick. */
-    if ((adi_read(KEYPAD_EIC_DBNC_DATA) >> KEYPAD_EIC_PB_CH) & 1u)
+    uint32_t eic = adi_read(KEYPAD_EIC_DBNC_DATA);
+    if ((eic >> KEYPAD_EIC_PB_CH) & 1u)
         held_mask |= BUTTON_POWER;
     else
         held_mask &= ~BUTTON_POWER;
+    /* Headset buttons: centre = Play, sides = Volume up/down, enabled only
+     * after the plug-in mic check (see sc6530_headset_tick in audiohw).
+     * EIC channel 4 is the centre button's comparator, active high. */
+    hook_level = (eic >> KEYPAD_EIC_HOOK_CH) & 1u;
+    unsigned headset = sc6530_headset_tick(hook_level);
     capture_matrix_edges();
-    int result = held_mask;
+    int result = held_mask | headset;
     restore_irq(old);
     torch_hold_check(result);
     return result;

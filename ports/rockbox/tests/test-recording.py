@@ -30,6 +30,24 @@ def tone(samples, frequency, rate):
     return 2 * math.hypot(real, imag) / len(samples)
 
 
+def phase_jumps(samples, frequency, rate, window):
+    """Count steps in the tone's phase between consecutive windows.
+
+    The QEMU tone is phase-continuous, so a step means samples were lost
+    (PCM buffer overflow drops a whole chunk). Windows hold whole cycles;
+    a steady drift from a slightly different clock is subtracted."""
+    w = 2 * math.pi * frequency / rate
+    phases = []
+    for start in range(0, len(samples) - window, window):
+        re = sum(samples[start + i] * math.cos(w * (start + i)) for i in range(window))
+        im = sum(samples[start + i] * math.sin(w * (start + i)) for i in range(window))
+        phases.append(math.atan2(im, re))
+    steps = [(b - a + math.pi) % (2 * math.pi) - math.pi
+             for a, b in zip(phases, phases[1:])]
+    drift = sorted(steps)[len(steps) // 2]
+    return sum(abs(s - drift) > math.radians(20) for s in steps)
+
+
 def wav_headers(image):
     found, start = {}, 0
     while (pos := image.find(b"RIFF", start)) >= 0:
@@ -52,7 +70,8 @@ def read_wav(image, pos):
     return channels, rate, bits, pcm
 
 
-def run(args, name, tone_hz, gain, frequency):
+def run(args, name, frequency, config, qemu_args, expect):
+    """expect: one (tone_hz, amplitude) per WAV channel."""
     out = args.output / name
     out.mkdir(parents=True, exist_ok=True)
     root = FAT["directory"]()
@@ -62,9 +81,9 @@ def run(args, name, tone_hz, gain, frequency):
                             path.read_bytes())
     FAT["add_file"](root, "progs/rockbox.bin", args.rockbox.read_bytes())
     FAT["add_file"](root, ".rockbox/config.cfg", (
-        "start in screen: recording\nrec source: mic\nrec format: wave\n"
-        f"rec frequency: {frequency // 1000}\nrec channels: mono\n"
-        f"rec mic gain: {gain}\nbacklight timeout: on\nidle poweroff: 0\n").encode())
+        "start in screen: recording\nrec format: wave\n"
+        f"rec frequency: {frequency // 1000}\n" + config +
+        "backlight timeout: on\nidle poweroff: 0\n").encode())
     image_path = out / "sd.img"
     FAT["write_image"](image_path, root, 64, True)
     before = set(wav_headers(image_path.read_bytes()))
@@ -77,7 +96,7 @@ def run(args, name, tone_hz, gain, frequency):
                "-drive", f"file={args.rockbox.as_posix()},format=raw,if=none,id=os,readonly=on",
                "-drive", f"file={image_path.as_posix()},format=raw,if=none,id=sdcard",
                "-audiodev", "none,id=audio0", "-global", "sc6530_adi.audiodev=audio0",
-               "-global", f"sc6530_adi.mic-tone-hz={tone_hz}",
+               *qemu_args,
                "-icount", "shift=3,sleep=off"]
     env = os.environ.copy()
     if os.name == "nt":
@@ -100,8 +119,14 @@ def run(args, name, tone_hz, gain, frequency):
             qmp.hmp("sendkey ret 180")              # start recording
             time.sleep(args.seconds)
             qmp.command("screendump", {"filename": str(out / "recording.png"), "format": "png"})
-            qmp.hmp("sendkey f2 180")               # stop
-            time.sleep(4)
+            # Slow-card cases stop with a short tap: the keypad scan must
+            # keep running while the card programs (missed presses during
+            # 48 kHz stereo FM recording, 2026-11-06).
+            slow = any("write-busy-every" in a for a in qemu_args)
+            qmp.hmp("sendkey f2 40" if slow else "sendkey f2 180")  # stop
+            # A slow card makes QEMU spend real time on the status polls;
+            # give the guest longer to flush and close the WAV.
+            time.sleep(40 if slow else 4)
             qmp.command("screendump", {"filename": str(out / "stopped.png"), "format": "png"})
             qmp.command("quit")
             process.wait(timeout=10)
@@ -116,16 +141,39 @@ def run(args, name, tone_hz, gain, frequency):
     new = sorted(set(wav_headers(image)) - before)
     assert new, (name, "no new WAV file on the card")
     channels, rate, bits, pcm = read_wav(image, new[-1])
-    assert (channels, rate, bits) == (1, frequency, 16), (name, channels, rate, bits)
-    assert len(pcm) >= rate, (name, "recording shorter than one second", len(pcm))
-    window = list(pcm[len(pcm) // 2 - rate // 4:len(pcm) // 2 + rate // 4])
-    level = tone(window, tone_hz, rate)
-    off = tone(window, tone_hz * 1.37, rate)
-    expected = 8192 * (gain + 1) / 16
-    assert abs(level - expected) < expected * .05, (name, level, expected)
-    assert off < expected * .02, (name, "unexpected energy off the tone", off)
-    result = {"case": name, "seconds": len(pcm) / rate, "rate": rate,
-              "tone": tone_hz, "level": round(level), "expected": round(expected)}
+    assert (channels, rate, bits) == (len(expect), frequency, 16), (name, channels, rate, bits)
+    frames = len(pcm) // channels
+    assert frames >= rate, (name, "recording shorter than one second", frames)
+    levels = []
+    for c, tones in enumerate(expect):
+        # One (hz, amplitude) per channel, or a list when a channel carries
+        # several tones (the FM mono mix).
+        tones = tones if isinstance(tones, list) else [tones]
+        samples = pcm[c::channels]
+        window = list(samples[frames // 2 - rate // 4:frames // 2 + rate // 4])
+        for tone_hz, expected in tones:
+            level = tone(window, tone_hz, rate)
+            off = tone(window, tone_hz * 1.37, rate)
+            assert abs(level - expected) < expected * .05, (name, c, tone_hz, level, expected)
+            assert off < expected * .02, (name, c, "unexpected energy off the tone", off)
+            levels.append(round(level))
+    result = {"case": name, "seconds": frames / rate, "rate": rate,
+              "channels": channels, "levels": levels,
+              "expected": [round(e) for t in expect
+                           for _, e in (t if isinstance(t, list) else [t])]}
+    if any("fail-write-every" in a for a in qemu_args):
+        log = (out / "trace.log").read_text(errors="replace")
+        result["injected_write_faults"] = log.count("injected write fault")
+        assert result["injected_write_faults"] > 0, (name, "no faults injected")
+    if any("write-busy-every" in a for a in qemu_args):
+        log = (out / "trace.log").read_text(errors="replace")
+        result["injected_busy_writes"] = log.count("injected write busy")
+        assert result["injected_busy_writes"] > 0, (name, "no slow writes injected")
+        tone_hz = (expect[0] if isinstance(expect[0], tuple) else expect[0][0])[0]
+        body = pcm[0::channels][rate // 5:frames - rate // 5]
+        result["phase_jumps"] = phase_jumps(body, tone_hz, rate, rate // 100)
+        assert result["phase_jumps"] == 0, (name, "audio dropped during slow writes",
+                                            result["phase_jumps"])
     print("PASS " + json.dumps(result), flush=True)
     return result
 
@@ -135,11 +183,62 @@ def main():
     for option in ("qemu", "rockbox", "runtime", "output"):
         parser.add_argument("--" + option, type=Path, required=True)
     parser.add_argument("--seconds", type=float, default=6)
+    parser.add_argument("--cases", help="comma-separated case names")
     args = parser.parse_args()
     for option in ("qemu", "rockbox", "runtime", "output"):
         setattr(args, option, getattr(args, option).resolve())
     args.output.mkdir(parents=True, exist_ok=True)
-    cases = [("mic-16k", 1000, 8, 16000), ("mic-8k-gain15", 440, 15, 8000)]
+    def level(gain):
+        return 8192 * (gain + 1) / 16
+    cases = [
+        ("mic-16k", 16000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000"], [(1000, level(8))]),
+        ("mic-8k-gain15", 8000, "rec source: mic\nrec channels: mono\nrec mic gain: 15\n",
+         ["-global", "sc6530_adi.mic-tone-hz=440"], [(440, level(15))]),
+        # Headset with a mic: detected on ADC channel 1, its mic is used
+        # at 2/3 of the mic gain setting (stock's lower headset table).
+        ("headset-mic", 16000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000",
+          "-global", "sc6530_aux.headset-present=on",
+          "-global", "sc6530_adi.headset-mic=on"],
+         [(1000, level((8 * 2 + 1) // 3))]),     # headset runs at 2/3 gain
+        # Headphones without a mic: falls back to the phone's own mic.
+        ("headphones-no-mic", 16000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000",
+          "-global", "sc6530_aux.headset-present=on"], [(1000, level(8))]),
+        # FM line-in: ADC R does not work on the SC6530C, so FM is recorded
+        # as stock does, both channels (600 Hz left, 900 Hz right) mixed into
+        # ADC L, and written to both WAV channels.
+        ("fm-mono-mix", 16000, "rec source: fmradio\nrec channels: stereo\n"
+         "rec left gain: 8\nrec right gain: 8\nfm_region: eu\n",
+         ["-global", "sc6530_aux.headset-present=on"],
+         [[(600, level(8)), (900, level(8))], [(600, level(8)), (900, level(8))]]),
+        # Every 7th SD block write fails (lost on the bus): the driver has
+        # to recover and retry, or the FAT writeback panics (2026-11-06).
+        ("sd-write-faults", 16000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000",
+          "-global", "sc6530_sdio.fail-write-every=7", "-d", "unimp"],
+         [(1000, level(8))]),
+        # Slow card: every 1000th block write stays busy for 1 s (the phone
+        # showed ~1 s stalls). At 48 kHz the PCM buffer holds 1.2 s; the
+        # recording must not lose audio (warning 0x1 on the phone).
+        ("sd-slow-card", 48000, "rec source: mic\nrec channels: mono\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000",
+          "-global", "sc6530_sdio.write-busy-every=1000",
+          "-global", "sc6530_sdio.write-busy-ms=1000", "-d", "unimp"],
+         [(1000, level(8))]),
+        # 48 kHz stereo WAV (192 KB/s) on a card that takes 1 ms to program
+        # every block: Rockbox flushes hundreds of blocks at once, and
+        # spinning through each one starved the encoder (warning 0x1 on the
+        # phone with WAV at 48 kHz, not with MP3).
+        ("sd-48k-stereo-wav", 48000, "rec source: mic\nrec channels: stereo\nrec mic gain: 8\n",
+         ["-global", "sc6530_adi.mic-tone-hz=1000",
+          "-global", "sc6530_sdio.write-busy-every=1",
+          "-global", "sc6530_sdio.write-busy-ms=1", "-d", "unimp"],
+         [(1000, level(8)), (1000, level(8))]),
+    ]
+    if args.cases:
+        cases = [c for c in cases if c[0] in args.cases.split(",")]
     results = [run(args, *case) for case in cases]
     (args.output / "results.json").write_text(json.dumps(results, indent=2))
 

@@ -100,6 +100,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530AdiState, SC6530_ADI)
 /* Exported for todo 17's sc6530_keypad (the EIC END-key hook, see below):
  * raises/lowers bit 3 of EIC_DBNC_DATA inside the ANA bank. */
 void sc6530_adi_set_eic_pb(Object *adi_obj, bool held);
+void sc6530_adi_set_headset_button(Object *adi_obj, unsigned button, bool held);
 size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes);
 size_t sc6530_dma_hw_request(Object *obj, unsigned request, size_t bytes);
 bool sc6530_dsp_arm_audio_owned(Object *obj);
@@ -164,6 +165,13 @@ struct Sc6530AdiState {
 
     uint32_t mailbox_regs[SC6530_ADI_MAILBOX_SIZE / 4];
     uint16_t battery_adc;
+    bool headset_mic;             /* plugged headphones have a mic (4-pole) */
+    unsigned headset_button;      /* held: 1 centre, 2 vol up, 3 vol down */
+    /* Side-button contact bounce: for this long after a side button goes
+     * down the line is shorted (reads ~0, comparator high), as the phone
+     * suggested (a side button paused playback, 2026-11-06). */
+    uint32_t headset_bounce_ms;
+    int64_t headset_bounce_until;
     bool charger_present;
     uint32_t ana_regs[SC6530_ADI_ANA_SIZE / 4];
     uint32_t vbc_regs[SC6530_ADI_VBC_SIZE / 4];
@@ -193,11 +201,12 @@ struct Sc6530AdiState {
      * synthetic tone so guest drivers can be checked deterministically. */
     QEMUTimer *rec_timer;
     int64_t rec_deadline;
-    int16_t rec_bank[VBC_BANK_FRAMES];
+    int16_t rec_bank[2][VBC_BANK_FRAMES];   /* ADC L -> AD0, ADC R -> AD1 */
     unsigned rec_pos[2];
     uint64_t rec_sample;
     uint32_t mic_tone_hz;
     uint16_t mic_level;
+    uint32_t line_tone_hz[2];     /* FM line-in left/right test tones */
 
     /* Index-echo state: the last ADI_ARM_RD_CMD write (addr & 0xFFF). */
     uint32_t rd_index;
@@ -405,6 +414,9 @@ static uint32_t sc6530_adi_ana_effective(const Sc6530AdiState *s,
         /* Physical EIC level is the ground truth (the debounce-mask is a
          * config the guest may not touch for the power-button channel). */
         word |= (s->eic_pb_phys & 0xffffu);
+        if (qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) < s->headset_bounce_until) {
+            word |= 1u << 4;      /* side-button bounce trips the comparator */
+        }
         /* e52q7a 0x663d4: logical EIC18 = analog channel2, active high.
          * External power cannot be written by the guest. Only polling
          * is modeled here; debounce/edge interrupts remain unsupported. */
@@ -540,6 +552,23 @@ static uint64_t sc6530_adi_ana_read(void *opaque, hwaddr offset,
     return val;
 }
 
+/* ADC channel 1, the headset mic line: biased by the mic bias when a
+ * 4-pole headset's mic is plugged in (600 raw idle), grounded by a 3-pole
+ * plug or an empty jack; a held headset button pulls it down. */
+static uint32_t sc6530_mic_line_adc(Sc6530AdiState *s, bool bias)
+{
+    /* idle, centre, volume up, volume down: the phone's ratios */
+    static const uint32_t level[4] = { 600, 3, 47, 101 };
+
+    if (!s->headset_mic || !bias) {
+        return 3;
+    }
+    if (qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) < s->headset_bounce_until) {
+        return 3;                 /* contact bounce shorts the line */
+    }
+    return level[s->headset_button & 3];
+}
+
 static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
@@ -571,7 +600,13 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
      * immediate for now. The dump calibrates raw 950 as 4200 mV. */
     if ((offset & ~3) == 0x680 && (s->ana_regs[0x680 / 4] & 2)) {
         unsigned channel = s->ana_regs[0x684 / 4] & 0xf;
-        s->ana_regs[0x6cc / 4] = channel == 5 ? s->battery_adc : 0;
+        /* Channel 1 is the headset mic line (stock ADC_CheckHeadsetStatus):
+         * biased by the mic bias when a 4-pole headset's mic is plugged in,
+         * grounded by a 3-pole plug or with the jack empty. */
+        const uint32_t *codec = &s->ana_regs[0xa00 / 4];
+        bool bias = (codec[0x40 / 4] & 4) && !(s->ana_regs[0x164 / 4] & 0x200);
+        s->ana_regs[0x6cc / 4] = channel == 5 ? s->battery_adc :
+            channel == 1 ? sc6530_mic_line_adc(s, bias) : 0;
         s->ana_regs[SC6530_ADI_ADC_STATUS_OFF / 4] |= 1;
         s->ana_regs[0x680 / 4] &= ~2u;
     } else if ((offset & ~3) == 0x6d4 && (value & 1)) {
@@ -630,41 +665,76 @@ static unsigned sc6530_ad_rate(Sc6530AdiState *s)
     return (s->dp_regs[0x18 / 4] & 0xf) * 4000;
 }
 
+/* Codec analog block at ANA +0xa00. A channel carries signal only while
+ * every stage the stock driver powers is on: the ADC core (stock power
+ * state 5: +0x5c bit7, +0x60 bit7, +0xac bit6 power-downs clear) and
+ * that channel's digital + analog ADC enable and power-down (L: dp bit1,
+ * +0x00 bit1, +0x5c bit5; R: dp bit3, +0x00 bit3, +0x5c bit3). With the
+ * core off the phone's ADC reads a constant rail; the model gives zeros. */
+static bool sc6530_adc_live(Sc6530AdiState *s, unsigned ch)
+{
+    const uint32_t *codec = &s->ana_regs[0xa00 / 4];
+    uint32_t en = ch ? 0x08 : 0x02, pd = ch ? 0x08 : 0x20;
+    return !(codec[0x5c / 4] & 0x80) && !(codec[0x60 / 4] & 0x80) &&
+           !(codec[0xac / 4] & 0x40) && (s->dp_regs[0] & en) &&
+           (codec[0x00 / 4] & en) && !(codec[0x5c / 4] & pd);
+}
+
+/* Microphone into ADC L: main mic (+0x64 bits 0xc0) or headset mic
+ * (bits 0x0c), with mic bias and its supply. */
 static bool sc6530_mic_live(Sc6530AdiState *s)
 {
-    /* Codec analog block at ANA +0xa00. The tone only reaches the ADC
-     * when every stage the stock driver powers is on: the ADC core (stock
-     * power state 5: +0x5c bit7, +0x60 bit7, +0xac bit6 power-downs
-     * clear), digital and analog ADC L, ADC L power-down clear, main-mic
-     * path, mic bias and its supply. With the core off the phone's ADC
-     * reads a constant full-scale rail; the model returns silence. */
     const uint32_t *codec = &s->ana_regs[0xa00 / 4];
-    return !(codec[0x5c / 4] & 0x80) && !(codec[0x60 / 4] & 0x80) &&
-           !(codec[0xac / 4] & 0x40) &&
-           (s->dp_regs[0] & 2) && (codec[0x00 / 4] & 2) &&
-           !(codec[0x5c / 4] & 0x20) && (codec[0x64 / 4] & 0xc0) &&
-           (codec[0x40 / 4] & 4) && !(s->ana_regs[0x164 / 4] & 0x200);
+    /* The headset mic exists only when the plugged headphones have one. */
+    bool path = (codec[0x64 / 4] & 0xc0) ||
+                ((codec[0x64 / 4] & 0x0c) && s->headset_mic);
+    return path && (codec[0x40 / 4] & 4) &&
+           !(s->ana_regs[0x164 / 4] & 0x200);
 }
 
 static void sc6530_rec_tick(void *opaque)
 {
     Sc6530AdiState *s = opaque;
+    const uint32_t *codec = &s->ana_regs[0xa00 / 4];
     uint32_t ctl = s->vbc_regs[0x18 / 4];
     unsigned frames = sc6530_ad_frames(s), rate = sc6530_ad_rate(s);
-    /* VBC +0x80 bit 0x20 routes AD0 to the DSP; the ARM FIFO then reads
-     * zeros (hardware, 2026-11-06). */
-    bool live = sc6530_mic_live(s) && !(s->vbc_regs[0x80 / 4] & 0x20);
-    /* Codec +0x70[7:4] is the mic gain step; scale the tone with it. */
-    unsigned gain = (s->ana_regs[(0xa00 + 0x70) / 4] >> 4) & 0xf;
-    double level = s->mic_level * (gain + 1) / 16.0;
+    /* Line-in mux +0x6c (stock 0x80bcc): AIL -> PGA L (bit7), AIR -> PGA R
+     * (bit3), and the cross feeds AIR -> PGA L (bit6), AIL -> PGA R
+     * (bit4). A PGA fed both carries both tones, each at full level. */
+    bool line[2] = { (codec[0x6c / 4] & 0x80) != 0, (codec[0x6c / 4] & 0x08) != 0 };
+    bool cross[2] = { (codec[0x6c / 4] & 0x40) != 0, (codec[0x6c / 4] & 0x10) != 0 };
+    bool mic = sc6530_mic_live(s);
+    /* +0x70: [7:4] scales ADC L, [3:0] ADC R (mic gain / line-in PGA). */
+    unsigned gain[2] = { (codec[0x70 / 4] >> 4) & 0xf, codec[0x70 / 4] & 0xf };
+    /* VBC +0x80 bits 0x20/0x10 route AD0/AD1 to the DSP; the ARM FIFO then
+     * reads zeros (hardware, 2026-11-06). */
+    bool to_dsp[2] = { (s->vbc_regs[0x80 / 4] & 0x20) != 0,
+                       (s->vbc_regs[0x80 / 4] & 0x10) != 0 };
+    bool any = false;
 
     if (!(ctl & VBC_ENABLE) || !(ctl & (VBC_AD0 | VBC_AD1)) || !rate) {
         return;
     }
-    for (unsigned i = 0; i < frames; i++, s->rec_sample++) {
-        double t = (double)s->rec_sample * s->mic_tone_hz / rate;
-        s->rec_bank[i] = live ? (int16_t)lrint(level * sin(2 * M_PI * t)) : 0;
+    for (unsigned ch = 0; ch < 2; ch++) {
+        bool live = sc6530_adc_live(s, ch) && !to_dsp[ch];
+        /* ADC R powered but +0x5c bit6 still set: on the phone it sits at
+         * the negative rail (2026-11-06). Bit6 being ADC R's power-down is
+         * the working guess. */
+        bool railed = ch == 1 && live && (codec[0x5c / 4] & 0x40);
+        unsigned hz = line[ch] ? s->line_tone_hz[ch] :
+                      (ch == 0 && mic) ? s->mic_tone_hz : 0;
+        unsigned hz2 = cross[ch] ? s->line_tone_hz[!ch] : 0;
+        double level = s->mic_level * (gain[ch] + 1) / 16.0;
+        any |= live && (hz || hz2);
+        for (unsigned i = 0; i < frames; i++) {
+            double n = (double)(s->rec_sample + i) / rate;
+            double v = (hz ? sin(2 * M_PI * hz * n) : 0) +
+                       (hz2 ? sin(2 * M_PI * hz2 * n) : 0);
+            s->rec_bank[ch][i] = railed ? -32768 + (int)(i & 3) :
+                live ? (int16_t)lrint(level * v) : 0;
+        }
     }
+    s->rec_sample += frames;
     s->rec_pos[0] = s->rec_pos[1] = 0;
     if (s->dma) {
         size_t moved0 = 0, moved1 = 0;
@@ -674,7 +744,7 @@ static void sc6530_rec_tick(void *opaque)
         if (ctl & VBC_AD1) {
             moved1 = sc6530_dma_hw_request(s->dma, 13, frames * 2);
         }
-        trace_sc6530_vbc_ad(frames, rate, live, moved0, moved1);
+        trace_sc6530_vbc_ad(frames, rate, any, moved0, moved1);
     }
     s->rec_deadline += (int64_t)frames * NANOSECONDS_PER_SECOND / rate;
     timer_mod(s->rec_timer, s->rec_deadline);
@@ -688,9 +758,10 @@ static uint64_t sc6530_adi_vbc_read(void *opaque, hwaddr offset,
     uint64_t val;
 
     if ((offset & ~3) == 0x08 || (offset & ~3) == 0x0c) {
-        unsigned *pos = &s->rec_pos[(offset & ~3) == 0x0c ? 0 : 1];
+        unsigned ch = (offset & ~3) == 0x0c ? 0 : 1;
+        unsigned *pos = &s->rec_pos[ch];
         word = (uint16_t)(*pos < sc6530_ad_frames(s) ?
-                          s->rec_bank[(*pos)++] : 0);
+                          s->rec_bank[ch][(*pos)++] : 0);
         /* Data FIFO reads are DMA traffic; do not trace each sample. */
         return extract32(word, (offset & 3) * 8, size * 8);
     }
@@ -785,6 +856,34 @@ static const MemoryRegionOps sc6530_adi_vbc_ops = {
 /* event so END toggles show up in the audio-observatory trace.          */
 /* ---------------------------------------------------------------------- */
 
+/* Headset buttons, driven by the keypad's "h" (centre), "j" (volume up)
+ * and "k" (volume down) keys. The centre button shorts the mic line and
+ * raises EIC channel 4 (stock EIC 20, active high; same physical-level
+ * word as END). The side buttons only pull the line down through a
+ * resistor, to the phone's levels (2026-11-06, idle 509): volume up 40
+ * (7.9%), volume down ~86 (17%); the comparator stays low, so only the
+ * ADC sees them. */
+void sc6530_adi_set_headset_button(Object *adi_obj, unsigned button, bool held)
+{
+    Sc6530AdiState *s = SC6530_ADI(adi_obj);
+    uint32_t bit = 1u << 4;
+
+    if (held) {
+        s->headset_button = button;
+        if (button != 1 && s->headset_bounce_ms) {
+            s->headset_bounce_until = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
+                                      s->headset_bounce_ms;
+        }
+    } else if (s->headset_button == button) {
+        s->headset_button = 0;
+    }
+    if (button == 1) {
+        s->eic_pb_phys = held ? s->eic_pb_phys | bit : s->eic_pb_phys & ~bit;
+    }
+    qemu_log("sc6530_adi: headset button %u %s\n", button,
+             held ? "held" : "released");
+}
+
 void sc6530_adi_set_eic_pb(Object *adi_obj, bool held)
 {
     Sc6530AdiState *s = SC6530_ADI(adi_obj);
@@ -817,7 +916,7 @@ static void sc6530_adi_reset(DeviceState *dev)
     memset(s->ana_regs, 0, sizeof(s->ana_regs));
     /* ADC power-downs start set: ADC core (+0x5c bit7, +0x60 bits 7/5,
      * +0xac bit6) and ADC L/R (+0x5c bits 5/3). */
-    s->ana_regs[(0xa00 + 0x5c) / 4] = 0xa8;
+    s->ana_regs[(0xa00 + 0x5c) / 4] = 0xe8;   /* phone's value at rest */
     s->ana_regs[(0xa00 + 0x60) / 4] = 0xa0;
     s->ana_regs[(0xa00 + 0xac) / 4] = 0x40;
     memset(s->vbc_regs, 0, sizeof(s->vbc_regs));
@@ -933,9 +1032,13 @@ static void sc6530_adi_finalize(Object *obj)
 
 static const Property sc6530_adi_properties[] = {
     DEFINE_PROP_UINT16("battery-adc", Sc6530AdiState, battery_adc, 900),
+    DEFINE_PROP_BOOL("headset-mic", Sc6530AdiState, headset_mic, false),
+    DEFINE_PROP_UINT32("headset-bounce-ms", Sc6530AdiState, headset_bounce_ms, 0),
     DEFINE_PROP_BOOL("charger-present", Sc6530AdiState, charger_present, false),
     DEFINE_PROP_UINT32("mic-tone-hz", Sc6530AdiState, mic_tone_hz, 1000),
     DEFINE_PROP_UINT16("mic-level", Sc6530AdiState, mic_level, 8192),
+    DEFINE_PROP_UINT32("line-left-hz", Sc6530AdiState, line_tone_hz[0], 600),
+    DEFINE_PROP_UINT32("line-right-hz", Sc6530AdiState, line_tone_hz[1], 900),
     DEFINE_AUDIO_PROPERTIES(Sc6530AdiState, audio_be),
 };
 

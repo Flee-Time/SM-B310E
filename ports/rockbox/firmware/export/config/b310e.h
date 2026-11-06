@@ -95,7 +95,8 @@
  * The ADC clock is rate/4000 (stock 0x81220), so only multiples of 4 kHz. */
 #define HAVE_RECORDING
 #define INPUT_SRC_CAPS (SRC_CAP_MIC | SRC_CAP_FMRADIO)
-#define REC_SRC_CAPS SRC_CAP_MIC   /* FM plays through an analog bypass */
+/* FM records from the line-in in stereo (ADC L/R -> VBC AD0/AD1). */
+#define REC_SRC_CAPS (SRC_CAP_MIC | SRC_CAP_FMRADIO)
 
 /* Richwave RTC6211 FM tuner (U101; the N variant on the tested phone)
  * on I2C controller 1, reset GPIO31,
@@ -105,8 +106,8 @@
 #define REC_FREQ_DEFAULT REC_FREQ_16
 #define REC_SAMPR_DEFAULT SAMPR_16
 #define DEFAULT_REC_MIC_GAIN 8
-#define DEFAULT_REC_LEFT_GAIN 0
-#define DEFAULT_REC_RIGHT_GAIN 0
+#define DEFAULT_REC_LEFT_GAIN 8
+#define DEFAULT_REC_RIGHT_GAIN 8
 #define DEFAULT_SPEAKER_MODE 2 /* Rockbox Auto: speaker when jack is empty */
 
 /* Battery: SM-B310E packs an 800 mAh Li-ion (BATTERY_CAPACITY_DEFAULT).

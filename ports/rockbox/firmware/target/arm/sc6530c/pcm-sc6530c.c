@@ -261,67 +261,222 @@ struct pcm_sink builtin_pcm_sink = {
 };
 
 #ifdef HAVE_RECORDING
-/* Mono microphone capture through VBC AD0 (stock audio_dai_vbc/vbc_phy_v5):
- * FIFO 0x8200300c, DMA request 14 bound at 0x20102034. Like stock, both
- * AD channels are enabled (VBC_CTRL bits 12/11, owner 0x18 set by
- * audiohw_enable_recording) and only AD0 is drained. The VBC hands over
- * 160-frame halfword banks; each completed bank is widened to Rockbox's
- * interleaved stereo with the same sample on both channels. */
-#define DMA_REC      4                      /* channel 5, one-based */
-#define REC_REQ_MAP  0x20102034u            /* AD0 = request 14 */
-#define REC_FIFO     (SC_VBC_BASE + 0x0c)   /* AD0 */
-#define SC_VBC_REC   ((1u << 12) | (1u << 11)) /* stock enables AD0+AD1 */
+/* Capture through the VBC AD FIFOs (stock audio_dai_vbc/vbc_phy_v5).
+ * Like stock, both AD channels are enabled (VBC_CTRL bits 12/11, owner
+ * 0x18 set by audiohw_enable_recording):
+ *   AD0 (ADC L): FIFO 0x8200300c, request 14 -> map 0x20102034, DMA ch5
+ *   AD1 (ADC R): FIFO 0x82003008, request 13 -> map 0x20102030, DMA ch6
+ * Mono (microphone) drains AD0 only and writes each sample to both
+ * channels. Stereo (FM line-in) drains both and interleaves them; a bank
+ * is used once both channels have filled it. */
+#define DMA_REC_L    4                      /* channels 5 and 6, one-based */
+#define DMA_REC_R    5
+#define SC_VBC_REC   ((1u << 12) | (1u << 11))
 
-static int16_t rec_bank[2][SC_VBC_FRAMES] __attribute__((aligned(32)));
-static unsigned rec_next;
+static const struct { uint32_t fifo, map; } rec_port[2] = {
+    { SC_VBC_BASE + 0x0c, 0x20102034u },
+    { SC_VBC_BASE + 0x08, 0x20102030u },
+};
+static int16_t rec_bank[2][2][SC_VBC_FRAMES] __attribute__((aligned(32)));
+static unsigned rec_next, rec_done;
+static bool rec_stereo;
 static uint32_t *rec_addr;
 static size_t rec_size;
+static unsigned rec_banks, rec_railed;
+/* Raw AD1 (right) data of the last stereo bank, before any fallback:
+ * min, max and the first four samples (I/O dump). */
+static int16_t rec_r_min, rec_r_max, rec_r_head[4];
+
+/* Stats-only stereo capture for the ADC R bit sweep (I/O test screen):
+ * each bank is measured and dropped; no Rockbox recording runs. */
+static void rec_hw_stop(void);
+static void rec_arm(void);
+static bool rec_probe;
+static int16_t probe_min[2], probe_max[2];
+static unsigned probe_banks;
+
+static void probe_reset(void)
+{
+    for (unsigned c = 0; c < 2; c++)
+    {
+        probe_min[c] = 32767;
+        probe_max[c] = -32768;
+    }
+    probe_banks = 0;
+}
+
+void sc6530_rec_probe_start(void)
+{
+    rec_hw_stop();
+    rec_stereo = true;
+    rec_next = 0;
+    int old = disable_irq_save();
+    probe_reset();
+    rec_probe = true;
+    restore_irq(old);
+    SC_AUDIO_REG(rec_port[0].map) = DMA_REC_L + 1;
+    SC_AUDIO_REG(rec_port[1].map) = DMA_REC_R + 1;
+    SC_VBC_CTRL = (SC_VBC_CTRL & ~SC_VBC_CPU_ACCESS) | 0x8000u | SC_VBC_REC;
+    rec_arm();
+    rec_running = true;
+    dma_irq_update();
+}
+
+/* Stats since the last call, then start a new window. */
+void sc6530_rec_probe_take(int16_t min[2], int16_t max[2], unsigned *banks)
+{
+    int old = disable_irq_save();
+    for (unsigned c = 0; c < 2; c++)
+    {
+        min[c] = probe_min[c];
+        max[c] = probe_max[c];
+    }
+    *banks = probe_banks;
+    probe_reset();
+    restore_irq(old);
+}
+
+void sc6530_rec_probe_stop(void)
+{
+    rec_hw_stop();
+    rec_probe = false;
+}
+
+void sc6530_rec_right_raw(int16_t *min, int16_t *max, int16_t head[4])
+{
+    *min = rec_r_min;
+    *max = rec_r_max;
+    for (unsigned i = 0; i < 4; i++)
+        head[i] = rec_r_head[i];
+}
+
+unsigned sc6530_rec_right_railed(void)
+{
+    return rec_railed;
+}
+
+unsigned sc6530_rec_banks(void)
+{
+    return rec_banks;
+}
+
+/* ADC R pinned at the negative rail (seen on the phone): every sample of
+ * the bank below -30000. Such a bank carries no audio at all. */
+static bool bank_railed(const int16_t *bank)
+{
+    for (unsigned n = 0; n < SC_VBC_FRAMES; n++)
+        if (bank[n] > -30000)
+            return false;
+    return true;
+}
+
+void sc6530_rec_set_stereo(bool stereo)
+{
+    if (!rec_running)
+        rec_stereo = stereo;
+}
+
+static unsigned rec_channels(void)
+{
+    return rec_stereo ? 2 : 1;
+}
 
 static void rec_arm(void)
 {
-    int16_t *bank = rec_bank[rec_next];
-    discard_dcache_range(bank, sizeof(rec_bank[0]));
-    DMA_REG(DMA_REC, 8) = 0;
-    DMA_REG(DMA_REC, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
-    DMA_REG(DMA_REC, 16) = REC_FIFO;
-    DMA_REG(DMA_REC, 20) = (uintptr_t)bank;
-    /* Halfword widths, source fixed (bit20 without bit21), 320 bytes. */
-    DMA_REG(DMA_REC, 24) = 0x50100140u;
-    DMA_REG(DMA_REC, 28) = SC_VBC_FRAMES * 2;
-    DMA_REG(DMA_REC, 8) = 0x3001u;
+    rec_done = 0;
+    for (unsigned c = 0; c < rec_channels(); c++)
+    {
+        unsigned ch = c ? DMA_REC_R : DMA_REC_L;
+        int16_t *bank = rec_bank[rec_next][c];
+        discard_dcache_range(bank, sizeof(rec_bank[0][0]));
+        DMA_REG(ch, 8) = 0;
+        DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+        DMA_REG(ch, 16) = rec_port[c].fifo;
+        DMA_REG(ch, 20) = (uintptr_t)bank;
+        /* Halfword widths, source fixed (bit20 without bit21), 320 bytes. */
+        DMA_REG(ch, 24) = 0x50100140u;
+        DMA_REG(ch, 28) = SC_VBC_FRAMES * 2;
+        DMA_REG(ch, 8) = 0x3001u;
+    }
 }
 
 static void rec_hw_stop(void)
 {
     rec_running = false;
-    DMA_REG(DMA_REC, 8) = 0;
-    DMA_REG(DMA_REC, 12) = DMA_ACK;
+    for (unsigned c = 0; c < 2; c++)
+    {
+        unsigned ch = c ? DMA_REC_R : DMA_REC_L;
+        DMA_REG(ch, 8) = 0;
+        DMA_REG(ch, 12) = DMA_ACK;
+        SC_AUDIO_REG(rec_port[c].map) = 0;
+    }
     SC_VBC_CTRL &= running ? ~SC_VBC_REC : ~(SC_VBC_REC | 0x8000u);
-    SC_AUDIO_REG(REC_REQ_MAP) = 0;
     dma_irq_update();
 }
 
 static void rec_irq(void)
 {
-    if (!(SC_AUDIO_REG(0x20100010) & (1u << DMA_REC)))
-        return;
-    uint32_t status = DMA_REG(DMA_REC, 12);
-    DMA_REG(DMA_REC, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+    uint32_t pending = SC_AUDIO_REG(0x20100010);
+    bool error = false;
+    for (unsigned c = 0; c < 2; c++)
+    {
+        unsigned ch = c ? DMA_REC_R : DMA_REC_L;
+        if (!(pending & (1u << ch)))
+            continue;
+        uint32_t status = DMA_REG(ch, 12);
+        DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+        error |= (status & (1u << 12)) != 0;
+        if (status & (1u << 9))
+            rec_done |= 1u << c;
+    }
     if (!rec_running)
         return;
-    if (status & (1u << 12))
+    if (error)
     {
         rec_hw_stop();
         pcm_rec_dma_complete_callback(PCM_DMAST_ERR_DMA, (void **)&rec_addr,
                                       &rec_size);
         return;
     }
-    if (!(status & (1u << 9)))
+    if (rec_done != (rec_stereo ? 3u : 1u))
         return;
-    const int16_t *bank = rec_bank[rec_next];
+    unsigned done_bank = rec_next;
     rec_next ^= 1;
     rec_arm();                      /* keep the VBC drained first */
-    discard_dcache_range(bank, sizeof(rec_bank[0]));
+    const int16_t *left = rec_bank[done_bank][0];
+    const int16_t *right = rec_bank[done_bank][rec_stereo ? 1 : 0];
+    discard_dcache_range(rec_bank[done_bank], sizeof(rec_bank[0]));
+    if (rec_probe)
+    {
+        for (unsigned c = 0; c < 2; c++)
+            for (unsigned n = 0; n < SC_VBC_FRAMES; n++)
+            {
+                int16_t v = rec_bank[done_bank][c][n];
+                if (v < probe_min[c]) probe_min[c] = v;
+                if (v > probe_max[c]) probe_max[c] = v;
+            }
+        probe_banks++;
+        return;
+    }
+    rec_banks++;
+    if (rec_stereo)
+    {
+        int16_t lo = right[0], hi = right[0];
+        for (unsigned n = 1; n < SC_VBC_FRAMES; n++)
+        {
+            if (right[n] < lo) lo = right[n];
+            if (right[n] > hi) hi = right[n];
+        }
+        rec_r_min = lo;
+        rec_r_max = hi;
+        for (unsigned i = 0; i < 4; i++)
+            rec_r_head[i] = right[i];
+    }
+    if (rec_stereo && bank_railed(right))
+    {
+        rec_railed++;
+        right = left;               /* better mono than a dead channel */
+    }
     for (unsigned n = 0; n < SC_VBC_FRAMES; n++)
     {
         if (rec_size < 4)
@@ -337,8 +492,7 @@ static void rec_irq(void)
             rec_size = size;
             pcm_rec_dma_status_callback(PCM_DMAST_STARTED);
         }
-        uint16_t sample = bank[n];
-        *rec_addr++ = sample | (uint32_t)sample << 16;
+        *rec_addr++ = (uint16_t)left[n] | (uint32_t)(uint16_t)right[n] << 16;
         rec_size -= 4;
     }
 }
@@ -376,8 +530,11 @@ void pcm_rec_dma_start(void *addr, size_t size)
     rec_addr = addr;
     rec_size = size & ~3u;
     rec_next = 0;
-    /* Stock 0xa78e4 order: VBC AD enable, then the DMA channel. */
-    SC_AUDIO_REG(REC_REQ_MAP) = DMA_REC + 1;
+    rec_banks = rec_railed = 0;
+    /* Stock 0xa78e4 order: VBC AD enable, then the DMA channels. */
+    SC_AUDIO_REG(rec_port[0].map) = DMA_REC_L + 1;
+    if (rec_stereo)
+        SC_AUDIO_REG(rec_port[1].map) = DMA_REC_R + 1;
     SC_VBC_CTRL = (SC_VBC_CTRL & ~SC_VBC_CPU_ACCESS) | 0x8000u | SC_VBC_REC;
     rec_arm();
     rec_running = true;

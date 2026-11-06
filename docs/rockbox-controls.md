@@ -52,6 +52,19 @@ Stock boot leaves bit 7 set in DMSK and DIR. Rockbox sets those itself,
 so it does not depend on stock initialisation, and it writes no pinmux
 registers.
 
+## Headset buttons
+
+A headset with a mic and in-line buttons: the centre button is **Play**
+(play/pause in the music screen, OK in menus). The side buttons: a tap on
+**+** skips to the next track and a tap on **−** to the previous one;
+holding **+** or **−** past 0.4 s turns the volume up or down for as long
+as it is held. They are enabled by a check when the
+headset is plugged in: the mic line must show a mic and the buttons must
+read released, so plain 3-pole headphones never send phantom presses.
+While recording from the headset mic all three are off (a press would
+land in the recording); while recording FM they work as usual. Details and calibration:
+`docs/rockbox-recording.md` (Headset mic detection).
+
 ## Keypad light and vibrator
 
 The keypad light (ANA `0x82001224`) is Rockbox's **button light**, with
@@ -70,16 +83,18 @@ poll stops the motor, so no timer or thread is needed.
 ## I/O test screen
 
 **Test screen:** System > Debug (Keep Out!) > View I/O ports. It shows
-the GPIO 7 state, how many times the hold-0 toggle fired, bank 0 GPIO
-registers and the analog LED control register (`0x82001220`). Its keys:
+the torch state, how many times the hold-0 toggle fired, bank 0 GPIO
+registers, and the vibrator and keypad-light test state. Its keys:
 
 | Key | Action |
 | --- | --- |
-| 1 | GPIO 7 on/off |
-| 3 | `0x82001220`: set `0x8800`, clear `0x4400` / restore |
-| 5 | `0x82001220`: clear `0x1100` (fpdoom's "flashlight off" bits) / restore |
+| 1 | Torch (GPIO 7) on/off |
+| 3 | Vibrator on/off |
+| 5 | Keypad light full/off (the configured level returns on exit) |
+| 7 | VBC `+0x80` capture-route bits (recording experiments) |
+| # | Read both SIM slots: ATR, ICCID, IMSI or PIN status ([sim.md](sim.md)) |
 | 9 | Append a register dump to `.rockbox/torch-b310e.txt` |
-| Back | Exit, restoring `0x82001220` |
+| Back | Exit |
 
 Opening the screen also writes a dump. The dump only reads the pinmux
 bank (`0x8c000000`–`0x8c0002fc`); comparing it with the stock pinmap

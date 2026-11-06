@@ -172,6 +172,13 @@ that:
 - the codec line-in and headphone mixer registers were set;
 - the reset line and the 32 kHz pad were driven.
 
+## Recording FM
+
+Recording → Source: FM Radio records a mono mix of both FM channels: the
+SC6530C's right ADC does not work, so stereo capture is impossible. The
+headphones carry the same mono mix while recording. See
+`docs/rockbox-recording.md`.
+
 ## Debug
 
 The Debug → View I/O ports dump (`.rockbox/torch-b310e.txt`) includes an
@@ -185,9 +192,16 @@ The Debug → View I/O ports dump (`.rockbox/torch-b310e.txt`) includes an
 
 ## Unconfirmed
 
-1. Line-in PGA gain `0x88` and the tuner volume step size: listen for
-   distortion or a too-quiet signal.
+1. Line-in PGA gain: default `0x88`, now adjustable as the recording
+   screen's left/right gain. The tuner volume step size is unmeasured.
 2. The band field for Japan (76–90 vs 76–108); Europe/US use band 0.
 3. RSSI scale: `RSSI_MAX` is 80, a guess; scanning uses the stock seek
    threshold `0x13`.
-4. The silent-after-fiddling glitch above (not reproduced).
+4. The silent-after-fiddling glitch above (not reproduced). Likely
+   cause: an I2C transfer failing during the half-second start
+   sequence, which the first build ignored, leaving the chip
+   half-configured until the next stop/start. The driver now counts
+   I2C errors, and if a start saw any (or the chip does not read back
+   its ID), it resets and starts again, up to 3 tries. The dump's FM
+   line shows `i2c_errors` and `retries`. Reads also no longer
+   overwrite the write shadow (registers 02–09), matching stock.

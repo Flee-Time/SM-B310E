@@ -13,6 +13,8 @@ struct rtc6211_dbg_info
     uint16_t regs[16];
     bool nor_tables;            /* stock init tables found in NOR */
     bool chip_n;                /* RTC6211N rather than S */
+    unsigned i2c_errors;        /* failed I2C transfers since boot */
+    unsigned start_retries;     /* power-ups that had to be retried */
 };
 
 bool rtc6211_detect(void);
