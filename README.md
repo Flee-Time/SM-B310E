@@ -34,6 +34,8 @@ download mode with `spd_dump`, and can also boot from an SD card.
 - **Ports on the SD card**: fpdoom + chocolate-doom/heretic/hexen, gnuboy,
   retris, infones, fpsw, fpduke3d, snes9x — and a working **Rockbox port**
   for the SC6530C.
+- **USB mass storage in Rockbox** (verified on hardware at about 225 KB/s):
+  the SD card appears as a drive on a PC. See [docs/usb.md](docs/usb.md).
 - **A QEMU machine** (`emulator/qemu/`) for stock firmware bring-up and
   this OS on the PC. Stock boot reaches time/date setup; an experimental
   external display input allows navigation into its home screen and menus.
@@ -93,6 +95,7 @@ kernel log in `libc_server`, check the LCD. Nothing writes NOR.
 - [docs/emulator-audio.md](docs/emulator-audio.md) — current stock boot/audio evidence and repeatable checks
 - [docs/audio-dsp-protocol.md](docs/audio-dsp-protocol.md) — ARM↔DSP host interface protocol
 - [docs/dsp-audio-route.md](docs/dsp-audio-route.md) — complete DSP + audio signal-path map (incl. the stock-spy capture tool)
+- [docs/usb.md](docs/usb.md) — USB controller register map, Rockbox mass storage driver and its QEMU test
 
 ## License
 

@@ -143,7 +143,7 @@ chain at 2 - the catch-all only ever sees addresses nothing claims).
 | 0x34000000 | 4 MiB | PSRAM (machine RAM) | boot=ours os.bin loads here |
 | 0x40000000 | 256 KiB | IRAM | RAM (vectors/stack) |
 | 0x20000000 | | SMC | aux log+store bank |
-| 0x20300000 / 0x20380000 | 0x1000 / 0x100 | USB controller + FIFO window | no-op ("host never connected") |
+| 0x20300000 / 0x20380000 | 0x1000 / 0x100 | USB controller + FIFO window | functional device controller, IRQ 25; host over a chardev ([usb.md](usb.md)) |
 | 0x20400000 | 0x3000 | BUS_MON | aux silent store+echo |
 | 0x20500000 | 0x1000 | AHB | aux log+store; 0x205003fc reads chip-id 0x6530c000; 0x205000e0 MEM_REMAP = logged no-op |
 | 0x20700000 | 0x1000 | SDIO0 | no-op ("no card") |
@@ -333,8 +333,10 @@ list + everything learned since):
   every command, log all unanswered traffic. The stock OS never runs the
   DSP download protocol (no SM_BOOT/BLOCK/DATA/COPY/RUN) - only REG_*,
   OWNERSHIP and arm_ctl keepalive traffic, all answered.
-- **USB is a no-op**: log+store; status reads return 0 = "host never
-  connected" forever. os.bin's USB waits are BOUNDED (10M / 2M budgets) and
+- **USB needs a host on a chardev**: `sc6530_usb` models the controller
+  ([usb.md](usb.md)); `emulator/qemu/scripts/test-usb.py` plays the PC side.
+  Without `-global sc6530_usb.chardev=<id>` nothing is acknowledged, i.e.
+  "host never connected". os.bin's USB waits are BOUNDED (10M / 2M budgets) and
   burn out and return; no libc_server connection is possible (see the
   bridge item below).
 - **SD is absent**: SDIO0 is log+store; status reads return 0 = "no card".

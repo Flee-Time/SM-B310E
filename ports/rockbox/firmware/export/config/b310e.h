@@ -127,8 +127,24 @@
 #define CPU_FREQ      208000000
 #define SLOW_CLOCK        32768
 
-/* USB */
-#define USB_NONE
+/* USB: the SC6530 device controller, full speed, mass storage. The
+ * micro-USB socket is also the charger input, so insertion is only USB
+ * once a host has sent a request. */
+#define CONFIG_USBOTG USBOTG_SC6530
+#define HAVE_USBSTACK
+/* Not a Spreadtrum id: Windows PCs used with spd_dump carry the UNISOC
+ * driver, which claims 1782:4d01 (the stock mass storage id, NOR 0xcb308)
+ * as "SPRD DIAG" and fails with Code 10 instead of loading mass storage.
+ * pid.codes test id: fine for private use, not for distribution. */
+#define USB_VENDOR_ID 0x1209
+#define USB_PRODUCT_ID 0x0001
+#define USB_NUM_ENDPOINTS 5
+#define USB_DEVBSS_ATTR __attribute__((aligned(32)))
+#define USB_DETECT_BY_REQUEST
+/* 4 MB of RAM: the default 2 x 64 KiB staging buffers are more than a
+ * 1 MB/s full speed link can use */
+#define USB_READ_BUFFER_SIZE  (1024*16)
+#define USB_WRITE_BUFFER_SIZE (1024*16)
 
 /* Software attenuation plus the codec's positive headphone gain steps. */
 #define HAVE_SW_VOLUME_CONTROL

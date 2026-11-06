@@ -912,13 +912,11 @@ static void b310e_init(MachineState *machine)
                                  &error_fatal);
     }
 
-    /* SC6530 USB (todo 19) @ 0x20300000: log+store no-op ("host never
-     * connected" forever - status reads return 0, so our os.bin's
-     * BOUNDED usb_debug_init connect wait burns its 10M budget and
-     * returns; usb_debug_poll reads 0s and re-arms). Two regions: the
-     * register bank 0x20300000 (0x1000) + the FIFO window 0x20380000
-     * (0x100 - the EP2 OUT FIFO reads at 0x20380010 must not fault).
-     * Mapped at B310E_REGION_PRIORITY (inside the catch-all range). */
+    /* SC6530 USB device controller @ 0x20300000 (+ FIFO window
+     * 0x20380000), INTC line 25. With no host attached
+     * (-global sc6530_usb.chardev=<id> unset) it behaves as a cable with
+     * no host: nothing is ever received or acknowledged, so the bounded
+     * waits in os.bin's usb_debug time out as before. */
     {
         DeviceState *usb_dev = qdev_new(TYPE_SC6530_USB);
         SysBusDevice *usb_sbd = SYS_BUS_DEVICE(usb_dev);
@@ -927,7 +925,10 @@ static void b310e_init(MachineState *machine)
                                 B310E_REGION_PRIORITY);
         sysbus_mmio_map_overlap(usb_sbd, 1, B310E_USB_FIFO_BASE,
                                 B310E_REGION_PRIORITY);
+        object_property_set_link(OBJECT(usb_dev), "dma", OBJECT(dma_dev),
+                                 &error_fatal);
         sysbus_realize_and_unref(usb_sbd, &error_fatal);
+        sysbus_connect_irq(usb_sbd, 0, qdev_get_gpio_in(s->intc, 25));
     }
 
     /* SC6530 UART1 (debug console) @ 0x84000000: stock firmware boot diagnostics */

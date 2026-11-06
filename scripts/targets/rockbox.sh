@@ -103,6 +103,16 @@ patch_file "$CLONE_DIR/firmware/export/config.h" "#define RTC_SC6530" \
 patch_file "$CLONE_DIR/firmware/export/config.h" '#include "config/b310e.h"' \
   's/(\n#else\n#error "unknown hardware platform!")/\n#elif defined(B310E)\n#include "config\/b310e.h"$1/'
 
+# firmware/export/config.h — the SC6530 USB device controller: an id, and
+# bulk transfers only. Declaring interrupt transfers would also enable the
+# HID class (buttons as a PC keyboard), one more interface that can fail
+# while the driver is young; the first integration had it, so drop that.
+patch_file "$CLONE_DIR/firmware/export/config.h" "#define USBOTG_SC6530" \
+  's/(#define USBOTG_TNETV105[^\n]*\n)/$1#define USBOTG_SC6530   6530 \/* Spreadtrum SC6530 *\/\n/'
+perl -0pi -e 's/    \(CONFIG_USBOTG == USBOTG_SC6530\) \|\| \\\n//' "$CLONE_DIR/firmware/export/config.h"
+patch_file "$CLONE_DIR/firmware/export/config.h" "CONFIG_USBOTG == USBOTG_SC6530 /* bulk only */" \
+  's/(#elif defined\(CPU_TCC780X\)\n)/#elif CONFIG_USBOTG == USBOTG_SC6530 \/* bulk only *\/\n#define USB_HAS_BULK\n$1/'
+
 # 7. firmware/export/cpu.h — SC6530C -> sc6530c.h
 patch_file "$CLONE_DIR/firmware/export/cpu.h" '#include "sc6530c.h"' \
   's/(#include "stm32h743.h"\n)/$1#elif CONFIG_CPU == SC6530C\n#include "sc6530c.h"\n/'
@@ -172,6 +182,10 @@ target/arm/sc6530c/i2c-sc6530c.c
 target/arm/sc6530c/pcm-sc6530c.c
 target/arm/sc6530c/audiohw-sc6530c.c
 #endif /* !BOOTLOADER */
+#if defined(HAVE_USBSTACK) && !defined(BOOTLOADER)
+target/arm/sc6530c/usb-drv-sc6530c.c
+target/arm/sc6530c/usb-sc6530c.c
+#endif
 #endif /* B310E */
 '
 sed -i '/^#ifdef B310E$/,/^#endif \/\* B310E \*\/$/d' "$CLONE_DIR/firmware/SOURCES"

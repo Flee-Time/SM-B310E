@@ -67,6 +67,8 @@ extern unsigned long sdio_num_blocks;
 extern void sc6530_keypad_capture(void);
 
 static bool sd_enabled_ = false;   /* card present after sd_init */
+/* a transfer is running: sampled by the USB driver's throughput log */
+volatile bool sd_busy_now;
 static long  sd_activity;
 static struct mutex sd_mutex;
 
@@ -134,6 +136,7 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
         return -1;
 
     mutex_lock(&sd_mutex);
+    sd_busy_now = true;
     while (count--) {
         if (transfer_block(idx++, p, write)) {
             rc = -1;
@@ -142,6 +145,7 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
         p += SD_BLOCK_SIZE;
     }
     sd_activity = current_tick;
+    sd_busy_now = false;
     mutex_unlock(&sd_mutex);
     return rc;
 }

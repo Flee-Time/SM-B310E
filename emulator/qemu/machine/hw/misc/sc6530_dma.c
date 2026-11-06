@@ -5,8 +5,12 @@
  * registers. SC6530C standard channels use width fields [31:30]/[29:28]
  * and address-fix bits 20/21 (the live stock path at 0x32b8c). Full
  * channels use [27:26]/[25:24] and explicit transfer steps.
- * Implements normal transfers and VBC peripheral requests. Linked lists,
- * wrapping, byte swapping and non-VBC hardware requests are not yet modeled.
+ * Implements normal transfers, VBC peripheral requests and the USB
+ * endpoint FIFO requests (sc6530_dma_hw_request). Standard-channel field
+ * [27:26] = 1, which only the stock USB driver sets (0x1f1c6: config +0x5c),
+ * is taken as a byte swap within each 32-bit word: the USB FIFOs carry
+ * wire bytes most significant first and the PIO path swaps every word.
+ * Linked lists and wrapping are not yet modeled.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "qemu/osdep.h"
@@ -22,6 +26,7 @@
 #define TYPE_SC6530_DMA "sc6530_dma"
 OBJECT_DECLARE_SIMPLE_TYPE(Sc6530DmaState, SC6530_DMA)
 size_t sc6530_dma_request(Object *obj, hwaddr destination, size_t bytes);
+size_t sc6530_dma_hw_request(Object *obj, unsigned request, size_t bytes);
 
 #define DMA_CHANNELS 32
 #define DMA_SIZE 0x3000
@@ -121,7 +126,17 @@ static size_t sc6530_dma_transfer(Sc6530DmaState *s, unsigned id,
         }
         if (address_space_read(&address_space_memory, r[CH_SRC],
                                MEMTXATTRS_UNSPECIFIED, data, src_width) !=
-            MEMTX_OK ||
+            MEMTX_OK) {
+            r[CH_INT] |= 1u << 12;
+            r[CH_CFG] &= ~1u;
+            break;
+        }
+        if (id < 24 && src_width == 4 && ((r[CH_FRAG] >> 26) & 3) == 1) {
+            uint8_t t0 = data[0], t1 = data[1];
+            data[0] = data[3]; data[1] = data[2];
+            data[2] = t1; data[3] = t0;
+        }
+        if (
             address_space_write(&address_space_memory, r[CH_DST],
                                 MEMTXATTRS_UNSPECIFIED, data, dst_width) !=
             MEMTX_OK) {
@@ -154,6 +169,23 @@ static size_t sc6530_dma_transfer(Sc6530DmaState *s, unsigned id,
     trace_sc6530_dma_transfer(id + 1, done, c->remaining);
     sc6530_dma_irq(s);
     return done;
+}
+
+/* A peripheral asserts its one-based hardware request: the channel mapped
+ * at UID_BASE + 4 * (request - 1) moves up to bytes. */
+size_t sc6530_dma_hw_request(Object *obj, unsigned request, size_t bytes)
+{
+    Sc6530DmaState *s = SC6530_DMA(obj);
+    unsigned channel;
+
+    if (!request || request > UID_COUNT) {
+        return 0;
+    }
+    channel = s->request_map[request - 1];
+    if (!channel || channel > DMA_CHANNELS) {
+        return 0;
+    }
+    return sc6530_dma_transfer(s, channel - 1, bytes);
 }
 
 /* VBC calls this when a playback bank is available for refill. */
