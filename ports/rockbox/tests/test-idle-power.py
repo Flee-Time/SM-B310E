@@ -152,6 +152,9 @@ def main():
     FAT["add_file"](root, ".rockbox/config.cfg", (
         "volume: 0\nspeaker mode: auto\nstart in screen: files\n"
         "start directory: /\nbacklight timeout: 2\n"
+        # The keypad light is Rockbox's button light with its own timeout
+        # (default: the default backlight timeout); idle checks expect it off.
+        "button light timeout: 2\n"
         "backlight filters first keypress: off\n" +
         ("idle poweroff: 1\n" if args.shutdown == "idle" else "")).encode())
     FAT["write_image"](out / "sd.img", root, 64, True)
