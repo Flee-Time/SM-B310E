@@ -289,6 +289,7 @@ struct B310EMachineState {
 
     MemoryRegion psram_alias;     /* 4 MiB @ 0x04000000 (always on) */
     MemoryRegion iram;            /* 256 KiB @ 0x40000000 */
+    unsigned resets;              /* machine resets so far */
     MemoryRegion dsp_sharemem;    /* 128 KiB @ 0x10000000 */
     MemoryRegion dsp_alias;       /* 128 KiB @ 0x30000000 */
 };
@@ -352,6 +353,26 @@ static void b310e_reset(void *opaque)
     B310EMachineState *s = opaque;
     MachineState *machine = MACHINE(s);
     uint32_t pc = B310E_STOCK_PC;
+
+    /* A later reset (the watchdog) of ours/rockbox: the real boot chain
+     * reloads the image from the card, so its data starts fresh. IRAM is
+     * kept, as on the chip. */
+    if (s->resets) {
+        /* A run-time reset (watchdog): the CPU is not on the reset tree,
+         * so without this it keeps its registers, MMU and WFI halt. */
+        cpu_reset(CPU(s->cpu));
+    }
+    if (s->resets++ && (strcmp(s->boot_mode, "ours") == 0 ||
+                        strcmp(s->boot_mode, "rockbox") == 0)) {
+        BlockBackend *os = blk_by_name("os");
+        int64_t len = os ? blk_getlength(os) : 0;
+
+        if (len > 0 &&
+            blk_pread(os, 0, MIN(len, (int64_t)B310E_PSRAM_SIZE),
+                      memory_region_get_ram_ptr(machine->ram), 0) >= 0) {
+            qemu_log("b310e: os.bin reloaded after reset %u\n", s->resets - 1);
+        }
+    }
 
     if (strcmp(s->boot_mode, "warm") == 0) {
         /* Warm-boot fast path magic at the PSRAM base (alias 0x04000000). */

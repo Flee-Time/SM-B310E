@@ -259,6 +259,60 @@ class MassStorage:
         assert status == 0, status
 
 
+def watchdog_resets(output):
+    trace = output / 'trace.log'
+    text = trace.read_text(errors='replace') if trace.exists() else ''
+    return text.count('watchdog expired')
+
+
+def freeze_test(args, host, qtest_port, block, original, result):
+    """Hang the phone in a USB session: every interrupt masked, so the tick
+    stops and nothing feeds the watchdog. It must reset the machine, Rockbox
+    must come back and connect again, and that session's card log must list
+    the frozen one's breadcrumbs."""
+    # a write first, so the breadcrumbs show the OUT DMA steps
+    scratch = len(original) // block - 600
+    msc = MassStorage(host, next(i for i in enumerate_device(host)['interfaces']
+                                 if i['class'] == 8))
+    msc.wait_ready(60)
+    msc.write10(scratch, bytes(range(256)) * 256, block)
+    qt = qtest_api['QTest'](qtest_port)
+    qt.command('writel 0x8000000c 0xffffffff')       # INTC: disable all
+    t0 = time.monotonic()
+    while not watchdog_resets(args.output):
+        if time.monotonic() - t0 > 30:
+            raise AssertionError('no watchdog reset 30 s after the freeze')
+        time.sleep(0.2)
+    result['freeze_reset_seconds'] = round(time.monotonic() - t0, 2)
+    qt.close()
+    deadline = time.monotonic() + 30
+    while host.query()['attached']:
+        if time.monotonic() > deadline:
+            raise UsbError('still attached 30 s after the watchdog reset')
+        time.sleep(0.2)
+    host.wait_attached(args.attach_timeout)
+    info = enumerate_device(host)
+    msc = MassStorage(host, next(i for i in info['interfaces'] if i['class'] == 8))
+    msc.wait_ready(60)
+    assert msc.read10(0, 1, block) == original[:block], 'sector 0 after the reset'
+    result['reconnected_after_reset'] = True
+    result['watchdog_resets'] = watchdog_resets(args.output)
+
+
+def finish_freeze(args, card, result):
+    image = card.read_bytes()
+    marker = b'previous USB session never ended'
+    at = image.find(marker)
+    assert at >= 0, 'card log has no breadcrumbs of the frozen session'
+    start = image.rfind(b'---', 0, at)
+    excerpt = image[at:at + 4000].split(b'\0')[0].decode(errors='replace')
+    lines = excerpt.splitlines()
+    result['crumb_lines'] = [l for l in lines[:70] if 'step' in l or 'never' in l]
+    assert any(' S ' in l for l in result['crumb_lines']), 'no session start crumb'
+    (args.output / 'result.json').write_text(json.dumps(result, indent=2))
+    print(json.dumps(result, indent=2), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', type=Path, required=True)
@@ -269,6 +323,13 @@ def main():
     parser.add_argument('--read-kib', type=int, default=256, help='throughput read size')
     parser.add_argument('--irq-stuck', action='store_true',
                         help='hold IRQ 25 high: exercises the polled fallback')
+    parser.add_argument('--no-dma-out', action='store_true',
+                        help='raise no OUT DMA requests: exercises the OUT salvage')
+    parser.add_argument('--watchdog', action='store_true',
+                        help='model the hardware watchdog; the run must not reset')
+    parser.add_argument('--freeze', action='store_true',
+                        help='mask every interrupt mid-session: the watchdog must '
+                             'reset the phone and the next session log the breadcrumbs')
     parser.add_argument('--no-dma', action='store_true',
                         help='raise no USB DMA requests: exercises the PIO fallback')
     args = parser.parse_args()
@@ -298,6 +359,10 @@ def main():
         command += ['-global', 'sc6530_usb.irq-stuck=on']
     if args.no_dma:
         command += ['-global', 'sc6530_usb.dma-requests=off']
+    if args.no_dma_out:
+        command += ['-global', 'sc6530_usb.dma-out-requests=off']
+    if args.watchdog or args.freeze:
+        command += ['-global', 'sc6530_adi.watchdog=on']
     (args.output / 'command.json').write_text(json.dumps(command, indent=2))
     env = os.environ.copy()
     if os.name == 'nt':
@@ -339,6 +404,11 @@ def main():
 
             mbr = msc.read10(0, 1, block)
             assert mbr == original[:block], 'sector 0 differs from the card image'
+            if args.freeze:
+                freeze_test(args, host, qtest_port, block, original, result)
+                qmp.command('quit')
+                process.wait(timeout=20)
+                return finish_freeze(args, card, result)
             t0 = time.monotonic()
             bulk = msc.read10(64, args.read_kib * 1024 // block, block)
             elapsed = time.monotonic() - t0
@@ -358,11 +428,44 @@ def main():
                 raise AssertionError(f'second bulk read differs at byte {bad}')
             result['read_kib_per_s'] = round(len(bulk) / 1024 / elapsed, 1)
 
+            # With --no-dma(-out) the OUT DMA never progresses: the driver must
+            # FAIL that receive (Rockbox then writes nothing), and the host
+            # resets the device and retries, as Windows does. The retried
+            # write goes by PIO and must land intact.
+            result['write_retries'] = 0
+
+            def write(lba, data):
+                nonlocal msc
+                try:
+                    msc.write10(lba, data, block)
+                except (UsbError, AssertionError) as error:
+                    if not (args.no_dma or args.no_dma_out) or result['write_retries']:
+                        raise
+                    result['write_retries'] += 1
+                    result['first_write_error'] = str(error)
+                    host.bus_reset()
+                    info_retry = enumerate_device(host)
+                    msc = MassStorage(host, next(i for i in info_retry['interfaces']
+                                                 if i['class'] == 8))
+                    msc.wait_ready(60)
+                    msc.write10(lba, data, block)
+
             pattern = bytes((i * 7 + 3) & 0xff for i in range(block * 2))
             target = last - 1
-            msc.write10(target, pattern, block)
+            write(target, pattern)
             assert msc.read10(target, 2, block) == pattern, 'read-back after write differs'
             result['write_lba'] = target
+
+            # A large write: bulk OUT runs by DMA in transfers of up to
+            # 16 KiB (the SD side splits them into 32-block commands).
+            big = bytes(((i * 131) ^ (i >> 9)) & 0xff for i in range(128 * 1024))
+            big_lba = target - 8 - len(big) // block
+            t0 = time.monotonic()
+            write(big_lba, big)
+            elapsed = time.monotonic() - t0
+            assert msc.read10(big_lba, len(big) // block, block) == big,                 'read-back after the 128 KiB write differs'
+            result['big_write_lba'] = big_lba
+            result['write_kib_per_s'] = round(len(big) / 1024 / elapsed, 1)
             qmp.command('screendump', {'filename': str(args.output / 'usb-screen.png'), 'format': 'png'})
 
             # Host reset of a configured device (Windows does this when a
@@ -417,10 +520,15 @@ def main():
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
+    if args.watchdog:
+        result['watchdog_resets'] = watchdog_resets(args.output)
+        assert result['watchdog_resets'] == 0, 'the watchdog reset a healthy session'
     image = card.read_bytes()
     lba = result['write_lba']
     block = result['capacity']['block_size']
     assert image[lba * block:(lba + 2) * block] == pattern, 'write did not reach the card image'
+    big_lba = result['big_write_lba']
+    assert image[big_lba * block:big_lba * block + len(big)] == big,         '128 KiB write did not reach the card image'
     result['image_write_verified'] = True
     (args.output / 'result.json').write_text(json.dumps(result, indent=2))
     print(json.dumps(result, indent=2), flush=True)

@@ -215,6 +215,16 @@ struct Sc6530AdiState {
      * unmask is not lost: the debounce-mask gate is applied at READ time
      * in sc6530_adi_ana_effective, not when the level is set. */
     uint32_t eic_pb_phys;
+
+    /* Watchdog (ANA +0x480): LOAD_LOW +0x0, LOAD_HIGH +0x4, CTRL +0x8
+     * (bit 3 reset enable, bit 1 run), LOCK +0x20 (0xe551 unlocks, any
+     * other value locks; locked writes are ignored). It counts LOAD ticks
+     * of 32768 Hz; a write of LOAD_LOW reloads it (the feed). On expiry
+     * the machine resets. Off unless watchdog=on: stock's and Rockbox's
+     * other tests were written without it. */
+    bool watchdog;
+    bool wdg_unlocked;
+    QEMUTimer *wdg_timer;
 };
 
 static uint32_t sc6530_analog_pending(const Sc6530AdiState *s)
@@ -569,13 +579,48 @@ static uint32_t sc6530_mic_line_adc(Sc6530AdiState *s, bool bias)
     return level[s->headset_button & 3];
 }
 
+#define WDG_OFF   0x480
+
+static void sc6530_wdg_arm(Sc6530AdiState *s)
+{
+    uint32_t ctrl = s->ana_regs[(WDG_OFF + 8) / 4];
+    uint64_t load = ((s->ana_regs[(WDG_OFF + 4) / 4] & 0xffff) << 16) |
+                    (s->ana_regs[WDG_OFF / 4] & 0xffff);
+
+    if ((ctrl & 0xa) == 0xa) {
+        timer_mod(s->wdg_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  muldiv64(load, NANOSECONDS_PER_SECOND, 32768));
+    } else {
+        timer_del(s->wdg_timer);
+    }
+}
+
+static void sc6530_wdg_expired(void *opaque)
+{
+    qemu_log("sc6530_adi: watchdog expired, resetting the machine\n");
+    qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+}
+
 static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
                                  uint64_t value, unsigned size)
 {
     Sc6530AdiState *s = opaque;
 
+    if (s->watchdog && (offset & ~3) >= WDG_OFF &&
+        (offset & ~3) <= WDG_OFF + 8 && !s->wdg_unlocked) {
+        qemu_log("sc6530_adi: watchdog locked, write +0x%x ignored\n",
+                 (unsigned)(offset - WDG_OFF));
+        return;
+    }
     sc6530_adi_regs_write(s->ana_regs, offset, value, size);
     unsigned aligned = offset & ~3;
+    if (s->watchdog) {
+        if (aligned == WDG_OFF + 0x20) {
+            s->wdg_unlocked = (s->ana_regs[aligned / 4] & 0xffff) == 0xe551;
+        } else if (aligned == WDG_OFF || aligned == WDG_OFF + 8) {
+            sc6530_wdg_arm(s);
+        }
+    }
     /* Stock 0x81562/0x8153e use write-one SET/CLEAR aliases. The audio
      * clock is independent of DMA: a missing clock leaves playback
      * counters advancing while the analog output remains silent. */
@@ -938,6 +983,8 @@ static void sc6530_adi_reset(DeviceState *dev)
      * enable/raw at +0x630/+0x634. There are no month/year registers. */
     sc6530_analog_irq(s);
     timer_mod(s->rtc_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
+    timer_del(s->wdg_timer);
+    s->wdg_unlocked = false;
     /* eic_pb_phys is the KEYPAD's domain (its reset asserts/releases the
      * hold-end level) - the ADI reset must NOT zero it (the keypad reset
      * runs BEFORE this one, so zeroing here would wipe the hold). */
@@ -973,6 +1020,7 @@ static void sc6530_adi_init(Object *obj)
     s->audio_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_audio_tick, s);
     s->rec_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_rec_tick, s);
     s->rtc_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sc6530_rtc_tick, s);
+    s->wdg_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_wdg_expired, s);
     sysbus_init_irq(sbd, &s->analog_irq);
     object_property_add_link(obj, "dma", "sc6530_dma", &s->dma,
                              object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
@@ -1035,6 +1083,7 @@ static const Property sc6530_adi_properties[] = {
     DEFINE_PROP_BOOL("headset-mic", Sc6530AdiState, headset_mic, false),
     DEFINE_PROP_UINT32("headset-bounce-ms", Sc6530AdiState, headset_bounce_ms, 0),
     DEFINE_PROP_BOOL("charger-present", Sc6530AdiState, charger_present, false),
+    DEFINE_PROP_BOOL("watchdog", Sc6530AdiState, watchdog, false),
     DEFINE_PROP_UINT32("mic-tone-hz", Sc6530AdiState, mic_tone_hz, 1000),
     DEFINE_PROP_UINT16("mic-level", Sc6530AdiState, mic_level, 8192),
     DEFINE_PROP_UINT32("line-left-hz", Sc6530AdiState, line_tone_hz[0], 600),

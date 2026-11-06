@@ -105,6 +105,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(Sc6530UsbState, SC6530_USB)
 #define EPINT_XACT      (1u << 0)
 #define EPINT_SETUP     (1u << 8)
 #define EPINT_DONE      (1u << 9)
+/* OUT refused because buffer ready was clear: the host tried to send
+ * (stock EP2/EP4 handlers 0x1fc4a/0x1fe80 start their transfer on it) */
+#define EPINT_OUT_TOKEN (1u << 12)
 
 /* FIFO indices (FIFO window word slot and FIFO_RST bit) */
 enum { FIFO_EP0_IN, FIFO_EP0_OUT, FIFO_EP1, FIFO_EP2, FIFO_EP3, FIFO_EP4,
@@ -126,7 +129,7 @@ typedef struct {
 
 typedef struct {
     uint32_t ctrl, rxcnt, trsize, int_ctrl, int_sts;
-    uint32_t sent;      /* IN: bytes sent of TRANS_SIZE */
+    uint32_t sent;      /* bytes sent (IN) or received (OUT) of TRANS_SIZE */
     uint32_t dma;       /* +0x1c, stored only: meaning unknown */
 } UsbEp;
 
@@ -151,6 +154,7 @@ struct Sc6530UsbState {
 
     bool irq_stuck;     /* test: line 25 held high with no source set */
     bool dma_requests;  /* FIFO DMA requests raised (off: test PIO fallback) */
+    bool dma_out_requests; /* the same for OUT FIFOs only */
 
     /* host protocol reassembly */
     uint8_t rx[4 + 4096];
@@ -552,18 +556,45 @@ static uint8_t host_out(Sc6530UsbState *s, int n, const uint8_t *data,
         return 'N';
     }
     if (!(ep->ctrl & EPCTRL_RX)) {
+        if (n != 0) {
+            ep->int_sts |= EPINT_OUT_TOKEN;
+            usb_update_irq(s);
+        }
         return 'N';
     }
     if (len > USB_FIFO_BYTES) {
         return 'T';
     }
     f = &s->fifo[ep_out_fifo(n)];
+    if (n != 0 && f->rd < f->count) {
+        return 'N';                     /* the last packet is still there */
+    }
     memcpy(f->data, data, len);
     f->count = len;
     f->rd = 0;
-    ep->ctrl = (ep->ctrl & ~(EPCTRL_RX | EPCTRL_COUNT)) | len;
-    ep->rxcnt = len;
-    ep->int_sts |= EPINT_XACT | EPINT_DONE;
+    if (n == 0) {
+        ep->ctrl = (ep->ctrl & ~(EPCTRL_RX | EPCTRL_COUNT)) | len;
+        ep->rxcnt = len;
+        ep->int_sts |= EPINT_XACT | EPINT_DONE;
+    } else {
+        /* Bulk: a transfer of TRANS_SIZE bytes (stock 0x1f454: DMA with
+         * TRANS_SIZE the whole length); one packet when the driver sets
+         * TRANS_SIZE per packet (PIO). RX count (+0x04) totals the
+         * transfer. The FIFO's DMA request drains each packet. */
+        uint32_t size = (ep->ctrl & EPCTRL_SIZE) >> EPCTRL_SIZE_SH;
+
+        ep->sent += len;
+        ep->rxcnt = ep->sent;
+        ep->ctrl = (ep->ctrl & ~EPCTRL_COUNT) | len;
+        if (s->dma && s->dma_requests && s->dma_out_requests) {
+            sc6530_dma_hw_request(s->dma, 17 + ep_out_fifo(n), len);
+        }
+        ep->int_sts |= EPINT_XACT;
+        if (ep->sent >= ep->trsize || len < size) {
+            ep->ctrl &= ~EPCTRL_RX;
+            ep->int_sts |= EPINT_DONE;
+        }
+    }
     trace_sc6530_usb_out(n, len);
     usb_update_irq(s);
     return 'A';
@@ -699,6 +730,7 @@ static const Property sc6530_usb_properties[] = {
     DEFINE_PROP_CHR("chardev", Sc6530UsbState, chr),
     DEFINE_PROP_BOOL("irq-stuck", Sc6530UsbState, irq_stuck, false),
     DEFINE_PROP_BOOL("dma-requests", Sc6530UsbState, dma_requests, true),
+    DEFINE_PROP_BOOL("dma-out-requests", Sc6530UsbState, dma_out_requests, true),
 };
 
 static void sc6530_usb_class_init(ObjectClass *klass, const void *data)
