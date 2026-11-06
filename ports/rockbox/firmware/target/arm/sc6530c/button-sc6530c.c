@@ -24,6 +24,7 @@
 #include "button.h"
 #include "kernel.h"
 #include "button-target.h"
+#include "backlight-target.h"
 
 /*
  * B310E-OS Rockbox port — b310e/target/arm/sc6530c/button-sc6530c.c
@@ -246,10 +247,21 @@ void sc6530_keypad_capture(void)
 #define TORCH_HOLD_TICKS HZ
 volatile unsigned torch_hold_count;    /* shown by the I/O ports screen */
 
+/* A short buzz confirms each torch toggle (the vibrator is stopped from
+ * this same tick poll, so no timer or thread is needed). */
+#define TORCH_BUZZ_TICKS (HZ / 12)
+static long buzz_end;
+
 static void torch_hold_check(int held)
 {
     static long down_tick;
     static bool armed;
+
+    if (buzz_end && TIME_AFTER(current_tick, buzz_end))
+    {
+        buzz_end = 0;
+        vibrator_set(0);
+    }
 
     if (!(held & BUTTON_0)) {
         armed = false;
@@ -263,6 +275,8 @@ static void torch_hold_check(int held)
         down_tick = 0;                  /* one toggle per press */
         torch_hold_count++;
         torch_set(!torch_get());
+        vibrator_set(4);
+        buzz_end = current_tick + TORCH_BUZZ_TICKS;
     }
 }
 

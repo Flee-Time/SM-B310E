@@ -24,6 +24,7 @@
 #include "kernel.h"
 #include "system.h"
 #include "power.h"
+#include "backlight-target.h"
 
 /*
  * B310E-OS Rockbox port — b310e/target/arm/sc6530c/power-sc6530c.c
@@ -163,6 +164,14 @@ bool charging_state(void)
 
 void power_off(void)
 {
+    /* The LED drivers and the vibrator live in the analog PMU, which runs
+     * from the battery and keeps its state when the CPU/RAM supplies go:
+     * a keypad light that was on at shutdown stayed lit until END woke
+     * the PMU (2026-11-06). Rockbox's shutdown_hw does not turn them off,
+     * so do it here, before the supplies are cut. */
+    keylight_set(0);
+    backlight_hw_off();
+    vibrator_set(0);
     /* Rockbox has already stopped audio and flushed the filesystem.
      * Serialize the ADI bridge against button/timer interrupt handlers.
      * Stock 0x1a448..52: SET1=0x1f, then SET0=0x3fff. The final store

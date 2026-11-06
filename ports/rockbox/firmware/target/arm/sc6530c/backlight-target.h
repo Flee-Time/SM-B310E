@@ -34,4 +34,11 @@ void backlight_hw_on(void);
 void backlight_hw_off(void);
 void backlight_hw_brightness(int brightness);
 
+void buttonlight_hw_on(void);
+void buttonlight_hw_off(void);
+void keylight_set(int level);          /* raw keypad light, 0..15 */
+
+/* Vibrator motor (stock _ANA_SetVibrator 0x1a2c4): 0 = off, 1..7 = strength. */
+void vibrator_set(int level);
+
 #endif /* BACKLIGHT_TARGET_H */

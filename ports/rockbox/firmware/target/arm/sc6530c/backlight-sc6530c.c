@@ -38,11 +38,16 @@
  *     "flash off / pwr" invariant bits. The crt0 boot markers and os.bin
  *     both use this channel. 0..100 percent -> duty 1..32 (+ bit 6).
  *   - 0x82001224  ANA_KEYLIGHT — the 4-bit KEYPAD light. level (value-1)<<4
- *     in bits 4-7, bit 5 = ON, bit 4 = OFF. Mirrored at the same level so
- *     screen + keys glow together like the stock phone.
+ *     in bits 4-7, bit 5 = ON, bit 4 = OFF. Driven as Rockbox's button
+ *     light with its own timeout. The level field has no visible effect
+ *     on hardware, so it is on/off only.
  *
  * Rockbox's brightness setting (MIN..MAX_BRIGHTNESS_SETTING = 1..15) scales
- * to percent for the LCD channel and maps directly onto the keypad level.
+ * to percent for the LCD channel.
+ *
+ * Vibrator (stock _ANA_SetVibrator 0x1a2c4, HW-verified by B310E-OS):
+ * power gate 0x82001154 = 0xA1B2 around the access, ON in 0x82001240
+ * bit 0, strength 0x82001244 bit 15 + bits 8-10.
  */
 
 #define REG32(a) (*(volatile uint32_t *)(a))
@@ -140,13 +145,12 @@ void backlight_hw_brightness(int brightness)
     /* Scale the 1..15 setting to percent for the LCD, mirror the keypad
      * at the same level (stock phone glows both together). */
     backlight_set(brightness * 100 / MAX_BRIGHTNESS_SETTING);
-    keylight_set(brightness);
 }
 
 bool backlight_hw_init(void)
 {
     backlight_set(backlight_brightness * 100 / MAX_BRIGHTNESS_SETTING);
-    keylight_set(backlight_brightness);
+    keylight_set(DEFAULT_BRIGHTNESS_SETTING);
     return true;
 }
 
@@ -162,11 +166,51 @@ void backlight_hw_on(void)
      * brightness on every menu activity — apply the CURRENT setting
      * (backlight.h's extern, kept in sync by backlight_set_brightness). */
     backlight_set(backlight_brightness * 100 / MAX_BRIGHTNESS_SETTING);
-    keylight_set(backlight_brightness);
 }
 
 void backlight_hw_off(void)
 {
     backlight_set(0);
+}
+
+/* ---- keypad light as Rockbox's button light (on/off only) --------------- */
+void buttonlight_hw_on(void)
+{
+    keylight_set(MAX_BRIGHTNESS_SETTING);
+}
+
+void buttonlight_hw_off(void)
+{
     keylight_set(0);
+}
+
+/* ---- vibrator ----------------------------------------------------------- */
+#define VIB_PWR       0x82001154u
+#define VIB_PWR_EN    0xa1b2u
+#define VIB_CTRL      0x82001240u
+#define VIB_ON        0x0001u
+#define VIB_STRENGTH  0x82001244u
+#define VIB_STR_EN    0x8000u
+#define VIB_STR_MASK  0xf0ffu
+
+void vibrator_set(int level)
+{
+    uint32_t tmp;
+    int old;
+
+    if (level < 0) level = 0;
+    if (level > 7) level = 7;
+    old = disable_irq_save();
+    adi_write(VIB_PWR, VIB_PWR_EN);
+    if (level == 0)
+        adi_write(VIB_CTRL, adi_read(VIB_CTRL) & ~VIB_ON);
+    else
+    {
+        adi_write(VIB_STRENGTH, adi_read(VIB_STRENGTH) | VIB_STR_EN);
+        tmp = (adi_read(VIB_STRENGTH) & VIB_STR_MASK) | (uint32_t)(level - 1) << 8;
+        adi_write(VIB_STRENGTH, tmp);
+        adi_write(VIB_CTRL, adi_read(VIB_CTRL) | VIB_ON);
+    }
+    adi_write(VIB_PWR, 0);
+    restore_irq(old);
 }

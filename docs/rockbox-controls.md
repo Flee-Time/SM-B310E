@@ -16,7 +16,7 @@ playback. The same physical buttons have these defaults:
 | END | Stop playback | Stop / cancel |
 | Hold END | Shut down | Shut down |
 | Hold STAR | Quickscreen | Quickscreen |
-| Hold 0 (1 s) | Torch on / off | Torch on / off |
+| Hold 0 (1 s) | Torch on / off, with a short buzz | Torch on / off, with a short buzz |
 
 Rockbox's previous-track behavior can restart the current track if it has
 already played past its configured skip threshold. Release after seeking
@@ -51,6 +51,23 @@ writes it low (writer at NOR `0x34e1e`, no other register changes).
 Stock boot leaves bit 7 set in DMSK and DIR. Rockbox sets those itself,
 so it does not depend on stock initialisation, and it writes no pinmux
 registers.
+
+## Keypad light and vibrator
+
+The keypad light (ANA `0x82001224`) is Rockbox's **button light**, with
+its own timeout under Settings → General → Display → Backlight, separate
+from the screen's. On hardware it is **on/off only**: the 4-bit level
+field the old notes called "dimmable" changes nothing, so there is no
+brightness setting.
+
+The vibrator (stock `_ANA_SetVibrator` `0x1a2c4`) has a power gate
+`0x82001154 = 0xA1B2` held only during the access, an on bit
+`0x82001240` bit 0, and a strength field `0x82001244` (bit 15 plus bits
+10:8). Rockbox has no vibration feature, so it is used for one thing: a
+~80 ms buzz each time hold-0 toggles the torch. The button driver's tick
+poll stops the motor, so no timer or thread is needed.
+
+## I/O test screen
 
 **Test screen:** System > Debug (Keep Out!) > View I/O ports. It shows
 the GPIO 7 state, how many times the hold-0 toggle fired, bank 0 GPIO

@@ -69,6 +69,9 @@
  * B310E-OS drivers/led.c led_keylight_set). Rockbox backlight = keylight. */
 #define HAVE_BACKLIGHT
 #define HAVE_BACKLIGHT_BRIGHTNESS
+/* The keypad light (ANA 0x82001224) has its own timeout. On hardware it
+ * is on or off only; the 4-bit level field changes nothing. */
+#define HAVE_BUTTON_LIGHT
 /* Main LCD backlight brightness range and defaults (1..15, 4-bit) */
 #define MIN_BRIGHTNESS_SETTING          1
 #define MAX_BRIGHTNESS_SETTING          15

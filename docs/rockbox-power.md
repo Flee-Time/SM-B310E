@@ -75,6 +75,17 @@ and `0x820010e4=2`, with IRQ/FIQ masked.
 `HAVE_SW_POWEROFF` is now enabled, making the existing held-END definition
 request this normal shutdown through Rockbox's button framework.
 
+**LEDs and vibrator off first.** The keypad light (`0x82001224`), LCD
+backlight LED (`0x82001220`) and vibrator (`0x82001240`) are driven by the
+analog PMU, which runs from the battery and keeps its state when the
+CPU/RAM supplies go. Rockbox's `shutdown_hw` does not turn them off. On
+the phone (2026-11-06) a keypad light that was on at shutdown stayed lit,
+draining the battery, until END woke the PMU. `power_off()` now switches
+all three off before the LDO writes. `ports/rockbox/tests/test-poweroff.py`
+holds END in QEMU and checks the last keypad-light and backlight writes
+before the power-down leave both off. The build before the fix fails it
+(keypad light `0xe0`, backlight `0x1159` at power-off).
+
 The paused idle-timeout test also reproduced a filesystem panic before
 `power_off()`: `Updating size on empty dir entry 55`. FAT passes interior
 directory-entry pointers to `dc_dirty_buf()`. Its old strided-array pointer
