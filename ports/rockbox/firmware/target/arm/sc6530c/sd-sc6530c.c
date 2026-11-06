@@ -62,6 +62,8 @@ extern void sdio_init(void);
 extern int  sdcard_init(void);
 extern int  sdio_read_block(uint32_t idx, uint8_t *buf);
 extern int  sdio_write_block(uint32_t idx, uint8_t *buf);
+extern int  sdio_card_status(uint32_t *status);
+extern void sdio_stop_transmission(void);
 extern unsigned sdio_shl;
 extern unsigned long sdio_num_blocks;
 extern void sc6530_keypad_capture(void);
@@ -71,6 +73,28 @@ static bool sd_enabled_ = false;   /* card present after sd_init */
 volatile bool sd_busy_now;
 static long  sd_activity;
 static struct mutex sd_mutex;
+/* Block transfers that failed and were retried / that failed for good
+ * (shown in the I/O dump). */
+static unsigned sd_retries, sd_failures;
+
+void sc6530_sd_errors(unsigned *retries, unsigned *failures)
+{
+    *retries = sd_retries;
+    *failures = sd_failures;
+}
+
+/* Write throughput since boot: blocks written, ticks spent in write
+ * requests (sums of tick deltas, so short requests average out), and the
+ * slowest single request. */
+static unsigned long sd_wr_blocks, sd_wr_ticks, sd_wr_max_ticks;
+
+void sc6530_sd_write_stats(unsigned long *blocks, unsigned long *ticks,
+                           unsigned long *max_ticks)
+{
+    *blocks = sd_wr_blocks;
+    *ticks = sd_wr_ticks;
+    *max_ticks = sd_wr_max_ticks;
+}
 
 int sd_init(void)
 {
@@ -124,6 +148,47 @@ static int transfer_block(uint32_t idx, void *buf, bool write)
     return rc;
 }
 
+/* sdio_cmd: the card is programming a block and the driver is about to
+ * yield (begin) or has finished waiting (end). Let the keypad scan run
+ * meanwhile; pause it again before the next SDIO DMA. */
+void sd_card_busy_wait(bool begin)
+{
+    if (begin) {
+        sc6530_keypad_capture();
+        KEYPAD_CTRL |= 1u;
+    } else {
+        KEYPAD_CTRL &= ~1u;
+    }
+}
+
+/* After a failed block: wait until the card is back in the transfer state
+ * and ready for data (CMD13), stopping an aborted transfer on the way.
+ * A card still programming answers with the programming state. */
+#define SD_READY_TIMEOUT  HZ
+#define SD_BLOCK_TRIES    4
+
+static void wait_card_ready(void)
+{
+    long end = current_tick + SD_READY_TIMEOUT;
+    unsigned polls = 20000;     /* bound even with the tick stopped */
+
+    while (polls--) {
+        uint32_t st;
+
+        if (sdio_card_status(&st) == 0) {
+            unsigned state = (st >> 9) & 15;
+
+            if (state == 4 && (st & (1u << 8)))     /* tran, ready */
+                return;
+            if (state == 5 || state == 6)           /* data, rcv */
+                sdio_stop_transmission();
+        }
+        if (TIME_AFTER(current_tick, end))
+            return;
+        yield();
+    }
+}
+
 /* File metadata and audio buffering run in different threads. Protect the
  * controller AND its shared IRAM bounce buffer for the entire request. */
 static int transfer_sectors(sector_t start, int count, void *buf, bool write)
@@ -137,14 +202,36 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
 
     mutex_lock(&sd_mutex);
     sd_busy_now = true;
+    long t0 = current_tick;
+    int blocks = count;
     while (count--) {
-        if (transfer_block(idx++, p, write)) {
-            rc = -1;
-            break;
+        int tries = 0;
+
+        /* One failed block used to fail the whole request, and a failed
+         * write panics the FAT writeback. Recover and retry instead. */
+        while (transfer_block(idx, p, write)) {
+            if (++tries >= SD_BLOCK_TRIES) {
+                sd_failures++;
+                rc = -1;
+                break;
+            }
+            sd_retries++;
+            wait_card_ready();
         }
+        if (rc)
+            break;
+        idx++;
         p += SD_BLOCK_SIZE;
     }
     sd_activity = current_tick;
+    if (write && rc == 0) {
+        unsigned long dt = (unsigned long)(current_tick - t0);
+
+        sd_wr_blocks += blocks;
+        sd_wr_ticks += dt;
+        if (dt > sd_wr_max_ticks)
+            sd_wr_max_ticks = dt;
+    }
     sd_busy_now = false;
     mutex_unlock(&sd_mutex);
     return rc;

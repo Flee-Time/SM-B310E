@@ -94,6 +94,35 @@ unsigned sdio_shl;          /* 0 SDHC / 9 SDSC (block vs byte addressing)  */
 unsigned long sdio_num_blocks;  /* card size in 512-byte blocks (CSD)     */
 
 #define SDIO_WAIT_BUDGET 1000000u
+/* Data commands wait for the card as well. A write's transfer-complete
+ * comes only after the card finishes programming, which the SD spec lets
+ * take 250 ms (500 ms for SDXC), longer still during the card's internal
+ * housekeeping on long sequential writes. The 1M budget (~50-100 ms of
+ * status reads) ran out there, the lines were reset mid-write and the FAT
+ * writeback panicked (long recordings, 2026-11-06).
+ *
+ * Rockbox threads are cooperative, so a long spin here also stops the UI
+ * and the recording encoder; on the phone a ~1 s card stall overflowed the
+ * 1.2 s PCM buffer (recording warning 0x1). Even without stalls, every
+ * block's normal programming time (~1 ms) adds up: Rockbox flushes
+ * hundreds of blocks at once, and spinning through them still overflowed
+ * the buffer with 48 kHz WAV (192 KB/s; MP3 was fine). So spin only long
+ * enough for the data to clock out (~40 us at 4-bit 24 MHz), then poll
+ * with yield() for up to SDIO_DATA_WAIT_TICKS. Without interrupts (no tick, no scheduling) it
+ * keeps spinning, bounded by the iteration budget. The controller's own
+ * data timeout (count 14) still ends a stuck transfer. */
+#define SDIO_DATA_SPIN_BUDGET 2000u
+#define SDIO_DATA_WAIT_BUDGET 20000000u
+#define SDIO_DATA_WAIT_TICKS  (HZ * 3 / 2)
+
+static uint32_t sdio_rca;   /* card's relative address, for CMD13 */
+
+/* sd-sc6530c.c: called around the yielding part of a data wait. The data
+ * phase (512 bytes, ~40 us) is over by then and only the card's own
+ * programming remains, so the keypad scan, paused for the SDIO DMA, can
+ * run meanwhile. Keeping it paused through the yields lost key presses
+ * during 48 kHz stereo FM recording (2026-11-06). */
+extern void sd_card_busy_wait(bool begin);
 
 /* ---- clock/control helpers (fpdoom sdio.c:82-170) ---------------------- */
 
@@ -285,6 +314,8 @@ void sdio_init(void)
 #define SDIO_CMD7_TR (SDIO_MAKE_CMD(7, 48_BUSY) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
 #define SDIO_CMD8_TR (SDIO_MAKE_CMD(8, 48) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
 #define SDIO_CMD9_TR (SDIO_MAKE_CMD(9, 136) | SDIO_CMD_CRC_CHK)
+#define SDIO_CMD12_TR (SDIO_MAKE_CMD(12, 48_BUSY) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
+#define SDIO_CMD13_TR (SDIO_MAKE_CMD(13, 48) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
 #define SDIO_CMD16_TR (SDIO_MAKE_CMD(16, 48) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
 #define SDIO_CMD55_TR (SDIO_MAKE_CMD(55, 48) | SDIO_CMD_IND_CHK | SDIO_CMD_CRC_CHK)
 
@@ -331,12 +362,37 @@ static uint32_t sdio_cmd(uint32_t cmd_tr, uint32_t arg, uint32_t cmd_int,
 
     tmp = data ? (SDIO_INT_TR_COMPLETE | SDIO_INT_ERR)
                : (SDIO_INT_CMD_COMPLETE | SDIO_INT_ERR);
-    {
+    if (!data) {
         uint32_t np = SDIO_WAIT_BUDGET;
 
         do {
             cmd_int = sdio->int_st;
         } while (!(cmd_int & tmp) && --np != 0);
+    } else {
+        uint32_t np = SDIO_DATA_SPIN_BUDGET;
+
+        do {
+            cmd_int = sdio->int_st;
+        } while (!(cmd_int & tmp) && --np != 0);
+
+        if (!(cmd_int & tmp)) {
+            bool sched = irq_enabled();
+            long end = current_tick + SDIO_DATA_WAIT_TICKS;
+
+            if (sched)
+                sd_card_busy_wait(true);
+            np = SDIO_DATA_WAIT_BUDGET;
+            do {
+                if (sched) {
+                    if (TIME_AFTER(current_tick, end))
+                        break;
+                    yield();
+                }
+                cmd_int = sdio->int_st;
+            } while (!(cmd_int & tmp) && --np != 0);
+            if (sched)
+                sd_card_busy_wait(false);
+        }
     }
 
     sdio->ctrl2 |= 3u << 25;                /* SW_RST_DAT | SW_RST_CMD */
@@ -443,6 +499,7 @@ acmd51_done:
     if (!(sd_int & SDIO_INT_CMD_COMPLETE)) return 4;
     rca = resp[0] >> 16;
     rca <<= 16;
+    sdio_rca = rca;
 
     sd_int = sdio_cmd(SDIO_CMD9_TR, rca, SDIO_CMD9_INT, NULL, 0, resp);
     if (!(sd_int & SDIO_INT_CMD_COMPLETE)) return 5;
@@ -463,6 +520,29 @@ acmd51_done:
     if (!(sd_int & SDIO_INT_CMD_COMPLETE)) return 8;
 
     return 0;
+}
+
+/* ---- card status (CMD13) and stop (CMD12), for error recovery ---------- */
+
+/* Card status register (R1): returns 0 and fills *status on a response. */
+int sdio_card_status(uint32_t *status)
+{
+    uint32_t resp[4], sd_int;
+
+    sd_int = sdio_cmd(SDIO_CMD13_TR, sdio_rca, SDIO_INT_COMMON, NULL, 0, resp);
+    if ((sd_int & SDIO_INT_ERR) || !(sd_int & SDIO_INT_CMD_COMPLETE))
+        return -1;
+    *status = resp[0];
+    return 0;
+}
+
+/* Return a card left in the data/receive state (aborted transfer) to
+ * transfer state. */
+void sdio_stop_transmission(void)
+{
+    uint32_t resp[4];
+
+    sdio_cmd(SDIO_CMD12_TR, 0, SDIO_INT_COMMON, NULL, 0, resp);
 }
 
 /* ---- block I/O (fpdoom sdio_read_block / sdio_write_block) --------------

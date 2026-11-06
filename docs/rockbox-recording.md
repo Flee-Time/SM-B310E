@@ -136,6 +136,51 @@ It runs two cases: 16 kHz with gain 8, and 8 kHz with gain 15. Both pass.
 With `-icount` the guest runs ahead of wall time, so a few seconds of
 waiting produce a recording a few minutes long.
 
+## SD writes during long recordings
+
+Long recordings used to end in a panic from the FAT writeback
+(`dc_writeback_callback() - Could not write sector`, 2026-11-06). Rockbox
+panics there whenever the storage driver reports a failed write. Two
+changes in the SD driver:
+- **Longer wait for data commands.** A write completes only after the
+  card has programmed it, which the SD spec allows to take 250 ms
+  (500 ms for SDXC), and longer while the card does housekeeping during
+  long sequential writes. The old poll budget (about 50–100 ms) ran out
+  there, and the driver then reset the lines mid-write. Data commands now
+  wait up to 1.5 s; the controller's own data timeout still ends a stuck
+  transfer.
+- **The wait yields.** Rockbox threads are cooperative, so spinning for a
+  slow card also stops the UI and the encoder. On the phone a ~1 s stall
+  froze the screen and overflowed the PCM buffer, which holds about 1.2 s
+  at 48 kHz on this 4 MiB build (recording warning `00000001`,
+  `PCMREC_W_PCM_BUFFER_OVF`). The driver now spins briefly (a normal block
+  completes inside it), then polls with `yield()`. With interrupts off it
+  keeps spinning, bounded by an iteration count.
+- **Keys during the wait.** Each block pauses the keypad matrix scan
+  around the SDIO DMA (a held key plus SDIO DMA hung B310E-OS). With the
+  yielding wait the pause also covered the card's programming time, and
+  during 48 kHz stereo FM recording stop presses were lost. The scan now
+  resumes while the wait yields (the 512-byte data phase is long over by
+  then) and pauses again before the next command. QEMU does not reproduce
+  the lost presses, so this rests on hardware testing.
+- **Retries.** A failed block is retried up to 3 more times. Before each
+  retry the driver polls the card status (CMD13) until the card is back
+  in the transfer state and ready (up to 1 s), sending CMD12 if the card
+  was left in the receive state.
+
+The dump's `SD` line counts retried and failed blocks since boot. On the
+phone it read `retries=0 failures=0` after a stall: the card was slow,
+not failing. It also gives the write throughput since boot (`wr_kbps`,
+time spent inside write requests) and the slowest request (`wr_max_ms`).
+
+**Still open: 48 kHz WAV.** With WAV at 48 kHz the phone still shows
+warning `00000001`; MP3 does not. In `pcm_record.c` a full encoder buffer
+makes the encoder wait without a warning of its own, and the PCM buffer
+behind it then overflows. So the warning means **the card writes can't
+keep up** with 192 KB/s, not that a thread starved. The driver writes one
+512-byte block per command (CMD24); a USB copy through the same path
+peaked at about 347 KB/s. Multi-block writes (CMD25) are the likely fix.
+
 ## Debug tools
 
 The View I/O ports dump (opening the screen, or key 9) appends two

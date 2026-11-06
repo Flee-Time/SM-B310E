@@ -146,7 +146,7 @@ chain at 2 - the catch-all only ever sees addresses nothing claims).
 | 0x20300000 / 0x20380000 | 0x1000 / 0x100 | USB controller + FIFO window | functional device controller, IRQ 25; host over a chardev ([usb.md](usb.md)) |
 | 0x20400000 | 0x3000 | BUS_MON | aux silent store+echo |
 | 0x20500000 | 0x1000 | AHB | aux log+store; 0x205003fc reads chip-id 0x6530c000; 0x205000e0 MEM_REMAP = logged no-op |
-| 0x20700000 | 0x1000 | SDIO0 | no-op ("no card") |
+| 0x20700000 | 0x1000 | SDIO0 | QEMU SDHCI with an optional SD card (`sc6530_sdio.fail-write-every=N` fails every Nth block write; `write-busy-every=N` + `write-busy-ms=M` keep every Nth write busy for M ms) |
 | 0x20800000 | 0x1000 | LCM DBI | store+echo (panel table not modeled) |
 | 0x20a00000 | | SFC | NOT a device: catch-all benign entry, SFC_STATUS 0x20a00010 = 0x3 (ready\|idle) |
 | 0x20d00000 | 0x1000 | LCDC | QemuConsole 128x160; refresh = ctrl bit 3 -> copy fb (img.y_base_addr << 2) |
