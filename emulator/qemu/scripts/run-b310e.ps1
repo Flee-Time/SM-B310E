@@ -44,7 +44,7 @@ param(
   [ValidateSet("warm", "stock", "ours")]
   [string]$Boot = "warm",
   [string]$Nor,                 # default: repo\tools\spd_dump\full-backup.bin
-  [string]$Os,                  # default: repo\emulator\qemu\logs\os-sdboot-era.bin (boot=ours)
+  [string]$Os,                  # default: repo\build\os\b310e-os.bin (boot=ours)
   [string[]]$Trace,             # default per boot mode; ONE --trace per pattern
   [Parameter(Mandatory = $true)]
   [string]$D,                   # REQUIRED: the -D trace/log file (qemu_log evidence)
@@ -62,7 +62,7 @@ $ErrorActionPreference = "Stop"
 # ---- resolve paths (UNC-safe: everything derives from $PSScriptRoot) --------
 $repo = Split-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) -Parent
 if (-not $Nor) { $Nor = Join-Path $repo "tools\spd_dump\full-backup.bin" }
-if (-not $Os)  { $Os  = Join-Path $repo "build\bin\os-sd.bin" }
+if (-not $Os)  { $Os  = Join-Path $repo "build\os\b310e-os.bin" }
 if (-not $Qemu) { $Qemu = Join-Path $repo 'build\qemu\build\qemu-system-arm.exe' }
 
 # ---- defaults per boot mode --------------------------------------------------
@@ -87,7 +87,7 @@ if (-not (Test-Path -LiteralPath $Qemu)) {
 }
 if (-not (Test-Path -LiteralPath $Nor)) { Write-Host "FAIL: NOR image not found at $Nor"; exit 1 }
 if ($Boot -eq "ours" -and -not (Test-Path -LiteralPath $Os)) {
-  Write-Host "FAIL: os image not found at $Os (boot=ours needs the committed sdboot-era os.bin, or pass -Os)"; exit 1
+  Write-Host "FAIL: os image not found at $Os (boot=ours runs the B310E OS: build.ps1 os, or pass -Os)"; exit 1
 }
 $logFull = [IO.Path]::GetFullPath($D)
 $logDir  = Split-Path $logFull -Parent
@@ -125,7 +125,7 @@ if ($Display -eq 'none') { $displayArgs = @('-display', 'none') }
 elseif ($Display -eq 'sdl') { $displayArgs = @('-display', 'sdl') }
 
 $qargs = @(
-  "-M", "b310e,boot-mode=$Boot",
+  "-M", "b310e,boot-mode=$(if ($Boot -eq 'ours') { 'rockbox' } else { $Boot })",
   $displayArgs[0], $displayArgs[1], "-serial", "none",
   "-d", "int", "-D", $logFull,
   "-monitor", "telnet:127.0.0.1:$MonitorPort,server,nowait",

@@ -4,8 +4,8 @@ PYTHON ?= python
 else
 PYTHON ?= python3
 endif
-.DEFAULT_GOAL := firmware
-.PHONY: all firmware os-sd debug dsp-diag fpmain games rockbox qemu sdcard sd-image hosttest check clean doctor dis size stockram stockram-diag
-all: firmware
-firmware os-sd debug dsp-diag fpmain games rockbox qemu sdcard sd-image hosttest check clean doctor dis size stockram stockram-diag:
+.DEFAULT_GOAL := os
+.PHONY: all os fpmain games rockbox qemu sdcard sd-image clean doctor stockram stockram-diag
+all: os
+os fpmain games rockbox qemu sdcard sd-image clean doctor stockram stockram-diag:
 	$(PYTHON) scripts/build.py $@

@@ -1,5 +1,12 @@
 # flashing.md — hardware boot test (RAM load)
 
+> **2026-11-06:** the RAM-loaded test OS (`os.bin`, built from `firmware/`)
+> that steps 2 to 5 load was removed. B310E OS (`os/`) boots from the SD
+> menu instead (`progs/b310e-os.bin`). Step 1 (download mode) and step 6
+> (the `sdboot3.bin` SD loader) still apply. The old source is in git history
+> (commit e2c0e83 and earlier).
+
+
 This is the procedure for loading B310E-OS into the phone's RAM over USB and
 watching it run. It is written for the person holding the phone, and the
 expected outputs below are what you should see if everything works.

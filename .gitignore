@@ -68,9 +68,6 @@ __pycache__/
 
 # -- AI-session knowledge files (kept on disk for local sessions) ----
 AGENTS.md
-firmware/arch/AGENTS.md
-firmware/kernel/AGENTS.md
-firmware/drivers/AGENTS.md
 handoff.md
 
 # -- Local tooling / machine-specific config -------------------------

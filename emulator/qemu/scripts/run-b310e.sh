@@ -52,7 +52,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 repo="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 if [[ -z "$Nor" ]]; then Nor="$repo/tools/spd_dump/full-backup.bin"; fi
-if [[ -z "$Os" ]]; then Os="$repo/build/bin/os-sd.bin"; fi
+if [[ -z "$Os" ]]; then Os="$repo/build/os/b310e-os.bin"; fi
 if [[ -z "$Qemu" ]]; then Qemu="$repo/build/qemu/build/qemu-system-arm"; fi
 
 # ---- param validation ------------------------------------------------------
@@ -116,7 +116,7 @@ if [[ ! -f "$Nor" ]]; then
   exit 1
 fi
 if [[ "$Boot" == "ours" && ! -f "$Os" ]]; then
-  echo "FAIL: os image not found at $Os (boot=ours needs the committed sdboot-era os.bin, or pass -Os)"
+  echo "FAIL: os image not found at $Os (boot=ours runs the B310E OS: build.sh os, or pass -Os)"
   exit 1
 fi
 
@@ -178,7 +178,10 @@ elif [[ "$Display" == "sdl" ]]; then
 else
   display_arg="-display $Display"
 fi
-qargs=(-M "b310e,boot-mode=$Boot" ${display_arg} -serial none -d int -D "$logFull"
+machine_boot="$Boot"
+# our OS has Rockbox's entry contract (image at the PSRAM base, vectors first)
+[[ "$Boot" == "ours" ]] && machine_boot=rockbox
+qargs=(-M "b310e,boot-mode=$machine_boot" ${display_arg} -serial none -d int -D "$logFull"
        -monitor "telnet:127.0.0.1:$MonitorPort,server,nowait"
        -drive "file=$Nor,format=raw,if=none,id=nor")
 for t in "${Trace[@]}"; do

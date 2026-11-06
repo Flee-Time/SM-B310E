@@ -78,8 +78,7 @@ therefore required for the first build; later invocations reuse the checkout.
 
 ```powershell
 .\build.ps1 doctor               # show detected tools
-.\build.ps1 firmware             # RAM-loaded OS: build/bin/os.bin
-.\build.ps1 os-sd                # USB-free SD-boot OS
+.\build.ps1 os                   # B310E OS: sdcard/progs/b310e-os.bin
 .\build.ps1 fpmain               # JSON boot menu, staged into sdcard/fpbin
 .\build.ps1 games                # all supported game ports from pinned sources
 .\build.ps1 rockbox              # player binary and matching .rockbox runtime
@@ -87,8 +86,6 @@ therefore required for the first build; later invocations reuse the checkout.
 .\build.ps1 sd-image             # FAT32 emulator image with stereo test.wav
 .\build.ps1 qemu                # emulator: build/qemu/build/qemu-system-arm.exe
 .\build.ps1 qemu --qemu-headless # smaller build for automated tests
-.\build.ps1 check               # 182 host checks + ARM entry/text checks
-.\build.ps1 debug               # LCD, rotation, SD, MMU and NOR diagnostics
 .\build.ps1 clean               # generated outputs only
 ```
 
@@ -110,13 +107,14 @@ also detects MSYS2 host GCC and the standard Arm 14.2 installation.
 Rockbox's upstream Make/configure requires an ARM toolchain path without
 spaces. Native firmware builds accept paths with spaces.
 
-For Make aliases use `make rockbox`, `make check`, etc. Set `PYTHON` if necessary:
-`make PYTHON=C:/msys64/mingw64/bin/python.exe check`.
+For Make aliases use `make os`, `make rockbox`, etc. Set `PYTHON` if necessary:
+`make PYTHON=C:/msys64/mingw64/bin/python.exe os`.
 
 ## Outputs, downloads and local data
 
-- `build/bin/`: firmware binaries, ELF/relocation files and Rockbox package.
-- `build/firmware/`, `build/host/`, `build/fpmain/`, `build/games/`: build outputs.
+- `build/os/`: B310E OS objects, ELF, map and image.
+- `build/bin/`: the Rockbox package.
+- `build/fpmain/`, `build/games/`: build outputs.
 - `build/fpdoom/`, `build/rockbox/`, `build/qemu/`: upstream source/build caches.
 - `build/logs/`: complete logs, one per target.
 - `build/qemu-desktop/`, `build/qemu-desktop.zip`: portable Windows GUI package.
@@ -193,10 +191,7 @@ both crashed on the local Windows test host and remain unverified on the remote
 host. The default launcher explicitly uses `gtk,gl=off`; this 2D display path
 passed on both hosts and supports the phone framebuffer and keyboard input.
 
-The optional `dsp-diag --dsp-blob /path/to/dsp-blob-CC874.dec.bin` target
-requires the previously verified private DSP bundle and checks its SHA-256.
-Ordinary diagnostics and complete card builds do not require proprietary data.
-The legacy research packers remain available as `stockram` and `stockram-diag`;
+Card builds do not require proprietary data. The legacy research packers remain available as `stockram` and `stockram-diag`;
 see [stockram.md](stockram.md) for their stock-dump requirements.
 
 After building, see [flashing.md](flashing.md) for RAM loading and SD boot,

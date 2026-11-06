@@ -1,5 +1,11 @@
 # SD-card boot — B310E-OS (fpdoom sdboot as the NOR loader)
 
+> **2026-11-06:** the old test OS (`os.bin` / `os-sd.bin` from `firmware/`)
+> was removed; the menu now launches B310E OS as `progs/b310e-os.bin`, a raw
+> image linked at 0x04000000 like Rockbox (no relocation table). The
+> `os.bin` build notes below are history.
+
+
 ## JSON menu and automatic ROM discovery (current)
 
 `fpbin/config.json` is the only menu configuration. `config.txt` and its

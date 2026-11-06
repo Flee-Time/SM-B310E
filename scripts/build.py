@@ -9,9 +9,8 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ('firmware', 'os-sd', 'debug', 'dsp-diag', 'fpmain', 'games', 'rockbox',
-           'qemu', 'sdcard', 'sd-image', 'hosttest', 'check', 'clean', 'doctor',
-           'dis', 'size', 'stockram', 'stockram-diag')
+TARGETS = ('os', 'fpmain', 'games', 'rockbox', 'qemu', 'sdcard', 'sd-image',
+           'clean', 'doctor', 'stockram', 'stockram-diag')
 
 
 def compiler_dir(value, program, candidates=()):
@@ -107,13 +106,6 @@ class Builder:
             command = [bash, ROOT / relative, *arguments]
         self.run(command, label)
 
-    def native(self, target):
-        command = [sys.executable, ROOT / 'scripts/targets/firmware.py', target,
-                   '--jobs', str(self.args.jobs)]
-        if self.args.dsp_blob:
-            command += ['--dsp-blob', str(Path(self.args.dsp_blob).resolve())]
-        self.run(command, target)
-
     def copy(self, source, dest):
         if self.args.dry_run:
             print(f'Stage {source} -> {dest}')
@@ -122,10 +114,8 @@ class Builder:
         shutil.copy2(source, dest)
 
     def target(self, name):
-        if name in ('firmware', 'os-sd', 'debug', 'dsp-diag', 'hosttest', 'check', 'dis', 'size'):
-            self.native(name)
-        elif name in ('fpmain', 'games', 'rockbox'):
-            if not self.args.dry_run and (not self.arm or not self.host):
+        if name in ('fpmain', 'games', 'rockbox', 'os'):
+            if not self.args.dry_run and (not self.arm or (not self.host and name != 'os')):
                 raise RuntimeError('ARM and host GCC are required; use --toolchain and --host-cc.')
             if name == 'rockbox' and self.arm and ' ' in str(self.arm):
                 raise RuntimeError('Rockbox requires a toolchain path without spaces; use --toolchain.')
@@ -140,9 +130,8 @@ class Builder:
                 self.shell('scripts/targets/qemu.sh', 'qemu', str(self.qemu_source), str(self.args.jobs),
                            'headless' if self.args.qemu_headless else 'desktop')
         elif name == 'sdcard':
-            for target in ('os-sd', 'fpmain', 'games', 'rockbox'):
+            for target in ('os', 'fpmain', 'games', 'rockbox'):
                 self.target(target)
-            self.copy(ROOT / 'build/bin/os-sd.bin', ROOT / 'sdcard/progs/os.bin')
             self.copy(ROOT / 'ports/fpmain/games-README.md', ROOT / 'sdcard/games/README.md')
             if not self.args.dry_run:
                 for folder in ('doom1', 'doom2', 'duke3d', 'sw', 'heretic', 'hexen', 'wolf3d', 'blood', 'retris', 'snes', 'gameboy', 'nes'):
@@ -162,7 +151,8 @@ class Builder:
             build_root = ROOT / 'build'
             if build_root.is_symlink() or build_root.resolve() != ROOT.resolve() / 'build':
                 raise RuntimeError(f'Refusing to clean redirected build root: {build_root}')
-            folders = ['bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
+            # bin, firmware and host held the old test OS's output
+            folders = ['os', 'bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
             if self.args.downloads:
                 folders += ['fpdoom', 'rockbox', 'qemu']
             for folder in folders:
@@ -210,7 +200,6 @@ def main():
                         help='MSYS2 root; auto-detect D:/Toolchains/msys64 then C:/msys64')
     parser.add_argument('--qemu-source', default=os.environ.get('B310E_QEMU_SOURCE'))
     parser.add_argument('--qemu-headless', action='store_true', help='omit GTK/SDL/OpenGL and the Windows desktop package')
-    parser.add_argument('--dsp-blob', help='optional hash-verified DSP bundle for dsp-diag')
     parser.add_argument('--dry-run', action='store_true', help='show the plan without changing files')
     parser.add_argument('--downloads', action='store_true', help='also remove in-repo upstream clones with clean')
     parser.add_argument('--image', type=Path, default=ROOT / 'sdcard/emulator-sd.img')
