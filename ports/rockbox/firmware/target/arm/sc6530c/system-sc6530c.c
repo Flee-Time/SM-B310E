@@ -388,45 +388,6 @@ static bool torch_dump(const char *what)
     return (close(fd) == 0) && ok;
 }
 
-/* ADC R bit sweep (key 0): see sc6530_adcr_sweep in audiohw. One line per
- * flipped bit; "R-LIVE" marks a right channel that is no longer pinned. */
-static struct sc6530_sweep sweep_res[140];
-
-static const char *adcr_sweep(void)
-{
-    int n = sc6530_adcr_sweep(sweep_res, ARRAYLEN(sweep_res));
-    int fd, live = 0;
-    bool ok = true;
-
-    if (n < 0)
-        return "stop recording first";
-    fd = open(ROCKBOX_DIR "/adcr-sweep.txt", O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0)
-        return "sweep: file FAILED";
-    ok &= fdprintf(fd, "ADC R sweep variant=%d tuner=%d\n",
-                   sc6530_adcr_variant(), (int)tuner_powered()) >= 0;
-    for (int i = 0; i < n; i++)
-    {
-        const struct sc6530_sweep *r = &sweep_res[i];
-        bool r_live = r->banks && r->min[1] > -32000 && r->max[1] < 32000 &&
-                      r->max[1] - r->min[1] >= 16;
-        bool l_live = r->banks && r->min[0] > -32000 && r->max[0] < 32000 &&
-                      r->max[0] - r->min[0] >= 16;
-        live += r_live;
-        ok &= fdprintf(fd, "%s %08lx m=%04x v=%04x L=%d..%d R=%d..%d banks=%u%s%s%s\n",
-                       r->addr ? "BIT" : "BASE", (unsigned long)r->addr,
-                       r->mask, r->value, r->min[0], r->max[0],
-                       r->min[1], r->max[1], r->banks,
-                       r->banks ? "" : " STALL", l_live ? "" : " L-DEAD",
-                       r_live ? " R-LIVE" : "") >= 0;
-    }
-    ok &= fdprintf(fd, "END entries=%d r_live=%d\n", n, live) >= 0;
-    ok &= close(fd) == 0;
-    if (!ok)
-        return "sweep: write FAILED";
-    return live ? "sweep done: R LIVE found!" : "sweep done: R dead";
-}
-
 bool dbg_ports(void)
 {
     bool vib = false, keys = false;
@@ -459,11 +420,9 @@ bool dbg_ports(void)
         lcd_puts(0, 9, "1: torch on/off");
         lcd_puts(0, 10, "3: vibrator on/off");
         lcd_puts(0, 11, "5: keypad light test");
-        lcd_putsf(0, 12, "7: ADC R variant %d", sc6530_adcr_variant());
-        lcd_puts(0, 13, "#: read SIM cards");
-        lcd_puts(0, 14, "9: save dump");
-        lcd_puts(0, 15, "Back: exit");
-        lcd_puts(0, 16, "0: ADC R bit sweep");
+        lcd_puts(0, 12, "#: read SIM cards");
+        lcd_puts(0, 13, "9: save dump");
+        lcd_puts(0, 14, "Back: exit");
         lcd_puts(0, 17, status);
         for (int s = 0; sim_done && s < 2; s++)
         {
@@ -491,9 +450,6 @@ bool dbg_ports(void)
             keys = !keys;
             keylight_set(keys ? MAX_BRIGHTNESS_SETTING : 0);
             status = keys ? "keypad light full" : "keypad light off";
-        } else if (button == BUTTON_7) {
-            sc6530_set_adcr_variant(sc6530_adcr_variant() + 1);
-            status = "ADC R variant changed";
         } else if (button == BUTTON_HASH) {
             lcd_puts(0, 17, "reading SIM...   ");
             lcd_update();
@@ -501,10 +457,6 @@ bool dbg_ports(void)
             sim_read(1, &sim_last[1]);
             sim_done = true;
             status = torch_dump("sim") ? "SIM read, dump saved" : "SIM read";
-        } else if (button == BUTTON_0) {
-            lcd_puts(0, 17, "sweeping ~25 s... ");
-            lcd_update();
-            status = adcr_sweep();
         } else if (button == BUTTON_9) {
             status = torch_dump("key 9") ? "dump saved" : "dump FAILED";
         }

@@ -65,27 +65,6 @@ struct sc6530_headset_info {
 void sc6530_headset_debug(struct sc6530_headset_info *info);
 int sc6530_headset_mic_raw(void);
 int sc6530_rec_mic_path(void);
-/* Capture layout (pcm-sc6530c.c): mono from AD0, or stereo AD0 + AD1. */
-void sc6530_rec_set_stereo(bool stereo);
-/* Stereo banks where AD1 (ADC R) sat at the rail and was replaced with
- * the left channel; and the ADC R power-up variant (audiohw). */
-unsigned sc6530_rec_right_railed(void);
-unsigned sc6530_rec_banks(void);
-void sc6530_rec_right_raw(int16_t *min, int16_t *max, int16_t head[4]);
-/* Stats-only stereo capture (pcm) and the ADC R bit sweep (audiohw) that
- * uses it: one entry per register bit flipped, plus a baseline (addr 0). */
-void sc6530_rec_probe_start(void);
-void sc6530_rec_probe_take(int16_t min[2], int16_t max[2], unsigned *banks);
-void sc6530_rec_probe_stop(void);
-struct sc6530_sweep {
-    uint32_t addr;          /* register written; 0 = baseline */
-    uint16_t mask, value;   /* bits changed and their test value */
-    int16_t min[2], max[2]; /* left, right */
-    unsigned banks;         /* stereo banks seen in the window */
-};
-int sc6530_adcr_sweep(struct sc6530_sweep *out, int max);
-int sc6530_adcr_variant(void);
-void sc6530_set_adcr_variant(int variant);
 
 /* Analog FM route on/off (audiohw-sc6530c.c). */
 void audiohw_fm_route(bool on);

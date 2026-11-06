@@ -166,11 +166,12 @@ static void mic_bias(unsigned user, bool on)
  * from the press log with + pressed three times, then - three times.
  * Boundaries sit halfway between the readings. The I/O screen shows the
  * live raw value and the dump logs each press's raw value.
- * While recording from the headset mic the buttons are off: any press
- * shorts or pulls down the mic being recorded, the ADC would sample that
- * line, and the centre button (Play) would start a new file in the
- * recording screen. Recording anything else (FM, or the phone's mic) keeps
- * all of them. Runs from the 100 Hz button tick (sc6530_headset_tick). */
+ * While recording the buttons are off. From the headset mic, a press
+ * shorts or pulls down the mic being recorded and the ADC would sample
+ * that line; in every recording the centre button (Play) would start a
+ * new file in the recording screen. On the phone the buttons misbehaved
+ * during FM recording too (2026-11-06), so no recording keeps them. Runs
+ * from the 100 Hz button tick (sc6530_headset_tick). */
 #define HOOK_MIC_MIN_RAW   40
 #define HOOK_POLL_TICKS    2
 #define HOOK_RELEASE_PERMILLE  500
@@ -202,11 +203,11 @@ static char hook_log_cls[HOOK_LOG];
 static int16_t hook_log_raw[HOOK_LOG];
 static unsigned hook_log_n;
 
-/* Recording from the headset mic (codec +0x64 bits 0x0c): buttons off. */
-static bool hook_headset_recording(void)
+/* Any recording: buttons off. */
+static bool hook_recording(void)
 {
 #ifdef HAVE_RECORDING
-    return recording_on && rec_mic_path == 0x0c;
+    return recording_on;
 #else
     return false;
 #endif
@@ -243,7 +244,7 @@ static void hook_sample(bool hook)
 {
     unsigned cls;
 
-    if (hook_headset_recording())
+    if (hook_recording())
     {
         /* Drop any press in progress without sending a tap. */
         hook_btn = hook_cand = hook_cand_n = 0;
@@ -674,34 +675,11 @@ void sc6530_rec_debug(uint16_t regs[8], bool at_start)
         rec_read(regs);
 }
 
-static bool rec_stereo;        /* line-in (FM): ADC L and R; mic: ADC L */
 /* Headset mic line, raw ADC channel 1: about 0 with a 3-pole plug (mic
  * contact grounded). The threshold is a first guess, to be calibrated
  * from the dump's mic_adc readings. -1 = ADC failed, -2 = not measured. */
 #define HEADSET_MIC_MIN_RAW 40
 static int headset_mic_raw = -2;
-
-/* ADC R power-up for stereo (FM) capture. Stock never powers ADC R (its
- * FM recording is mono from ADC L), and with the L recipe mirrored the
- * phone's ADC R sits at the negative rail. Variants, picked from Debug >
- * View I/O ports (key 7) until hardware settles it; applied at the next
- * stereo recording start:
- *   0: +0x5c bit1 clear, bit6 untouched (the build that railed)
- *   1: clear bit6 (likely ADC R's twin of the bit7 core power-down that
- *      fixed ADC L), set bit1 (the decompile's "R on" bit)
- *   2: clear bit6, bit1 clear
- *   3: as 1, plus a pulse on bit2 (a possible ADC R reset) */
-static int adcr_variant = 1;
-
-int sc6530_adcr_variant(void)
-{
-    return adcr_variant;
-}
-
-void sc6530_set_adcr_variant(int variant)
-{
-    adcr_variant = variant & 3;
-}
 
 /* Stock maps the headset mic onto the same gain register but with a lower
  * table (about 2..10 against 14 for the main mic, NV RecordHeadset), and
@@ -770,15 +748,14 @@ static bool rec_fm_mix;         /* FM recording switched the mux to mono */
  * stock does: both FM channels mixed into PGA L and captured mono on
  * ADC L. The mix also goes to PGA R, so the headphones carry the same
  * mono signal while recording; the stereo mux returns afterwards.
- * stereo (the ADC R sweep only): line-in on ADC L and R as routed.
  * Mic choice follows the jack: stock's headset-mic path 0x20 (+0x64 bits
  * 0x0c) with headphones in, the main mic (path 8, bits 0xc0) otherwise. */
-static void rec_power_up(bool source_mic, bool stereo)
+void audiohw_enable_recording(bool source_mic)
 {
+    if (recording_on)
+        return;
     if (!initialized)
         audiohw_init();
-    rec_stereo = stereo;
-    sc6530_rec_set_stereo(rec_stereo);
     /* Stock capture DAI modes are 0x30xxxxxx: both AD channels are
      * ARM-owned and enabled. */
     SC_AUDIO_REG(0x8b0001c4) |= 0x18;
@@ -808,7 +785,7 @@ static void rec_power_up(bool source_mic, bool stereo)
         adi_update(CODEC + 0x70, 0xf0, mic_gain_for_path(rec_mic_path) << 4);
         udelay(20000);                        /* stock has no wait */
     }
-    rec_fm_mix = !source_mic && !stereo;
+    rec_fm_mix = !source_mic;
     if (rec_fm_mix)
         adi_update(CODEC + 0x6c, 0xfc, LINE_MUX_MONO);
     /* ADC core, stock power state 5 (0x820d4 -> 0x8153e, 0x80af8). Stock
@@ -819,38 +796,16 @@ static void rec_power_up(bool source_mic, bool stereo)
     adi_update(CODEC + 0x5c, 0x80, 0);
     adi_update(CODEC + 0x60, 0xa0, 0);
     adi_update(CODEC + 0xac, 0x40, 0);
-    /* ADC power, stock 0x80b4e(1, mask). The decompile suggested +0x5c
-     * bit1 is set when the right channel is on, but on hardware ADC R then
-     * sat at the negative rail while ADC L (bit1 clear) worked, so it
-     * stays clear. */
+    /* ADC L power, stock 0x80b4e(1, 1): +0x5c bit1 is ADC R's enable and
+     * stays clear (ADC R does not work on this chip). */
     adi_update(CODEC + 0x5c, 0x02, 0);
-    if (rec_stereo)
-    {
-        if (adcr_variant != 0)
-            adi_update(CODEC + 0x5c, 0x40, 0);
-        if (adcr_variant == 1 || adcr_variant == 3)
-            adi_update(CODEC + 0x5c, 0x02, 0x02);
-        if (adcr_variant == 3)
-        {
-            adi_update(CODEC + 0x5c, 0x04, 0x04);
-            udelay(1000);
-            adi_update(CODEC + 0x5c, 0x04, 0);
-        }
-    }
-    SC_AUDIO_REG(0x8a002000) |= rec_stereo ? 0x0a : 0x02;  /* digital ADC */
-    adi_update(CODEC + 0x00, 0x0a, rec_stereo ? 0x0a : 0x02);
-    adi_update(CODEC + 0x5c, 0x28, rec_stereo ? 0 : 0x08); /* ADC PD off */
+    SC_AUDIO_REG(0x8a002000) |= 0x02;           /* digital ADC L */
+    adi_update(CODEC + 0x00, 0x0a, 0x02);
+    adi_update(CODEC + 0x5c, 0x28, 0x08);       /* ADC L power-down off */
     SC_AUDIO_REG(SC_VBC_BASE + 0x10) =
         (SC_AUDIO_REG(SC_VBC_BASE + 0x10) & ~0xffu) | (SC_VBC_FRAMES - 1);
     rec_read(rec_snap);
     recording_on = true;
-}
-
-void audiohw_enable_recording(bool source_mic)
-{
-    if (recording_on)
-        return;
-    rec_power_up(source_mic, false);
 }
 
 void audiohw_disable_recording(void)
@@ -858,8 +813,6 @@ void audiohw_disable_recording(void)
     if (!recording_on)
         return;
     adi_update(CODEC + 0x5c, 0x28, 0x28);
-    if (rec_stereo)
-        adi_update(CODEC + 0x5c, 0x42, 0x40);  /* back to the reset state */
     adi_update(CODEC + 0x00, 0x0a, 0);
     SC_AUDIO_REG(0x8a002000) &= ~0x0au;
     adi_update(CODEC + 0xac, 0x40, 0x40);     /* ADC core off */
@@ -927,116 +880,6 @@ void audiohw_fm_route(bool on)
 }
 #endif /* CONFIG_TUNER */
 
-#if defined(HAVE_RECORDING) && CONFIG_TUNER
-/* ADC R bit sweep (Debug > View I/O ports, key 0). Stock never records in
- * stereo, and with every right-channel bit its codec helpers know set
- * (docs/rockbox-recording.md) ADC R still delivers a constant -32768. The
- * sweep powers stereo capture on the line-in route, then flips one bit at
- * a time in the codec's ADC-side registers, the digital codec and the VBC
- * routing register, measures both channels for 100 ms and restores the
- * bit. A live ADC shows noise even on a quiet input; a dead one stays at
- * the rail. Output registers (+0x74 and up, speaker) are left alone. */
-static bool sweep_is_adi(uint32_t addr)
-{
-    return (addr & 0xfffff000u) == 0x82001000u;
-}
-
-static uint16_t sweep_read(uint32_t addr)
-{
-    return sweep_is_adi(addr) ? adi_read(addr) : (uint16_t)SC_AUDIO_REG(addr);
-}
-
-static void sweep_update(uint32_t addr, uint16_t mask, uint16_t value)
-{
-    if (sweep_is_adi(addr))
-        adi_update(addr, mask, value);
-    else
-        SC_AUDIO_REG(addr) = (SC_AUDIO_REG(addr) & ~(uint32_t)mask) | value;
-}
-
-static void sweep_measure(struct sc6530_sweep *r)
-{
-    int16_t min[2], max[2];
-    unsigned banks;
-
-    sleep(HZ / 20);                             /* settle, then drop */
-    sc6530_rec_probe_take(min, max, &banks);
-    sleep(HZ / 10);
-    sc6530_rec_probe_take(r->min, r->max, &r->banks);
-}
-
-static void sweep_one(struct sc6530_sweep *r, uint32_t addr,
-                      uint16_t mask, uint16_t value)
-{
-    uint16_t old = sweep_read(addr) & mask;
-
-    r->addr = addr;
-    r->mask = mask;
-    r->value = value;
-    sweep_update(addr, mask, value);
-    sweep_measure(r);
-    sweep_update(addr, mask, old);
-    sleep(HZ / 50);
-}
-
-static void sweep_bits(struct sc6530_sweep *out, int *n, int max,
-                       uint32_t addr, unsigned first, unsigned last)
-{
-    for (unsigned b = first; b <= last && *n < max; b++)
-    {
-        uint16_t bit = 1u << b;
-        sweep_one(&out[(*n)++], addr, bit, (sweep_read(addr) & bit) ^ bit);
-    }
-}
-
-int sc6530_adcr_sweep(struct sc6530_sweep *out, int max)
-{
-    static const uint8_t codec_regs[] = {
-        0x40, 0x44, 0x48, 0x4c, 0x50, 0x54, 0x58,
-        0x5c, 0x60, 0x64, 0x68, 0x6c, 0xac,
-    };
-    static const struct { uint32_t addr; uint16_t mask, value; } special[] = {
-        { CODEC + 0x6c, 0xfc, 0x1c },   /* stock mux: right only */
-        { CODEC + 0x6c, 0xfc, 0x74 },   /* stock mux: both, mask bit 4 */
-        { CODEC + 0x6c, 0xfc, 0xe0 },   /* stock mux: left only (mono mix) */
-        { CODEC + 0x5c, 0x42, 0x40 },   /* ADC R variant 0 */
-        { CODEC + 0x5c, 0x42, 0x00 },   /* ADC R variant 2 */
-    };
-    bool route = fm_on;
-    int n = 0;
-
-    if (recording_on || max < 1)
-        return -1;
-    uint32_t adc_ctl = SC_AUDIO_REG(0x8a002018);
-
-    if (!route)
-        audiohw_fm_route(true);
-    rec_power_up(false, true);                  /* stereo, line-in */
-    /* The playback default (44.1 kHz) is no ADC rate (rate / 4000), so
-     * the field may still be 0 if nothing recorded since boot: use 48k. */
-    SC_AUDIO_REG(0x8a002018) = (adc_ctl & ~15u) | 48000 / 4000;
-    sc6530_rec_probe_start();
-    sleep(HZ / 5);
-
-    out[n].addr = 0;
-    out[n].mask = out[n].value = 0;
-    sweep_measure(&out[n++]);
-    for (unsigned i = 0; i < ARRAYLEN(codec_regs); i++)
-        sweep_bits(out, &n, max, CODEC + codec_regs[i], 0, 7);
-    sweep_bits(out, &n, max, 0x8a002000u, 0, 7);        /* digital codec */
-    sweep_bits(out, &n, max, 0x8a002018u, 4, 7);        /* above ADC fs */
-    sweep_bits(out, &n, max, SC_VBC_BASE + 0x80, 0, 7); /* VBC AD routing */
-    for (unsigned i = 0; i < ARRAYLEN(special) && n < max; i++)
-        sweep_one(&out[n++], special[i].addr, special[i].mask, special[i].value);
-
-    sc6530_rec_probe_stop();
-    SC_AUDIO_REG(0x8a002018) = adc_ctl;
-    audiohw_disable_recording();
-    if (!route)
-        audiohw_fm_route(false);
-    return n;
-}
-#endif
 
 void audiohw_preinit(void) {}
 void audiohw_postinit(void) {}

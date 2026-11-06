@@ -61,8 +61,8 @@ holding **+** or **−** past 0.4 s turns the volume up or down for as long
 as it is held. They are enabled by a check when the
 headset is plugged in: the mic line must show a mic and the buttons must
 read released, so plain 3-pole headphones never send phantom presses.
-While recording from the headset mic all three are off (a press would
-land in the recording); while recording FM they work as usual. Details and calibration:
+While recording they are all off (from the headset mic a press would
+land in the recording, and Play would start a new file). Details and calibration:
 `docs/rockbox-recording.md` (Headset mic detection).
 
 ## Keypad light and vibrator
@@ -91,7 +91,6 @@ registers, and the vibrator and keypad-light test state. Its keys:
 | 1 | Torch (GPIO 7) on/off |
 | 3 | Vibrator on/off |
 | 5 | Keypad light full/off (the configured level returns on exit) |
-| 7 | VBC `+0x80` capture-route bits (recording experiments) |
 | # | Read both SIM slots: ATR, ICCID, IMSI or PIN status ([sim.md](sim.md)) |
 | 9 | Append a register dump to `.rockbox/torch-b310e.txt` |
 | Back | Exit |

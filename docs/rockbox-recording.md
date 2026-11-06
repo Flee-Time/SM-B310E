@@ -15,8 +15,8 @@ rounds:
    core" power-up described below.
 2. **ADC core powered, VBC `+0x80` bits `0x30` set:** all-zero samples.
    Those bits route AD to the DSP.
-3. **Bits cleared** (Debug → View I/O ports, key 7): working audio. The
-   driver now clears them by default.
+3. **Bits cleared** (then a debug key): working audio. The driver clears
+   them.
 
 Both failures reproduce in the QEMU model.
 
@@ -158,17 +158,14 @@ idle level, the comparator, the class held (line 1) and the last press's
 raw value with per-button counts (line 8); the dump's `HOOK` line has the
 same.
 
-**While recording from the headset mic, all headset buttons are off**:
-any press shorts or pulls down the mic being recorded, sampling the line
-would add to the recording, and the centre button (Play) starts a new
-file in the recording screen. Recording anything else (FM, or the phone's
-mic) keeps all of them. With a mic headset plugged in, mic recordings
-always use the headset mic, so the rule is simply "recording with the
-headset mic path (`+0x64` bits `0x0c`)". The dump's `HOOK` line counts
-the ticks spent off (`muted`). `ports/rockbox/tests/test-headset-recording.py`
-presses the centre button mid-recording: one WAV for a headset-mic
-recording, two (a new file) for FM. The build before this rule split the
-headset-mic recording into two files.
+**While recording, all headset buttons are off.** From the headset mic a
+press shorts or pulls down the mic being recorded and sampling the line
+would add to the recording; in every recording the centre button (Play)
+starts a new file in the recording screen. A first version kept the
+buttons during FM recording, but on the phone they misbehaved there
+(2026-11-06). The dump's `HOOK` line counts the ticks spent off (`muted`).
+`ports/rockbox/tests/test-headset-recording.py` presses the centre button
+mid-recording and expects one WAV, for a headset-mic and an FM recording.
 
 The mic bias stays on while the buttons are enabled. Recording and the
 buttons share it through a reference count (`mic_bias()`). In QEMU the
@@ -222,8 +219,6 @@ recording.
   (`+0x70` [7:4], default 8) and sets the recording level; the right gain
   only affects listening. Raw steps 0–15. On the phone, gain 8 put a
   station's peaks near ±26000.
-- The stereo capture code (AD1 on DMA channel 6, the rail fallback, the
-  ADC R variants on key 7) remains for the key 0 sweep.
 
 ## Driver layout
 
@@ -369,35 +364,21 @@ The View I/O ports dump (opening the screen, or key 9) appends two
 - the VBC line adds VBC `+0x10`/`+0x18`/`+0x80`, the owner register and
   the digital ADC registers.
 
-Key 0 runs the **ADC R bit sweep** (about 25 s) and writes
-`.rockbox/adcr-sweep.txt`. It turns on the line-in route if FM is not
-already playing, powers stereo capture at 48 kHz without recording
-(a stats-only capture mode in `pcm-sc6530c.c`), then flips one bit at a
-time and measures both channels for 100 ms before restoring it:
-- codec `+0x40` to `+0x6c` and `+0xac`, every bit (output registers from
-  `+0x74` up are left alone);
-- digital codec `0x8a002000` bits 0–7 and `0x8a002018` bits 4–7;
-- VBC `+0x80` bits 0–7;
-- the stock mux values (`0x1c`, `0x74`, `0xe0`) and ADC R variants 0 and 2.
+### ADC R investigation (2026-11-06, tools since removed)
 
-Each line gives the left and right min/max and the number of banks.
-`R-LIVE` marks a right channel that moves and is off the rail, `L-DEAD`
-a left channel that does not, and `STALL` a window with no banks. The
-test `ports/rockbox/tests/test-adcr-sweep.py` runs it in QEMU, where
-ADC R works, and checks that the model's fatal bits are caught.
+Stereo FM recording was tried first. ADC R never delivered audio, and two
+debug tools on this screen narrowed it down; both were removed once the
+answer was in (they are in commit `58d17cf` if needed again):
+- **Key 7** cycled four ADC R power-up variants (which of `+0x5c` bits 1,
+  2 and 6 to set). The dump's `REC` line showed the right channel's raw
+  data: `r_min=r_max=-32768` on every bank, with every variant. AD1's DMA
+  request fired; its FIFO handed over a constant `0x8000`.
+- **Key 0** ran a bit sweep: stereo capture without recording, flipping
+  one bit at a time in codec `+0x40`..`+0x6c` and `+0xac`, the digital
+  codec and VBC `+0x80`, with stock's mux values, and measuring both
+  channels for 100 ms each. Results below ("Hardware sweep result").
 
-Key 7 cycles the ADC R power-up variant (0–3) used at the next stereo
-recording start. The dump's `REC` line shows it, the number of banks
-whose right channel sat at the rail and was replaced by the left, and the
-raw right-channel data of the last stereo bank (`r_min`, `r_max`, first
-four samples). A constant `-32768` means AD1 delivers no data at all;
-noisy values near the rail mean ADC R runs but is powered or biased
-wrongly. On the phone every variant so far gave the fallback: L and R
-are bit-identical in the WAV. The first dump with the raw data (FM at
-48 kHz, variant 1) read `r_min=r_max=-32768` for all 6298 banks: AD1's
-DMA request fires, but the FIFO hands over a constant `0x8000`. The
-digital side of the right channel is not running; stock never records
-FM in stereo, so there is no reference sequence yet.
+The capture code is now mono-only (AD0, DMA channel 5).
 
 ### Stock's per-channel codec helpers (traced 2026-11-06)
 
@@ -434,7 +415,8 @@ ADC (stock never powers the right one).
 
 ### Hardware sweep result (2026-11-06)
 
-The key 0 sweep on the phone, with FM playing (`tuner=1`, variant 1):
+The key 0 sweep on the phone (since removed), with FM playing
+(`tuner=1`, variant 1):
 - **Baseline:** left carries the station (about ±26000), right is a
   constant `-32768`.
 - **VBC `+0x80` bit 0** makes the right channel an exact copy of the left

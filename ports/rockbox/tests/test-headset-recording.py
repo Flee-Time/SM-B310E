@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Headset buttons while recording, in QEMU.
 
-Recording from the headset mic turns the headset buttons off: a press
-would short the mic being recorded, and the centre button (Play) would
-start a new file in the recording screen. Recording anything else keeps
-them. Each case starts a recording, presses the centre button ("h") in the
-middle, stops, and counts the new WAV files on the card:
-- headset-mic recording: one file (the press was ignored);
-- FM recording with a mic headset plugged in: two files (Play started a
-  new one, so the buttons were live).
+Any recording turns the headset buttons off: from the headset mic a press
+would short the mic being recorded, and in every recording the centre
+button (Play) would start a new file in the recording screen (on the phone
+the buttons also misbehaved during FM recording). Each case starts a
+recording, presses the centre button ("h") in the middle, stops, and
+counts the new WAV files on the card: one file means the press was
+ignored.
 """
 import argparse
 import json
@@ -102,7 +101,7 @@ def main():
         run(args, "headset-mic-recording",
             "rec source: mic\nrec channels: mono\nrec mic gain: 8\n", [], 1),
         run(args, "fm-recording",
-            "rec source: fmradio\nrec channels: mono\nfm_region: eu\n", [], 2),
+            "rec source: fmradio\nrec channels: mono\nfm_region: eu\n", [], 1),
     ]
     (args.output / "results.json").write_text(json.dumps(results, indent=2))
 
