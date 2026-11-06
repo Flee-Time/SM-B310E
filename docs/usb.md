@@ -342,8 +342,8 @@ Rockbox handles any FAT32 cluster size.
 
 ### The diagnostic log
 
-`USB_SC6530_DIAG` (top of `usb-drv-sc6530c.c`) appends to `/usb-log.txt` on
-the card:
+`USB_SC6530_DIAG` (top of `usb-drv-sc6530c.c`) is off since USB works again
+(2026-11-06). When defined, it appends to `/usb-log.txt` on the card:
 - every bring-up and exit stage;
 - every SETUP the host sends, and each EP0 reply's progress;
 - the interrupt counters for 10 s after connecting.

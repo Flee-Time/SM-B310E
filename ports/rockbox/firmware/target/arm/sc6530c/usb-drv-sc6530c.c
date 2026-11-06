@@ -55,7 +55,7 @@
 /* Bring-up stages, interrupt counters, SETUPs and throughput logged to
  * /usb-log.txt on the card (see diag_log()). Off by default: it writes the
  * card on every connection. Define it to investigate USB on hardware. */
-#define USB_SC6530_DIAG
+/* #define USB_SC6530_DIAG */
 
 #ifdef USB_SC6530_DIAG
 #include <stdarg.h>
