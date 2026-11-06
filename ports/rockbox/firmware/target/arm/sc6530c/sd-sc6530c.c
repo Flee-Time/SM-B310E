@@ -73,6 +73,9 @@ extern void sdio_stop_transmission(void);
 extern unsigned sdio_shl;
 extern unsigned long sdio_num_blocks;
 extern void sc6530_keypad_capture(void);
+/* usb-drv-sc6530c.c: USB write DMA running / start one held back for us */
+extern volatile bool sc6530_usb_out_dma;
+extern void sc6530_usb_sd_idle(void);
 
 static bool sd_enabled_ = false;   /* card present after sd_init */
 /* a transfer is running: sampled by the USB driver's throughput log */
@@ -212,7 +215,22 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
         return -1;
 
     mutex_lock(&sd_mutex);
-    sd_busy_now = true;
+    /* Wait while a USB write DMA runs (it and the SDIO DMA together froze
+     * the phone); USB then holds a new one back until this ends. */
+    {
+        long end = current_tick + 2 * HZ;
+
+        for (;;) {
+            int old = disable_irq_save();
+            if (!sc6530_usb_out_dma || TIME_AFTER(current_tick, end)) {
+                sd_busy_now = true;
+                restore_irq(old);
+                break;
+            }
+            restore_irq(old);
+            yield();
+        }
+    }
     long t0 = current_tick;
     int blocks = count;
     while (count > 0) {
@@ -248,6 +266,7 @@ static int transfer_sectors(sector_t start, int count, void *buf, bool write)
     }
     sd_busy_now = false;
     mutex_unlock(&sd_mutex);
+    sc6530_usb_sd_idle();
     return rc;
 }
 

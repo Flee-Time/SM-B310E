@@ -97,6 +97,9 @@ static void diag_bulk(char type, uint32_t a, uint32_t b);
 #define EPINT_XACT       (1 << 0)    /* one packet (transaction) done */
 #define EPINT_SETUP      (1 << 8)
 #define EPINT_DONE       (1 << 9)
+/* OUT: the host tried to send while buffer ready was clear (stock EP2/EP4
+ * handlers 0x1fc4a/0x1fe80 start their transfer on it) */
+#define EPINT_OUT_TOKEN  (1 << 12)
 #define EPINT_ALL        0x3fff
 
 #define EP_PKT           64
@@ -155,7 +158,10 @@ struct endpoint
     bool armed;             /* OUT: buffer ready set, packet expected */
     bool block;
     bool zlp;               /* IN: end with a zero length packet */
-    bool dma;               /* IN: the whole transfer runs by DMA */
+    bool dma;               /* the (rest of the) transfer runs by DMA */
+    bool dma_next;          /* OUT: DMA may take over after this packet */
+    bool dma_wait;          /* OUT: waiting for the host's next send */
+    int dma_base;           /* OUT: bytes moved by PIO before the DMA */
     int result;
     struct semaphore complete;
 };
@@ -232,10 +238,18 @@ static void usb_ldo(bool on)
 
 /* ---- FIFO access ------------------------------------------------------ */
 
+/* The FIFO takes words most significant byte first (wire order). Aligned
+ * buffers (all bulk data) go a word at a time; anything else by bytes. */
 static void fifo_write(int ep, const uint8_t *src, int len)
 {
     volatile uint32_t *fifo = &USB_FIFO(ep_regs[ep][DIR_IN].fifo);
 
+    if (((uintptr_t)src & 3) == 0) {
+        const uint32_t *s = (const uint32_t *)src;
+        for (int i = 0; i < len; i += 4)
+            *fifo = __builtin_bswap32(*s++);
+        return;
+    }
     for (int i = 0; i < len; i += 4, src += 4)
         *fifo = (uint32_t)src[0] << 24 | (uint32_t)src[1] << 16 |
                 (uint32_t)src[2] << 8 | src[3];
@@ -245,6 +259,12 @@ static void fifo_read(int ep, uint8_t *dst, int len)
 {
     volatile uint32_t *fifo = &USB_FIFO(ep_regs[ep][DIR_OUT].fifo);
 
+    if (((uintptr_t)dst & 3) == 0) {
+        uint32_t *d = (uint32_t *)dst;
+        for (; len >= 4; len -= 4)
+            *d++ = __builtin_bswap32(*fifo);
+        dst = (uint8_t *)d;
+    }
     while (len > 0) {
         uint32_t w = *fifo;
         for (int i = 0; i < 4 && len > 0; i++, len--)
@@ -304,6 +324,49 @@ static void diag_packet(bool in, int bytes);   /* bring-up log */
 
 static void dma_stop(int ep);
 
+/* ---- USB write DMA vs the SD card's DMA --------------------------------
+ * The phone froze (2026-11-06) the first time the bulk OUT DMA streamed
+ * while Rockbox's mass storage wrote the previous chunk to the card, i.e.
+ * USB DMA into PSRAM alongside the SDIO DMA; this board already hangs on
+ * other SDIO DMA contention. The two are serialized: the SD driver waits
+ * while a USB OUT DMA runs (sc6530_usb_out_dma), and a USB OUT DMA that
+ * becomes ready while the SD driver is busy (sd_busy_now) waits until it
+ * ends (sc6530_usb_sd_idle). */
+extern volatile bool sd_busy_now;
+volatile bool sc6530_usb_out_dma;
+static int out_kick_ep;             /* OUT DMA held back for the SD driver */
+static unsigned long out_held;      /* how often (log) */
+
+/* ---- freeze recorder (test builds with the card log) -------------------
+ * Breadcrumbs in the last 4 KB of IRAM (nothing else uses it), kept from
+ * the start of a USB session to its clean exit. A hardware watchdog,
+ * fed from the tick, resets a frozen phone after ~4 s; the next session's
+ * log then lists the breadcrumbs of the one that never ended. */
+#ifdef USB_SC6530_DIAG
+#define CRUMB_MAGIC   0x55534243u          /* "USBC" */
+#define CRUMB_COUNT   64
+struct usb_crumbs {
+    uint32_t magic, n;
+    uint32_t e[CRUMB_COUNT][3];            /* tick, code, value */
+};
+#define CRUMBS ((volatile struct usb_crumbs *)0x4003f000u)
+
+static void crumb(char code, uint32_t value)
+{
+    int old = disable_irq_save();
+    if (CRUMBS->magic == CRUMB_MAGIC) {
+        volatile uint32_t *e = CRUMBS->e[CRUMBS->n % CRUMB_COUNT];
+        e[0] = current_tick;
+        e[1] = code;
+        e[2] = value;
+        CRUMBS->n++;
+    }
+    restore_irq(old);
+}
+#else
+static inline void crumb(char code, uint32_t value) { (void)code; (void)value; }
+#endif
+
 static void in_done(int ep)
 {
     struct endpoint *e = &endpoints[ep][DIR_IN];
@@ -330,6 +393,10 @@ static void in_done(int ep)
     }
 }
 
+static void dma_out_done(int ep);
+static bool dma_usable_out(int ep, const void *ptr, int length);
+static void dma_wait_out(int ep);
+
 static void out_done(int ep)
 {
     struct endpoint *e = &endpoints[ep][DIR_OUT];
@@ -337,6 +404,10 @@ static void out_done(int ep)
 
     if (!e->busy || !e->armed)
         return;
+    if (e->dma) {
+        dma_out_done(ep);
+        return;
+    }
     e->armed = false;
     diag_packet(false, REG(ep, DIR_OUT, ctrl) & EPCTRL_COUNT);
     n = REG(ep, DIR_OUT, ctrl) & EPCTRL_COUNT;
@@ -346,9 +417,20 @@ static void out_done(int ep)
     fifo_read(ep, e->buf + e->done, n);
     e->done += n;
     if (e->done < e->len && n == EP_PKT) {
+        /* The first packet was full: a data phase, not a short command
+         * block. Hand the rest to the DMA, which then only ever sees full
+         * packets. */
+        if (e->dma_next && dma_usable_out(ep, e->buf + e->done,
+                                          e->len - e->done)) {
+            e->dma_next = false;
+            dma_wait_out(ep);
+            return;
+        }
+        e->dma_next = false;
         out_arm(ep);
         return;
     }
+    e->dma_next = false;
     if (ep != 0)
         diag_bulk('b', ep, e->done);
     complete(ep, DIR_OUT, 0);
@@ -384,6 +466,11 @@ static void out_done(int ep)
  * (0x1f288) and both OUT routines use a whole packet per request; the
  * first DMA build copied EP3's 32 B (0x1f1c6) and measured 70 KB/s. */
 #define DMA_FRAG_USB_IN   0xa4300040u
+/* Bulk OUT (stock EP2 0x1f454, EP4 0x1f524): the same 32-bit widths, swap
+ * and 64 B requests, but the SOURCE (the FIFO) fixed: the stock encoder
+ * 0x32a68 sets bit 20 alone for "source fixed", bits 20+21 for
+ * "destination fixed". */
+#define DMA_FRAG_USB_OUT  0xa4100040u
 /* Every stock bulk DMA start sets the low half of the endpoint's register
  * +0x1c to 400 (0x1f288, 0x1f454, 0x1f524); PIO never touches it. Its
  * meaning is unknown. */
@@ -392,38 +479,68 @@ static void out_done(int ep)
 #define AHB_DMA_EB        (1 << 0)    /* also set by the PCM driver */
 #define USB_DMA_MIN       512         /* sector data; the rest stays PIO */
 
-/* Off (TODO, docs/usb.md). The first DMA build (32 B requests, +0x1c
- * untouched) ran at 70 KB/s on the phone against PIO's 225 KB/s; the
- * stock-faithful one (64 B, +0x1c = 400) ended in a disk-cache writeback
- * panic (2026-11-05), most likely the USB DMA contending with the SD
- * controller's own DMA on the bus. */
-#ifndef USB_SC6530_DMA
-#define USB_SC6530_DMA 0
+/* Bulk IN by DMA: off. Measured on the phone (docs/usb.md "Hardware
+ * report 13") it ran at ~138 KB/s, slower than PIO (225-350 KB/s), as the
+ * tenth build found. Stock reads no faster with it.
+ *
+ * Bulk OUT by DMA: OFF, and NOT SAFE on this phone. Two attempts on
+ * 2026-11-06 (docs/usb.md "Hardware report 15") both trickled at ~0 KB/s,
+ * and both wrote garbage into the card's root directory: 128 bytes (two
+ * packets) of one word repeated, the last word of the packet before.
+ * That is what reading the FIFO while it is empty returns: the channel
+ * reads it whether or not a packet has arrived, so its requests are not
+ * paced by the controller as configured here. The controller's count
+ * still said "complete", so the full-count check cannot catch it.
+ * Stock's waiting for the host's send attempt (EPINT_OUT_TOKEN) did not
+ * change this. Do not turn this on again until a hardware test (on a
+ * scratch card) shows the channel waits for each packet. */
+#ifndef USB_SC6530_DMA_IN
+#define USB_SC6530_DMA_IN 0
+#endif
+#ifndef USB_SC6530_DMA_OUT
+#define USB_SC6530_DMA_OUT 0
 #endif
 
-/* DMA channel id and FIFO index per bulk IN endpoint */
+/* DMA channel id per bulk IN / OUT endpoint, and FIFO index per endpoint
+ * (Rockbox's PCM uses ids 3..6) */
 static const uint8_t dma_id[USB_NUM_ENDPOINTS]   = { 0, 7, 0, 8, 0 };
+static const uint8_t dma_id_out[USB_NUM_ENDPOINTS] = { 0, 0, 9, 0, 10 };
 static const uint8_t fifo_index[USB_NUM_ENDPOINTS] = { 0, 2, 3, 4, 5 };
 
 /* Should a DMA transfer never finish (the hardware does not do what the
  * stock code implies), DMA is given up for the rest of the connection. */
 #define DMA_TIMEOUT       (HZ / 2)
-static long dma_deadline;
+static long dma_deadline, dma_deadline_out;
+static int dma_out_seen;        /* OUT: received count at the last check */
 static bool dma_broken;
-static unsigned long dma_transfers;
+static unsigned long dma_transfers, dma_out_transfers;
 
 static bool dma_usable(int ep, const void *ptr, int length)
 {
-    return USB_SC6530_DMA && dma_id[ep] && !dma_broken &&
+    return USB_SC6530_DMA_IN && dma_id[ep] && !dma_broken &&
            length >= USB_DMA_MIN &&
            length % EP_PKT == 0 && ((uintptr_t)ptr & 3) == 0;
 }
 
+/* OUT: the buffer must start on a cache line, since it is invalidated */
+static bool dma_usable_out(int ep, const void *ptr, int length)
+{
+    return USB_SC6530_DMA_OUT && dma_id_out[ep] && !dma_broken &&
+           length >= USB_DMA_MIN && length % EP_PKT == 0 &&
+           ((uintptr_t)ptr & (CACHEALIGN_SIZE - 1)) == 0;
+}
+
+/* the endpoint's channel, whichever direction it runs */
 static void dma_stop(int ep)
 {
-    DMA_CH(dma_id[ep], DMA_CFG) = 0;
+    int id = dma_id[ep] ? dma_id[ep] : dma_id_out[ep];
+
+    DMA_CH(id, DMA_CFG) = 0;
     DMA_REQ_MAP(fifo_index[ep]) = 0;
+    if (endpoints[ep][DIR_OUT].dma)
+        sc6530_usb_out_dma = false;
     endpoints[ep][DIR_IN].dma = false;
+    endpoints[ep][DIR_OUT].dma = false;
 }
 
 static void dma_start_in(int ep)
@@ -459,6 +576,100 @@ static void dma_start_in(int ep)
     REG(ep, DIR_IN, ctrl) |= EPCTRL_TX;
 }
 
+/* OUT waits on the host, so its watchdog only fires after a whole second
+ * without any packet arriving */
+#define DMA_OUT_TIMEOUT   HZ
+
+/* After a full first packet by PIO: buffer ready stays clear, so the
+ * host's next packet is refused and raises EPINT_OUT_TOKEN, which starts
+ * the DMA (stock 0x1fc4a: bit 12 -> 0x1f454, then bit 9 replaces bit 12
+ * in the interrupt enables). */
+static void dma_wait_out(int ep)
+{
+    struct endpoint *e = &endpoints[ep][DIR_OUT];
+
+    e->dma_wait = true;
+    e->armed = false;
+    crumb('W', e->len - e->done);
+    dma_out_seen = 0;
+    dma_deadline_out = current_tick + DMA_OUT_TIMEOUT;
+    REG(ep, DIR_OUT, int_clr) = EPINT_OUT_TOKEN;
+    REG(ep, DIR_OUT, int_ctrl) = EPINT_DONE | EPINT_OUT_TOKEN;
+}
+
+/* Bulk OUT by DMA (stock 0x1f454): channel from the FIFO into the buffer
+ * in 64 B requests, +0x1c = 400, packets of 64, TRANS_SIZE the whole
+ * length, buffer ready once. Each packet is drained by the DMA as it
+ * lands, so the controller takes the next without the CPU; transfer end
+ * (bit 9) at TRANS_SIZE is the completion. Here it moves the rest of a
+ * transfer whose first packet came by PIO (e->done bytes so far). */
+static void dma_start_out(int ep)
+{
+    struct endpoint *e = &endpoints[ep][DIR_OUT];
+    int id = dma_id_out[ep];
+    int len = e->len - e->done;
+    uint32_t ctrl;
+
+    e->dma_wait = false;
+    e->dma = true;
+    sc6530_usb_out_dma = true;
+    crumb('D', len);
+    e->armed = true;
+    e->dma_base = e->done;
+    dma_out_transfers++;
+    dma_out_seen = 0;
+    dma_deadline_out = current_tick + DMA_OUT_TIMEOUT;
+    REG(ep, DIR_OUT, int_ctrl) = EPINT_DONE;
+    /* no dirty line may be written back over the DMA's data later */
+    commit_discard_dcache_range(e->buf + e->done, len);
+
+    DMA_CH(id, DMA_CFG) = 0;
+    DMA_CH(id, DMA_INT) = DMA_INT_CLEAR;
+    DMA_CH(id, DMA_SRC) = 0x20380000 + ep_regs[ep][DIR_OUT].fifo;
+    DMA_CH(id, DMA_DST) = (uint32_t)(e->buf + e->done);
+    DMA_CH(id, DMA_FRAG) = DMA_FRAG_USB_OUT;
+    DMA_CH(id, DMA_BLOCK) = len;
+    DMA_REQ_MAP(fifo_index[ep]) = id;
+    DMA_CH(id, DMA_CFG) = 1;
+
+    REG(ep, DIR_OUT, int_clr) = EPINT_ALL;
+    USB_REG(ep_regs[ep][DIR_OUT].ctrl + EP_DMA_REG) =
+        (USB_REG(ep_regs[ep][DIR_OUT].ctrl + EP_DMA_REG) & 0xffff0000) |
+        EP_DMA_VALUE;
+    ctrl = REG(ep, DIR_OUT, ctrl);
+    REG(ep, DIR_OUT, ctrl) = (ctrl & ~EPCTRL_SIZE_MASK) | EPCTRL_SIZE(EP_PKT);
+    REG(ep, DIR_OUT, trsize) = len;
+    REG(ep, DIR_OUT, ctrl) |= EPCTRL_RX;
+}
+
+/* transfer end: let the channel finish the last packet, then hand over */
+static void dma_out_done(int ep)
+{
+    struct endpoint *e = &endpoints[ep][DIR_OUT];
+    int id = dma_id_out[ep];
+    int len = e->len - e->dma_base;
+    int n = USB_REG(ep_regs[ep][DIR_OUT].ctrl + 0x04) & 0x1ffff;
+
+    (void)id;
+    /* Stock takes transfer end as the data being in memory and stops the
+     * channel (0x1fc4a). Only the full count is a success; anything else
+     * fails the receive, so nothing of it reaches the card. */
+    crumb('E', n);
+    dma_stop(ep);
+    e->armed = false;
+    discard_dcache_range(e->buf + e->dma_base, len);
+    if (n != len) {
+        dma_broken = true;
+        diag_event('Z', ep | 0x80, len, n);
+        complete(ep, DIR_OUT, -1);
+        return;
+    }
+    diag_packet(false, n);
+    e->done = e->len;
+    diag_bulk('b', ep, e->done);
+    complete(ep, DIR_OUT, 0);
+}
+
 /* tick: a DMA transfer that never ends switches the connection to PIO */
 static void dma_watchdog(void)
 {
@@ -475,43 +686,57 @@ static void dma_watchdog(void)
             in_packet(ep);
         }
     }
-}
+    /* OUT: no progress for DMA_OUT_TIMEOUT, waiting for the host's send
+     * attempt or receiving by DMA. Fail the receive: Rockbox's mass storage
+     * then writes nothing to the card, the host resets the device and
+     * retries, and DMA stays off for the rest of the connection. */
+    for (int ep = 1; ep < USB_NUM_ENDPOINTS; ep++) {
+        struct endpoint *e = &endpoints[ep][DIR_OUT];
+        int rx;
 
-/* Bulk bursts. The phone measured 225 KB/s with a packet loaded per
- * interrupt: 83% of the time a bulk IN reply was in flight, i.e. the host
- * was told "not ready" between packets and came back later. After an
- * interrupt ends a bulk packet, the next ones are fed from here, polling
- * for each to leave, as the boot loader does on EP0. Bounded: at most
- * BURST_PACKETS per interrupt (2 KiB, about 2 ms at full speed) and
- * BURST_WAIT polls per packet before handing back to the interrupt. */
-#define BURST_PACKETS 32
-#define BURST_WAIT    3000
-static unsigned long burst_packets;
-
-static void bulk_burst(int ep, int dir)
-{
-    struct endpoint *e = &endpoints[ep][dir];
-
-    if (dir == DIR_IN && e->dma)
-        return;                 /* the controller and DMA run it alone */
-    for (int i = 0; i < BURST_PACKETS && e->busy; i++) {
-        uint32_t s = 0;
-
-        for (int n = BURST_WAIT; n; n--) {
-            s = REG(ep, dir, int_sts);
-            if (s & EPINT_DONE)
-                break;
+        if (!e->busy || !(e->dma || e->dma_wait))
+            continue;
+        if (out_kick_ep == ep) {        /* held back for the SD driver */
+            dma_deadline_out = current_tick + DMA_OUT_TIMEOUT;
+            continue;
         }
-        if (!(s & EPINT_DONE))
-            return;             /* the host is slower: wait for the IRQ */
-        REG(ep, dir, int_clr) = s;
-        burst_packets++;
-        if (dir == DIR_IN)
-            in_done(ep);
-        else
-            out_done(ep);
+        rx = e->dma ? USB_REG(ep_regs[ep][DIR_OUT].ctrl + 0x04) & 0x1ffff : 0;
+        if (rx != dma_out_seen) {
+            dma_out_seen = rx;
+            dma_deadline_out = current_tick + DMA_OUT_TIMEOUT;
+            continue;
+        }
+        if (!TIME_AFTER(current_tick, dma_deadline_out))
+            continue;
+        dma_broken = true;
+        crumb('F', rx);
+        diag_event('Z', ep | 0x80, e->len, rx | (e->dma_wait ? 0x80000000 : 0));
+        REG(ep, DIR_OUT, ctrl) &= ~EPCTRL_RX;
+        REG(ep, DIR_OUT, int_ctrl) = EPINT_DONE;
+        if (e->dma)
+            dma_stop(ep);
+        e->dma_wait = false;
+        e->armed = false;
+        complete(ep, DIR_OUT, -1);
     }
 }
+
+/* One interrupt per bulk packet, no polling. Earlier builds fed further
+ * packets from the interrupt that ended one ("bursts": up to 32 packets,
+ * 3000 polls each). On the phone (2026-11-06, docs/usb.md "Hardware report
+ * 16") reads ran at 230 KB/s with or without them, as the PC sets that
+ * pace, while the polling took 60-67% of the CPU with interrupts off; a
+ * build that also tried no polling wrote at up to 710 KB/s, against 347
+ * KB/s with bursts alone. */
+
+#ifdef USB_SC6530_DIAG
+/* Timer 2 (the tick) counts down from its load at 26 MHz: the card log's
+ * share of time spent in the USB interrupt. */
+#define T26_VALUE   REG32(0x81000044)
+#define T26_LOAD    (26000u * (1000 / HZ))
+#define T26_EXPIRED (REG32(0x8100004c) & 4)   /* tick pending (raw) */
+static unsigned long irq_cycles;
+#endif
 
 static int start_send(int ep, void *ptr, int length, bool block)
 {
@@ -607,6 +832,12 @@ int usb_drv_recv_nonblocking(int endpoint, void *ptr, int length)
         e->busy = true;
         if (ep != 0)
             diag_bulk('B', ep, length);
+        /* Every OUT transfer starts by PIO. Rockbox posts the same 512-byte
+         * receive for a 31-byte CBW (a short packet) and for a one-block
+         * WRITE; only a full first packet shows that a data phase follows,
+         * and only then does the DMA take the rest (out_done). */
+        e->dma = false;
+        e->dma_next = ep != 0 && dma_usable_out(ep, ptr, length);
         out_arm(ep);
     }
     restore_irq(old);
@@ -706,8 +937,14 @@ static void cancel(int ep, int dir)
 {
     struct endpoint *e = &endpoints[ep][dir];
 
-    if (dir == DIR_IN && e->dma)
+    if (e->dma)
         dma_stop(ep);
+    if (e->dma_wait) {
+        e->dma_wait = false;
+        REG(ep, dir, int_ctrl) = EPINT_DONE;
+    }
+    if (out_kick_ep == ep)
+        out_kick_ep = 0;
     if (!e->busy)
         return;
     e->busy = false;
@@ -773,11 +1010,31 @@ static void deliver_stashed_setup(void)
  * held request goes out after a short wait anyway */
 static void dma_watchdog(void);
 
+static void wdg_feed(void);
+
 static void stash_tick(void)
 {
     if (setup_stashed && TIME_AFTER(current_tick, stash_deadline))
         deliver_stashed_setup();
     dma_watchdog();
+    wdg_feed();
+}
+
+/* SD driver: its transfer is over; start an OUT DMA it held back */
+void sc6530_usb_sd_idle(void)
+{
+    int old = disable_irq_save();
+    int ep = out_kick_ep;
+
+    if (ep) {
+        struct endpoint *e = &endpoints[ep][DIR_OUT];
+
+        out_kick_ep = 0;
+        crumb('k', ep);
+        if (e->dma_wait && e->busy)
+            dma_start_out(ep);
+    }
+    restore_irq(old);
 }
 
 /* The host has reset the bus. On this controller that wipes the endpoint
@@ -906,6 +1163,10 @@ static void udc_poll_tick(void)
 void USB_UDC(void)
 {
     uint32_t sts = USB_REG(USB_INT_STS);
+#ifdef USB_SC6530_DIAG
+    uint32_t t0 = T26_VALUE;
+    bool expired0 = T26_EXPIRED;
+#endif
 
     irq_total++;
     last_sts = sts;
@@ -924,6 +1185,16 @@ void USB_UDC(void)
         return;
     }
     udc_service();
+#ifdef USB_SC6530_DIAG
+    {
+        /* the pending tick says the counter went through zero once
+         * (the tick waits for us) */
+        uint32_t now = T26_VALUE;
+
+        irq_cycles += (T26_EXPIRED && !expired0) || t0 < now ?
+                      t0 + T26_LOAD - now : t0 - now;
+    }
+#endif
 }
 
 static void udc_service(void)
@@ -958,12 +1229,33 @@ static void udc_service(void)
         int dir = ep_regs[ep][DIR_IN].ctrl ? DIR_IN : DIR_OUT;
         uint32_t s = REG(ep, dir, int_sts);
         REG(ep, dir, int_clr) = s;
+        /* the status latches a refused send even while its interrupt is
+         * off (e.g. the next CBW at transfer end): only an enabled one
+         * counts */
+        if (dir == DIR_OUT && (s & EPINT_OUT_TOKEN) &&
+            (REG(ep, DIR_OUT, int_ctrl) & EPINT_OUT_TOKEN)) {
+            struct endpoint *o = &endpoints[ep][DIR_OUT];
+
+            if (!o->dma_wait || !o->busy || out_kick_ep) {
+                /* not expected: never service it twice */
+                REG(ep, DIR_OUT, int_ctrl) &= ~EPINT_OUT_TOKEN;
+                crumb('U', s);
+            } else if (sd_busy_now) {
+                /* the SD driver's DMA runs: start when it ends */
+                REG(ep, DIR_OUT, int_ctrl) &= ~EPINT_OUT_TOKEN;
+                out_kick_ep = ep;
+                out_held++;
+                crumb('K', ep);
+            } else {
+                crumb('T', ep);
+                dma_start_out(ep);
+            }
+        }
         if (s & EPINT_DONE) {
             if (dir == DIR_IN)
                 in_done(ep);
             else
                 out_done(ep);
-            bulk_burst(ep, dir);
         }
     }
     USB_REG(USB_INT_CLR) = 0x7f;
@@ -1011,7 +1303,7 @@ static void diag_flush(void)
 
 static void diag_log(const char *fmt, ...)
 {
-    char line[160];
+    char line[256];
     va_list ap;
     int n = snprintf(line, sizeof(line), "%7ld ", current_tick);
 
@@ -1128,6 +1420,18 @@ static void diag_start(void)
     create_thread(diag_thread, diag_stack, sizeof(diag_stack), 0,
                   "usb diag" IF_PRIO(, PRIORITY_BACKGROUND) IF_COP(, CPU));
     diag_log("--- B310E USB log, driver " __DATE__ " " __TIME__);
+    if (CRUMBS->magic == CRUMB_MAGIC) {
+        unsigned n = CRUMBS->n, first = n > CRUMB_COUNT ? n - CRUMB_COUNT : 0;
+
+        diag_log("previous USB session never ended (freeze, watchdog "
+                 "reset?): last %u of %u steps", n - first, n);
+        for (unsigned i = first; i < n; i++) {
+            volatile uint32_t *e = CRUMBS->e[i % CRUMB_COUNT];
+            diag_log("  step %u tick %lu %c %lx", i, (unsigned long)e[0],
+                     (char)e[1], (unsigned long)e[2]);
+        }
+        CRUMBS->magic = 0;
+    }
 }
 
 static void diag_stage(int stage, const char *what)
@@ -1190,21 +1494,28 @@ static void diag_rate(void)
 
     if (!n)
         return;
-    static unsigned long l_burst, l_pk, l_dma;
+    static unsigned long l_pk, l_dma, l_dma_out, l_held, l_irqc;
     unsigned long pk = in_packets + out_packets;
+    /* 26 MHz cycles over n ticks, in percent */
+    unsigned long span = n * (T26_LOAD / 100);
+    unsigned long irq_pc = (irq_cycles - l_irqc) / (span ? span : 1);
 
     diag_log("%lu KB/s in, %lu KB/s out; sd %lu%% in %lu%% out %lu%% other %lu%%; "
-             "burst %lu of %lu packets, dma %lu transfers%s",
+             "irq %lu%%, %lu packets, dma %lu in %lu out transfers "
+             "(%lu held for the card)%s",
              (in_bytes - l_inb) * HZ / n / 1024,
              (out_bytes - l_outb) * HZ / n / 1024,
              (smp_sd - l_sd) * 100 / n, (smp_in - l_in) * 100 / n,
              (smp_out - l_out) * 100 / n,
              (n - (smp_sd - l_sd) - (smp_in - l_in) - (smp_out - l_out)) * 100 / n,
-             burst_packets - l_burst, pk - l_pk, dma_transfers - l_dma,
+             irq_pc, pk - l_pk, dma_transfers - l_dma,
+             dma_out_transfers - l_dma_out, out_held - l_held,
              dma_broken ? " (DMA off)" : "");
     l_total = smp_total; l_sd = smp_sd; l_in = smp_in; l_out = smp_out;
     l_inb = in_bytes; l_outb = out_bytes;
-    l_burst = burst_packets; l_pk = pk; l_dma = dma_transfers;
+    l_pk = pk; l_dma = dma_transfers;
+    l_dma_out = dma_out_transfers; l_held = out_held;
+    l_irqc = irq_cycles;
 }
 
 /* counters while connected */
@@ -1321,6 +1632,83 @@ void usb_drv_init(void)
     REG32(0x80000008) |= 1 << USB_IRQ_LINE;
 }
 
+/* ---- hardware watchdog for the freeze recorder (test builds) -----------
+ * The SC6530 watchdog in the analog die (0x82001480, 32 kHz), set up as
+ * system_reboot() does but for ~4 s, fed from the tick task. Boot disarms
+ * it (system_init), and a clean session exit stops it. */
+#ifdef USB_SC6530_DIAG
+#define WDG               0x82001480u
+#define WDG_LOAD_LOW      0x0000          /* 0x20000 / 32768 Hz = 4 s */
+#define WDG_LOAD_HIGH     0x0002
+static bool wdg_on;
+static long wdg_next;
+
+static void wdg_load(void)
+{
+    adi_write(WDG + 0x20, 0xe551);          /* unlock */
+    adi_write(WDG + 4, WDG_LOAD_HIGH);
+    adi_write(WDG, WDG_LOAD_LOW);
+    adi_write(WDG + 0x20, ~0xe551u);
+}
+
+static void __attribute__((unused)) wdg_start(void)
+{
+    uint32_t ctrl = 0;
+
+    adi_write(0x820010e0, 4);               /* watchdog clocks (SET) */
+    adi_write(0x820010e4, 2);
+    adi_write(WDG + 0x20, 0xe551);
+    adi_read(WDG + 8, &ctrl);
+    adi_write(WDG + 8, ctrl | 9);           /* reset enable */
+    adi_write(WDG + 4, WDG_LOAD_HIGH);
+    adi_write(WDG, WDG_LOAD_LOW);
+    adi_read(WDG + 8, &ctrl);
+    adi_write(WDG + 8, ctrl | 2);           /* run */
+    adi_write(WDG + 0x20, ~0xe551u);
+    wdg_on = true;
+    wdg_next = current_tick + HZ / 2;
+}
+
+static void wdg_stop(void)
+{
+    uint32_t ctrl = 0;
+
+    wdg_on = false;
+    adi_write(WDG + 0x20, 0xe551);
+    adi_read(WDG + 8, &ctrl);
+    adi_write(WDG + 8, ctrl & ~0xfu);
+    adi_write(WDG + 0x20, ~0xe551u);
+}
+
+static void wdg_feed(void)
+{
+    if (wdg_on && TIME_AFTER(current_tick, wdg_next)) {
+        wdg_next = current_tick + HZ / 2;
+        wdg_load();
+    }
+}
+
+static void crumbs_begin(void)
+{
+    CRUMBS->n = 0;
+    CRUMBS->magic = CRUMB_MAGIC;
+    crumb('S', 0);
+#ifdef USB_SC6530_WDG       /* not verified on the phone: off */
+    wdg_start();
+#endif
+}
+
+static void crumbs_end(void)
+{
+    wdg_stop();
+    CRUMBS->magic = 0;
+}
+#else
+static void wdg_feed(void) {}
+static inline void crumbs_begin(void) {}
+static inline void crumbs_end(void) {}
+#endif
+
 /* Present ourselves to the host: called by usb_enable() once the core is
  * fully initialised (see usb-sc6530c.c). Stock ends its bring-up by
  * powering the USB LDO, which is what the host sees. */
@@ -1331,6 +1719,7 @@ void usb_drv_connect(void)
     usb_ldo(true);
     diag_stage(9, "online");
     diag_watch();
+    crumbs_begin();
 }
 
 /* The AHB clock stays on: reaching a gated block stalls the bus for good,
@@ -1359,4 +1748,5 @@ void usb_drv_exit(void)
     usb_ldo(false);
     diag_stage(13, "exit done");
     diag_offline();
+    crumbs_end();
 }

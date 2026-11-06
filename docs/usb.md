@@ -240,6 +240,246 @@ Open questions:
   already has two known SD-contention hangs);
 - how to recover the controller (the stock clock device's reset, 0x67c9c).
 
+### Bulk DMA again, IN and OUT (2026-11-06)
+
+**Why again.** The twelfth build's two failures turned out to have other
+causes. Its disk-cache writeback panic was the SD driver giving up on
+slow card writes (fixed: longer waits, retries, multi-block writes). Its
+Code 43 / "no SETUP" happened on 2026-11-05, the day the phone's USB was
+dead in every mode, boot ROM included (hardware report 12). Stock's DMA
+setup was therefore never really measured.
+
+**What runs by DMA now** (`USB_SC6530_DMA` 1):
+- **Bulk IN** exactly as the twelfth build (stock EP1 `0x1f288`).
+- **Bulk OUT**, new, as stock EP2/EP4 (`0x1f454`, `0x1f524`): channel
+  from the FIFO into the buffer, 64 B requests, `+0x1c` = 400, packets of
+  64, `TRANS_SIZE` the whole length, buffer ready once; transfer end is
+  the completion. Channel ids 9 (EP2) and 10 (EP4). The fragment
+  register is `0xA4100040`: decoding stock's encoder `0x32a68`, bit 20
+  alone means "source fixed" (bits 20+21 "destination fixed", the IN
+  case), and the byte swap `[27:26]` = 1 comes from one struct field
+  that stock sets to 1 for both directions.
+
+**Every OUT transfer starts by PIO.** Rockbox posts the same 512-byte
+receive for a 31-byte CBW and for a one-block WRITE. A short packet does
+not fill a 64 B DMA request; the first QEMU run left a CBW's tail in the
+FIFO and mass storage stalled both endpoints. So the first packet always
+comes by PIO, and only a full first packet with a long, packet-aligned
+remainder hands the rest to the DMA. The DMA only ever sees full packets.
+
+**Fallbacks.** An IN transfer the DMA doesn't finish within 0.5 s starts
+over by PIO (as before). An OUT transfer with no packet for a whole second
+stops its channel, takes what the DMA moved (length minus the channel's
+remaining count), drains a packet left in the FIFO by PIO and carries on
+by PIO. Either way DMA stays off for the rest of the connection; the log
+shows `dma timeout`.
+
+**QEMU** (`test-usb.py`, now also a 128 KiB write verified in the image):
+
+| Run | Reads | Writes |
+|---|---|---|
+| DMA | 941 KB/s | 1153 KB/s |
+| `--no-dma` (IN times out, all PIO) | 300 KB/s | 211 KB/s |
+| `--no-dma-out` (OUT salvage, then PIO) | 1050 KB/s | 256 KB/s |
+| previous PIO-only build | 224 KB/s | 256 KB/s |
+
+QEMU's speeds do not predict the phone (the tenth build was fast in QEMU
+too and measured 70 KB/s on hardware); they only show the paths work. The
+model now drains OUT packets by DMA, keeps buffer ready armed until
+`TRANS_SIZE`, and has `dma-out-requests=off` for the salvage test.
+
+**Hardware report 13 (2026-11-06): DMA is slower than PIO, and the OUT
+salvage damaged the card.** From the card log:
+
+| Phase | Measured |
+|---|---|
+| Mount (bulk IN by DMA) | ~138 KB/s, about 48 DMA transfers per 5 s; Explorer needed about a minute |
+| A 2 GB copy to the phone (bulk OUT by DMA) | ~0 KB/s: one 4032-byte remainder trickled in over ~18 s, then `dma timeout` |
+| Afterwards | the host reset the bus and only re-read descriptors; the copy never resumed |
+
+The watchdog's salvage read the channel's BLOCK register as a remaining
+byte count. It read 0 ("4032 moved") while the controller had counted
+3968 bytes in, so the code trusted a buffer the DMA had not fully
+written. The 4 KB write it completed landed in the root directory:
+`chkdsk` found an invalid long-name entry (System Volume Information),
+two garbage `m.m` entries with invalid clusters, and ~401 MB in lost
+chains (the copy's clusters, its entry gone). All 1,589 other files
+checked clean.
+
+**Conclusion:** this controller's DMA does not help on the phone: IN is
+slower than PIO (as the tenth build found), OUT is far slower and stalls.
+Both are off again (`USB_SC6530_DMA` 0) and the log is off. The code
+stays for reference; it must not be turned on again without a
+hardware-verified way to know how many bytes an OUT DMA really moved.
+
+### Stock-style bulk OUT DMA (2026-11-06)
+
+**Stock on the same phone and card** (Explorer copies): 789 KB/s to the
+phone, 355 KB/s from it (sometimes bursts to 1.4 MB/s). Reads match our
+PIO, so IN stays PIO (`USB_SC6530_DMA_IN` 0). Writes are twice ours.
+
+**Stock's OUT sequence** (`0x1fc4a`, EP2's interrupt handler; EP4
+`0x1fe80` is the same) never arms a receive ahead of time:
+1. The host's packet is refused while buffer ready is clear, which sets
+   endpoint interrupt **bit 12**.
+2. On bit 12: start the DMA for the whole request (`0x1f454`), set buffer
+   ready, enable bit 9 instead of bit 12, clear bit 12.
+3. On transfer end (bit 9): read the count at `+0x04`, stop the channel,
+   complete. Stock never reads the channel's BLOCK register.
+
+The first attempt skipped step 1 and armed the DMA at once; packets then
+trickled in.
+
+**This driver** (`USB_SC6530_DMA_OUT` 1):
+- the first packet by PIO, as before (CBW vs data, above);
+- after a full first packet with a long remainder, buffer ready stays
+  clear and only bit 12 (plus 9) is enabled; bit 12 starts the DMA;
+- transfer end is a success **only with the full count**;
+- a short count, or no progress for a second (no bit 12, or no data)
+  **fails the receive**: Rockbox's mass storage then writes nothing, the
+  host resets the device and retries, and DMA stays off for the session.
+  There is no salvage.
+
+**QEMU:** the model raises bit 12 for a refused OUT packet. `test-usb.py`
+now retries a failed write after a bus reset and re-enumeration, as
+Windows does:
+
+| Run | Writes | Result |
+|---|---|---|
+| normal | 1233 KB/s | 128 KiB write intact in the image |
+| `--no-dma-out` | 168 KB/s | first write failed, retried by PIO, intact |
+| `--no-dma` | 160 KB/s | the same |
+
+**Hardware report 14:** that build froze the phone while starting an
+Explorer copy. The card was clean afterwards (chkdsk found nothing).
+
+### Serialized write DMA and a freeze recorder (2026-11-06)
+
+**Suspected cause of the freeze.** Rockbox's mass storage writes chunk k
+to the card while it receives chunk k+1, so the USB OUT DMA into PSRAM
+ran alongside the SDIO DMA. This board already hangs on SDIO DMA
+contention (SDIO DMA into PSRAM, a held key during SDIO DMA). The second
+suspect was an interrupt storm from bit 12.
+
+**Serialized:**
+- The SD driver (`transfer_sectors`) waits while a USB OUT DMA runs
+  (`sc6530_usb_out_dma`, bounded at 2 s) before it claims `sd_busy_now`.
+- A bit 12 that arrives while `sd_busy_now` is set masks bit 12 and holds
+  the start back. The SD driver calls `sc6530_usb_sd_idle()` when its
+  transfer ends, and that starts the held DMA.
+- The OUT watchdog does not count time spent held back.
+
+**Guarded:**
+- Bit 12 is acted on only when it is enabled; the status latches a
+  refused send even while it is off (the next CBW at every transfer end).
+- An enabled bit 12 that nothing waits for masks itself.
+
+**Freeze recorder** (only with `USB_SC6530_DIAG`):
+- **Breadcrumbs:** a ring of 64 `{tick, code, value}` at IRAM `0x4003f000`
+  (bank 3, which the boot menu enables; nothing else uses it). Magic
+  `USBC` is set at connect (stage 9) and cleared at clean exit.
+  - `S` session start
+  - `W` waiting for the host's send (remaining bytes)
+  - `T` bit 12 started the DMA
+  - `K`/`k` held for the card / started after it
+  - `D` DMA started (length)
+  - `E` transfer end (count)
+  - `U` unexpected bit 12 (status)
+  - `F` OUT timeout (rx count)
+- **Watchdog:** the hardware watchdog (ADI `0x82001480`, as `system_reboot`
+  sets it up) is armed for ~4 s at connect, fed every 0.5 s from the tick
+  task and stopped at exit. A hang with interrupts off or a stuck tick
+  resets the phone. Since report 15 it is armed only with
+  `USB_SC6530_WDG` as well: it was never verified on the phone, and a
+  wrong reset during a write could damage the card. `--freeze` needs a
+  build with both `USB_SC6530_DIAG` and `USB_SC6530_WDG`.
+- **On the next session:** the first lines of `/usb-log.txt` read
+  "previous USB session never ended" with the steps. If the boot chain or
+  the reset clears IRAM, only the reboot itself is the sign.
+- **Rate line:** each one now says how many write DMAs were held for the
+  card.
+
+**QEMU:**
+- **Watchdog model:** the ADI model has the watchdog (`-global
+  sc6530_adi.watchdog=on`): lock, LOAD reload on a LOAD_LOW write, and a
+  machine reset on expiry.
+- **Machine reset:** a run-time reset now also resets the CPU and reloads
+  the Rockbox image, as the real boot chain does; IRAM is kept.
+- **Test results:**
+
+| Run | Writes | Result |
+|---|---|---|
+| `--watchdog` | 1362 KB/s | intact; 4 of 9 write DMAs held for the card; no watchdog reset |
+| `--watchdog --no-dma-out` | 174 KB/s | first write failed, retried by PIO, intact |
+| `--watchdog --no-dma` | 153 KB/s | the same |
+| `--freeze` | – | all interrupts masked after a 64 KiB write: reset after 4.02 s, Rockbox reconnected, and the card log listed the frozen session's 22 steps (`S`, then `W T D E` per chunk) |
+
+**Hardware report 15 (2026-11-06): bulk OUT DMA is not safe; off.**
+- **No freeze this time.** Every copy, to or from the phone, stuck at 0;
+  the phone stayed usable.
+- **The log** (two sessions, reads by PIO at 230 KB/s): the first write
+  that went to DMA started (`1 out transfers`, nothing held for the
+  card) and never finished. Its 1 s timeout never fired because data
+  trickled in and counted as progress. Windows reset the device after
+  ~16 s.
+- **Root directory damaged.** Two `m` entries appeared again after the
+  card had been cleaned. The sector, read raw after chkdsk had marked
+  the entries deleted, showed entries 1–5 (the "System Volume
+  Information" LFN) followed by **128 bytes (two packets) of one word
+  repeated**, `6d 00 65 00`. That is the last word of the preceding
+  packet, which is what a read of the empty FIFO returns.
+- **So the channel reads the FIFO whether or not a packet has arrived.**
+  Its requests are not paced by the controller as set up here (request
+  map, `+0x1c` = 400, fragment register). The controller's count still
+  says the transfer is complete, so the full-count check cannot catch it.
+- **The first DMA build's damage** (the earlier `m` entries) has the same
+  signature, so the salvage was not its only cause.
+- **Waiting for bit 12 the stock way changed nothing.** The slow bulk IN
+  DMA (138 KB/s) probably has the same pacing problem.
+
+`USB_SC6530_DMA_OUT` is 0 and the card log is off again: the shipped
+build is all PIO. The serialization and the freeze recorder stay in the
+code and are inert without OUT DMA or `USB_SC6530_DIAG`; the QEMU
+watchdog model stays. Any further DMA attempt needs a hardware test on a
+scratch card first: one known pattern written by DMA and read back raw,
+before Windows writes anything.
+
+### PIO without bursts (2026-11-06)
+
+**Measurement build.** It kept the card log on and rotated three ways of
+handling a bulk packet's end every ~10 s:
+- **A:** the bursts of report 9 (up to 32 packets per interrupt, 3000
+  polls each);
+- **B:** no bursts, one interrupt per packet;
+- **C:** bursts with 300 polls.
+
+Each rate line named the setting and the share of time spent in the USB
+interrupt (timed with the tick's 26 MHz counter). The FIFO copies also
+went from bytes to whole words (`__builtin_bswap32`) for aligned buffers.
+
+**Hardware report 16:**
+
+| Setting | Reads | USB interrupt (polling) |
+|---|---|---|
+| A | 230 KB/s | 60–67% (58–64%) |
+| B | 230 KB/s | 3% (0%) |
+| C | 230 KB/s | 13% (9%) |
+
+- **Reads** run at 230 KB/s whatever the driver does: the PC sets that
+  pace (report 9).
+- **Writes:** Explorer showed up to **710 KB/s** while the settings
+  rotated, against 347 KB/s with A alone (report 12). The write's lines
+  never reached the card: the 16 KB RAM buffer for lines logged while
+  the PC holds the card filled up first. So which setting gave it is
+  inferred, not measured: the word copy saves about a microsecond per
+  packet, far too little, which leaves B or C. A's polling, with
+  interrupts off, starved the thread that writes the data to the card.
+
+**Shipped:** B. Bursts are removed, the card log is off, and the interrupt
+share stays in the log's rate line (`irq N%`). A long write with the log
+on would confirm the write speed per setting; the log's RAM buffer would
+then need to be larger, or the bulk lines fewer.
+
 ### Twelfth build: DMA exactly as stock EP1 does it
 
 A second pass over the stock bulk routines found two differences from the
@@ -376,7 +616,7 @@ means the phone froze while the PC owned the card or during unplug.
 | `stall ep N in/out on/off` | a stall set or cleared by the core |
 | `ep0 irq sts S ctrl C at D` | an EP0 interrupt during a multi-packet reply: INT_STS, CTRL, bytes sent so far |
 | `epN in/out start L` / `epN in/out done L` | a bulk transfer queued / finished (first 400 per connection) |
-| `R KB/s in, W KB/s out; sd A% in B% out C% other D%; burst N of M packets, dma T transfers` | every 5 s while connected: throughput, and where the time went. `sd` means the card driver was in a transfer, `in` a bulk IN reply was being sent, `out` the device waited for a command or write data, `other` none of these. `burst` counts the bulk packets fed without waiting for an interrupt; `dma` the bulk IN transfers run by DMA, `(DMA off)` after a DMA timeout |
+| `R KB/s in, W KB/s out; sd A% in B% out C% other D%; irq E%, N packets, dma T in U out transfers (H held for the card)` | every 5 s while connected: throughput, and where the time went. `sd` means the card driver was in a transfer, `in` a bulk IN reply was being sent, `out` the device waited for a command or write data, `other` none of these. `irq` is the share of time spent in the USB interrupt; `dma` the bulk transfers run by DMA (both off now), `(DMA off)` after a DMA timeout |
 | `dma timeout epN len L ctrl C: PIO from now` | a DMA transfer never finished; it was restarted by PIO |
 | `stage 10 exit irq` … `stage 13 exit done` | the unplug path |
 
