@@ -1,0 +1,125 @@
+/* B310E OS — kernel interface.
+ *
+ * Preemptive, priority-based threads (0 = idle .. 31 = highest), round
+ * robin within a priority, one 1 ms tick. Objects: semaphore, mutex with
+ * priority inheritance, fixed-size message queue. All waits take a
+ * timeout in milliseconds (WAIT_FOREVER, or 0 to poll).
+ *
+ * Calls marked "irq-safe" may be used from interrupt handlers; nothing
+ * else may.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+#ifndef OS_KERNEL_H
+#define OS_KERNEL_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define PRIO_IDLE     0
+#define PRIO_LOW      4
+#define PRIO_NORMAL   12
+#define PRIO_HIGH     20
+#define PRIO_MAX      31
+
+#define WAIT_FOREVER  0xffffffffu
+
+typedef struct thread thread_t;
+typedef void (*thread_fn)(void *arg);
+
+/* A wait list: threads blocked on one object, highest priority first. */
+typedef struct {
+    thread_t *head;
+} waitq_t;
+
+struct thread {
+    uint32_t *sp;               /* must stay first: the context switch */
+    thread_t *next, *prev;      /* ready list or wait list */
+    thread_t *tnext;            /* timeout list */
+    uint32_t wake;              /* tick to wake at */
+    uint8_t prio;               /* effective (raised by inheritance) */
+    uint8_t base_prio;
+    uint8_t state;
+    int8_t result;              /* wait result: 0, or WAIT_TIMEOUT */
+    uint8_t timed;              /* on the timeout list */
+    waitq_t *waitq;             /* the list it blocks on */
+    struct mutex *blocked_on;   /* for priority inheritance chains */
+    struct mutex *held;         /* mutexes it owns */
+    const char *name;
+    uint32_t *stack;
+    size_t stack_size;
+    uint32_t cycles;            /* 26 MHz cycles run (statistics) */
+    thread_t *all_next;         /* every thread, for listings */
+};
+
+#define WAIT_OK       0
+#define WAIT_TIMEOUT  (-1)
+
+/* threads */
+thread_t *thread_create(const char *name, int prio, size_t stack_size,
+                        thread_fn fn, void *arg);
+void thread_sleep(uint32_t ms);
+void thread_yield(void);
+void thread_exit(void) __attribute__((noreturn));
+thread_t *thread_self(void);
+void thread_set_priority(thread_t *t, int prio);
+thread_t *thread_first(void);   /* walk all threads (interrupts off) */
+thread_t *thread_next(thread_t *t);
+uint32_t kernel_cycles(void);   /* 26 MHz cycles accounted since boot */
+
+/* time */
+uint32_t kernel_ticks(void);    /* milliseconds since boot (irq-safe) */
+void kernel_start(void) __attribute__((noreturn));
+bool kernel_running(void);
+uint32_t kernel_idle_permille(void);  /* idle share of the last second */
+
+/* semaphore */
+typedef struct {
+    int count;
+    waitq_t waiters;
+} sem_t;
+
+void sem_init(sem_t *s, int count);
+int sem_wait(sem_t *s, uint32_t timeout_ms);
+void sem_post(sem_t *s);                       /* irq-safe */
+
+/* mutex: owner-recursive, priority inheritance */
+typedef struct mutex {
+    thread_t *owner;
+    unsigned depth;
+    waitq_t waiters;
+    struct mutex *next_held;    /* owner's held list */
+} mutex_t;
+
+void mutex_init(mutex_t *m);
+int mutex_lock(mutex_t *m, uint32_t timeout_ms);
+void mutex_unlock(mutex_t *m);
+
+/* message queue of fixed-size messages */
+typedef struct {
+    uint8_t *buf;
+    size_t msg_size, capacity, head, count;
+    sem_t items;                /* messages waiting */
+    waitq_t senders;            /* blocked on a full queue */
+} queue_t;
+
+int queue_init(queue_t *q, size_t msg_size, size_t capacity);
+int queue_send(queue_t *q, const void *msg, uint32_t timeout_ms);
+bool queue_send_isr(queue_t *q, const void *msg);   /* irq-safe, no wait */
+int queue_recv(queue_t *q, void *msg, uint32_t timeout_ms);
+
+/* memory */
+void heap_init(void *start, void *end);
+void *kmalloc(size_t size);
+void *kzalloc(size_t size);
+void kfree(void *p);
+size_t heap_free_bytes(void);
+
+/* internal, used by the architecture layer */
+extern thread_t *kernel_current;
+void kernel_reschedule(void);   /* svc and irq exit, interrupts off */
+void kernel_irq_exit(void);
+void kernel_tick(void);
+
+#endif

@@ -79,6 +79,37 @@ timing, calibration and transmit-safety risk. QEMU can exercise
 everything up to layer 1 (AT, MN, the hook thread). Network attach, calls
 and SMS need the phone, because QEMU does not run the DSP.
 
+**Direction change (2026-11-06):** the user wants full control of the
+OS, which rules out every option that keeps stock as the base. The plan
+is now our own layer 1 on the stock DSP firmware and calibration (read
+from NOR), with OsmocomBB's layer 2/3, inside our own OS
+([os-design.md](os-design.md)). M0 is confirmed: stock calls and texts
+on the user's network, so 2G is there.
+
+**Layer-1 share-memory layout** (`sharedmem_proc.c`, base pointer
+`*0x0422fb80`, cleared 0xfc0 bytes at layer-1 start, FUN_0005eca2):
+
+| Offset | What | Index words (in/out) |
+|---|---|---|
+| +0x000 | frame instructions: 26 × 22 bytes. Word 0 bits 4:0 = frame type, bits 15:9 flags (0x8200/0x8400/0x8800/0xc000 set by the "ask more frames" logic); word 1 bits 15:9 + word 2 = frame number (23 bits, wraps at 0x297000); word 10 bits 15:10 = channel tag | +0x23c / +0x23e |
+| +0x240 | TX data: 4 × 62 bytes (word 0 tag, word 1 type, then data byte-swapped in 16-bit words) | +0x338 / +0x33a |
+| +0x33c | ARM→DSP commands: 8 × 10 bytes | +0x38c / +0x38e |
+| +0x390 | DSP→ARM responses: 8 × 10 bytes | +0x3e0 / +0x3e2 |
+| +0x3e4, +0x3ec | per-slot parameters (two 4-entry halfword tables) | – |
+| +0x40c | received blocks: 6 × 72 bytes (bytes from +0x12 swapped pairwise) | +0x5bc / +0x5be |
+| +0x5c0 | **power-monitor results** ("POWERMONQ"): 30 × 8 bytes | +0x6b0 / +0x6b2 |
+| +0x6ec..+0x6f6 | a two-entry buffer pair (indexes +0x6ec/+0x6ee/+0x6f0/+0x6f2), data from +0x6f6 | |
+| +0xbf6 | a second data area (pointer kept at 0x0422fb88) | |
+| +0xeea | 6 extra bytes per frame instruction | |
+| +0xfa0 | BEP reports: 7 × 4 bytes | +0xfbc / +0xfbe |
+
+All rings advance "in" by the producer and "out" by the consumer. The
+layer-1 thread's entry (FUN_0002e98e) turns on the share-memory clock,
+clears the area, starts the DSP (`dsp_operate.c`, `layer1_dsp_download.c`),
+installs the DSP interrupt handler and writes 0x8181 to 0x10000ffe.
+Next: the power-monitor frame instruction (`rxlevmon.c`), the result
+format, and the RF parameter download (`l1dsp_param_ptr`).
+
 **Licensing:** never ship stock bytes. As the FM driver does with its init
 tables, read or patch them from the owner's own NOR or dump.
 
