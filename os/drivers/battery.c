@@ -98,6 +98,37 @@ bool charger_present(void)
     return adi_read(EIC_DATA) & EIC_CHARGER;
 }
 
+/* The charger's status lines (stock GetCHGDoneStatus, NOR 0x66352; the
+ * Rockbox port's charging_state): PGB is GPIO8, CHGSB GPIO9, inputs. PGB
+ * high: no good input. PGB low, CHGSB low: charging; CHGSB high: done. */
+#define GPIO_DATA     0x8a000000u
+#define GPIO_DMSK     0x8a000004u
+#define GPIO_DIR      0x8a000008u
+#define CHARGER_PGB   (1u << 8)
+#define CHARGER_CHGSB (1u << 9)
+
+int charge_state(void)
+{
+    static bool configured;
+    uint32_t d;
+
+    if (!charger_present())
+        return CHARGE_NONE;
+    if (!configured) {
+        uint32_t s = arch_irq_save();
+
+        gpio_clock_on();
+        REG32(GPIO_DIR) &= ~(CHARGER_PGB | CHARGER_CHGSB);
+        REG32(GPIO_DMSK) |= CHARGER_PGB | CHARGER_CHGSB;
+        arch_irq_restore(s);
+        configured = true;
+    }
+    d = REG32(GPIO_DATA);
+    if (d & CHARGER_PGB)
+        return CHARGE_NONE;             /* no good input */
+    return d & CHARGER_CHGSB ? CHARGE_DONE : CHARGE_CHARGING;
+}
+
 int battery_mv(void)
 {
     static int last = -1;

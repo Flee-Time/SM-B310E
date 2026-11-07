@@ -112,7 +112,7 @@ def main():
         lines.append(f'const font_t font_{name} = {{ {ascent}, {descent}, {len(glyphs)}, '
                      f'{name}_glyphs, {name}_bits }};')
         lines.append('')
-    args.output.write_text('\n'.join(lines))
+    args.output.write_text('\n'.join(lines), newline='\n')
     print(f'{args.output}: {len(FONTS)} fonts, {total} bytes of glyphs')
 
 

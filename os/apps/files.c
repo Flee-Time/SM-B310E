@@ -1,5 +1,6 @@
 /* B310E OS — file browser: folders first, then files with their sizes;
- * Center opens a folder, shows a text file's start, or a file's details.
+ * Center opens a folder, shows a text file's start, or a file's details;
+ * LSoft: Options, to rename (the multi-tap editor) or delete.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/fs.h"
@@ -22,6 +23,7 @@ typedef struct {
     entry_t *entries;
     char *names;                /* one block for every name */
     FRESULT error;
+    bool reload;                /* changed by Options: read it again */
     char path[];                /* the folder; also the title */
 } browser_t;
 
@@ -90,6 +92,18 @@ static void load(browser_t *b)
     b->list.count = n;
 }
 
+static void reload(browser_t *b)
+{
+    kfree(b->entries);
+    kfree(b->names);
+    b->entries = NULL;
+    b->names = NULL;
+    b->reload = false;
+    load(b);
+    if (b->list.sel >= b->list.count)
+        b->list.sel = b->list.count ? b->list.count - 1 : 0;
+}
+
 static void enter(screen_t *s)
 {
     browser_t *b = (browser_t *)s;
@@ -114,6 +128,8 @@ static void draw(screen_t *s)
     browser_t *b = (browser_t *)s;
     char buf[32];
 
+    if (b->reload)
+        reload(b);
     if (b->error != FR_OK) {
         snprintf(buf, sizeof(buf), b->error == FR_NOT_READY ? "no card" :
                  "error %d", (int)b->error);
@@ -187,14 +203,113 @@ static void open_entry(browser_t *b, entry_t *e)
     kfree(full);
 }
 
+/* ---- Options: rename, delete --------------------------------------------- */
+
+static struct {
+    browser_t *b;
+    char path[256];             /* the entry */
+    char name[128];
+    bool dir;
+} op;
+
+static list_t op_list;
+
+static void op_item(void *ctx, int i, char *text, int tn, char *detail, int dn)
+{
+    snprintf(text, (size_t)tn, "%s", i == 0 ? "Rename" : "Delete");
+}
+
+static void renamed(const char *name, void *ctx)
+{
+    char to[256];
+    size_t dirlen = strlen(op.path) - strlen(op.name);
+    FRESULT r;
+
+    if (!name[0] || !strcmp(name, op.name) || strchr(name, '/'))
+        return;
+    if (dirlen + strlen(name) + 1 > sizeof(to))
+        return;
+    memcpy(to, op.path, dirlen);
+    memcpy(to + dirlen, name, strlen(name) + 1);
+    r = f_rename(op.path, to);
+    if (r == FR_OK) {
+        klog("files: renamed %s to %s", op.path, name);
+        op.b->reload = true;
+    } else {
+        ui_message("Rename", r == FR_EXIST ? "That name is taken." : "Could not rename it.");
+    }
+}
+
+static void delete_yes(void)
+{
+    FRESULT r = f_unlink(op.path);
+
+    if (r == FR_OK) {
+        klog("files: deleted %s", op.path);
+        op.b->reload = true;
+    } else {
+        ui_message("Delete", r == FR_DENIED && op.dir ? "The folder is not empty." :
+                   "Could not delete it.");
+    }
+}
+
+static void op_key(screen_t *s, const key_event_t *ev)
+{
+    if (list_key(&op_list, ev))
+        return;
+    if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT) {
+        int sel = op_list.sel;
+
+        ui_pop();                       /* the options; then the action */
+        if (sel == 0)
+            ui_text_edit("Rename", op.name, 64, false, renamed, NULL);
+        else
+            ui_confirm(op.dir ? "Delete folder" : "Delete file", op.name, delete_yes);
+    } else if (ev->code == KEY_RSOFT) {
+        ui_pop();
+    }
+}
+
+static void op_draw(screen_t *s)
+{
+    list_draw(&op_list);
+    gfx_text_centered(UI_BOTTOM - 12, op.name, C_DIM, FONT_SMALL, 1);
+}
+
+static screen_t op_screen = {
+    .title = "Options", .left = "Select", .center = "OK", .right = "Back",
+    .draw = op_draw, .key = op_key,
+};
+
+static void options(browser_t *b, entry_t *e)
+{
+    size_t plen = strlen(b->path), nlen = strlen(e->name);
+
+    if (plen + nlen + 2 > sizeof(op.path) || nlen + 1 > sizeof(op.name))
+        return;
+    op.b = b;
+    op.dir = e->dir;
+    memcpy(op.path, b->path, plen);
+    if (plen && op.path[plen - 1] != '/')
+        op.path[plen++] = '/';
+    memcpy(op.path + plen, e->name, nlen + 1);
+    memcpy(op.name, e->name, nlen + 1);
+    op_list.count = 2;
+    op_list.sel = 0;
+    op_list.item = op_item;
+    ui_push(&op_screen);
+}
+
 static void key(screen_t *s, const key_event_t *ev)
 {
     browser_t *b = (browser_t *)s;
 
     if (list_key(&b->list, ev))
         return;
-    if ((ev->code == KEY_CENTER || ev->code == KEY_LSOFT) && b->list.count)
+    if (ev->code == KEY_CENTER && b->list.count)
         open_entry(b, &b->entries[b->list.sel]);
+    else if (ev->code == KEY_LSOFT && b->list.count)
+        options(b, &b->entries[b->list.sel]);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
 }
@@ -208,7 +323,7 @@ screen_t *app_files(const char *path)
         return NULL;
     memcpy(b->path, path, n);
     b->s.title = b->path;
-    b->s.left = "Open";
+    b->s.left = "Options";
     b->s.center = "OK";
     b->s.right = "Back";
     b->s.enter = enter;

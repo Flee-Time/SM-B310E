@@ -1,4 +1,5 @@
-/* B310E OS — Tools: torch, vibrator test, SIM cards, USB storage.
+/* B310E OS — Tools: torch, vibrator test, SIM cards, USB storage, calculator,
+ * alarm, notes.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/drivers.h"
@@ -7,7 +8,7 @@
 #include "os/ui.h"
 #include "os/usb.h"
 
-enum { T_TORCH, T_VIBRATE, T_SIM, T_USB, T_DSP, T_COUNT };
+enum { T_TORCH, T_VIBRATE, T_SIM, T_USB, T_CALC, T_ALARM, T_NOTES, T_DSP, T_COUNT };
 
 screen_t *app_dspboot(void);        /* apps/dspboot.c */
 
@@ -30,6 +31,18 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     case T_USB:
         snprintf(text, (size_t)tn, "USB storage");
         break;
+    case T_CALC:
+        snprintf(text, (size_t)tn, "Calculator");
+        break;
+    case T_ALARM:
+        snprintf(text, (size_t)tn, "Alarm");
+        if (ui_settings.alarm_on)
+            snprintf(detail, (size_t)dn, "%02d:%02d", ui_settings.alarm_min / 60,
+                     ui_settings.alarm_min % 60);
+        break;
+    case T_NOTES:
+        snprintf(text, (size_t)tn, "Notes");
+        break;
     case T_DSP:
         snprintf(text, (size_t)tn, "DSP boot");
         break;
@@ -38,8 +51,10 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 
 static const icon_t *tool_icon(void *ctx, int i)
 {
-    static const icon_t *const icons[] = { &icon_torch, &icon_vibrate, &icon_sim, &icon_usb,
-                                           &icon_cpu };
+    static const icon_t *const icons[] = {
+        &icon_torch, &icon_vibrate, &icon_sim, &icon_usb, &icon_calc, &icon_alarm,
+        &icon_notes, &icon_cpu,
+    };
 
     return icons[i];
 }
@@ -77,6 +92,12 @@ static void key(screen_t *s, const key_event_t *ev)
             ui_push(app_sim());
         } else if (list.sel == T_USB) {
             ui_push(app_usb());
+        } else if (list.sel == T_CALC) {
+            ui_push(app_calc());
+        } else if (list.sel == T_ALARM) {
+            ui_push(app_alarm());
+        } else if (list.sel == T_NOTES) {
+            ui_push(app_notes());
         } else if (list.sel == T_DSP) {
             ui_push(app_dspboot());
         }

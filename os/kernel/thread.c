@@ -33,6 +33,14 @@ static bool rotate;                 /* yield: move the running thread on */
 static unsigned slice_left;
 static uint32_t acct_mark;          /* timer_cycles() at the last accounting */
 static uint32_t idle_window_cycles, idle_permille;
+static uint32_t tick_mark;          /* timer_cycles() at the last whole tick */
+static uint32_t next_window, next_stats;
+static bool tickless = true;
+/* The timer's period: the tick; a tickless sleep; or the rest of a tick,
+ * after a sleep, so the tick lines up on the tick boundary again. */
+static enum { PHASE_TICK, PHASE_SLEEP, PHASE_ALIGN } phase;
+
+#define MAX_SLEEP_TICKS 1000        /* a tickless sleep, at most */
 
 #define SLICE_TICKS 10
 #define FRAME_WORDS 17
@@ -228,35 +236,45 @@ void kernel_irq_exit(void)
         kernel_reschedule();
 }
 
-void kernel_tick(void)
+/* Ticks follow the timer's cycle count, so a tickless sleep advances them
+ * by however many periods it lasted. Interrupts off. */
+static void advance(void)
 {
     thread_t *cur = kernel_current;
+    uint32_t p = timer_load(), n = (timer_cycles() - tick_mark) / p;
 
-    ticks++;
+    if (!n)
+        return;
+    tick_mark += n * p;
+    ticks += n;
     account();
     while (timeouts && (int32_t)(ticks - timeouts->wake) >= 0)
         k_wake(timeouts, WAIT_TIMEOUT);
 
-    if (slice_left && --slice_left == 0) {
-        slice_left = SLICE_TICKS;
-        if (cur->state == T_READY && cur->next != cur) {
-            ready[cur->prio] = cur->next;
-            need_resched = true;
+    if (slice_left) {
+        slice_left = slice_left > n ? slice_left - n : 0;
+        if (!slice_left) {
+            slice_left = SLICE_TICKS;
+            if (cur->state == T_READY && cur->next != cur) {
+                ready[cur->prio] = cur->next;
+                need_resched = true;
+            }
         }
     }
 
-    if (ticks % 50 == 0) {           /* the clock governor's window */
+    if ((int32_t)(ticks - next_window) >= 0) {  /* the clock governor's window */
         static uint32_t win_idle, win_total;
         uint32_t idle = idle_thread->cycles - win_idle;
         uint32_t all = total_cycles - win_total;
 
+        next_window = ticks + 50;
         win_idle = idle_thread->cycles;
         win_total = total_cycles;
         if (all >= 1000)
             cpufreq_window(idle >= all ? 0 : 1000 - idle / (all / 1000));
     }
 
-    if (ticks % 1000 == 0) {         /* idle share of the cycles counted */
+    if ((int32_t)(ticks - next_stats) >= 0) {   /* idle share of the cycles counted */
         static uint32_t total_window;
         uint32_t idle = idle_thread->cycles - idle_window_cycles;
         uint32_t all = total_cycles - total_window;
@@ -264,9 +282,55 @@ void kernel_tick(void)
         idle_permille = all >= 1000 ? idle / (all / 1000) : 0;
         if (idle_permille > 1000)
             idle_permille = 1000;
+        next_stats = ticks + 1000;
         idle_window_cycles = idle_thread->cycles;
         total_window = total_cycles;
     }
+}
+
+/* The rest of the current tick as the next period. */
+static void align(void)
+{
+    /* signed: advance() can take longer than the rest of the tick (many
+     * wake-ups, 26 MHz), and a negative load is a 165 s period. A tick
+     * skipped here is caught up by the next interrupt's advance(). */
+    int32_t p = (int32_t)timer_load();
+    int32_t rest = p - (int32_t)(timer_cycles() - tick_mark);
+
+    while (rest < 260)
+        rest += p;
+    timer_restart((uint32_t)rest);
+    phase = PHASE_ALIGN;
+}
+
+/* The timer's interrupt: whole ticks. A sleep's end goes to the rest of
+ * the tick, that one's end back to the plain tick (the reload repeats the
+ * last load, so the tick has to be loaded again). */
+void kernel_tick(void)
+{
+    advance();
+    if (phase == PHASE_SLEEP) {
+        align();
+    } else if (phase == PHASE_ALIGN) {
+        timer_restart(timer_load());
+        phase = PHASE_TICK;
+    }
+}
+
+/* Any interrupt: ending a tickless sleep early, the ticks catch up first,
+ * so handlers and woken threads see the time, and the tick comes back for
+ * the threads that run now. */
+void kernel_irq_entry(void)
+{
+    if (phase == PHASE_SLEEP) {
+        advance();
+        align();
+    }
+}
+
+void kernel_set_tickless(bool on)
+{
+    tickless = on;
 }
 
 thread_t *thread_first(void)
@@ -387,6 +451,34 @@ void thread_set_priority(thread_t *t, int prio)
     arch_irq_restore(s);
 }
 
+/* Nothing ready but the idle thread: when the next timeout is at least
+ * three ticks away, let the timer run until it (a second at most) instead
+ * of interrupting every millisecond. Interrupts off. */
+static void tickless_sleep(void)
+{
+    uint32_t delta = MAX_SLEEP_TICKS;
+    int32_t rest;
+
+    /* from the align phase too: a thread woken by a sleep's end mostly runs
+     * for well under a tick, and waiting for the aligning period first
+     * would double the interrupts of every wake-up */
+    if (!tickless || phase == PHASE_SLEEP)
+        return;
+    advance();                          /* a tick may be pending: be current */
+    if (need_resched)                   /* that woke a thread: it runs first, */
+        return;                         /* and may add a nearer timeout */
+    if (timeouts) {
+        int32_t d = (int32_t)(timeouts->wake - ticks);
+
+        delta = d < 1 ? 1 : (uint32_t)d < MAX_SLEEP_TICKS ? (uint32_t)d : MAX_SLEEP_TICKS;
+    }
+    rest = (int32_t)(tick_mark + delta * timer_load() - timer_cycles());
+    if (delta >= 3 && rest >= 2 * (int32_t)timer_load()) {
+        timer_restart((uint32_t)rest);
+        phase = PHASE_SLEEP;
+    }
+}
+
 /* Lowest priority: free finished threads, then sleep until an interrupt. */
 static void idle_main(void *arg)
 {
@@ -409,7 +501,19 @@ static void idle_main(void *arg)
             kfree(z);
             z = n;
         }
-        arch_wait_for_irq();
+        s = arch_irq_save();            /* decide and wait with no interrupt
+                                         * in between (WFI still wakes) */
+        if (!need_resched)
+            tickless_sleep();
+        /* tickless_sleep() catches the ticks up first, which can wake a
+         * thread whose timeout just passed: run it now, not after the long
+         * sleep it would otherwise wait out (the END key's 20 ms poll once
+         * slept 496 ms, and short presses were lost) */
+        if (need_resched)
+            k_preempt();
+        else
+            arch_wait_for_irq();
+        arch_irq_restore(s);
     }
 }
 
@@ -419,6 +523,8 @@ void kernel_start(void)
     running = true;
     kernel_current = ready[highest_ready()];
     slice_left = SLICE_TICKS;
-    acct_mark = timer_cycles();
+    acct_mark = tick_mark = timer_cycles();
+    next_window = 50;
+    next_stats = 1000;
     arch_start_first();
 }

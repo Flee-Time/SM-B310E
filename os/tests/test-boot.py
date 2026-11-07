@@ -73,6 +73,71 @@ def fsinfo_free(image):
     raise AssertionError('no FSINFO sector in the card image')
 
 
+def card_file(image, path):
+    """The bytes of a file on the FAT32 card image (8.3 or long names; the
+    path like '/b310e-os/log.txt', case-insensitive), or None. Follows the
+    cluster chain, so a fragmented log reads whole."""
+    part = 0
+    if image[510:512] == b'\x55\xaa' and image[0x1be + 4] in (0x0b, 0x0c):
+        part = int.from_bytes(image[0x1be + 8:0x1be + 12], 'little') * 512
+    bs = image[part:part + 512]
+    bps = int.from_bytes(bs[11:13], 'little')
+    spc = bs[13]
+    reserved = int.from_bytes(bs[14:16], 'little')
+    nfats = bs[16]
+    fatsz = int.from_bytes(bs[36:40], 'little')
+    root = int.from_bytes(bs[44:48], 'little')
+    fat = part + reserved * bps
+    data = fat + nfats * fatsz * bps
+    csize = spc * bps
+
+    def chain(c):
+        out = bytearray()
+        seen = 0
+        while 2 <= c < 0x0ffffff8 and seen < 1 << 20:
+            at = data + (c - 2) * csize
+            out += image[at:at + csize]
+            c = int.from_bytes(image[fat + 4 * c:fat + 4 * c + 4], 'little') & 0x0fffffff
+            seen += 1
+        return bytes(out)
+
+    def find(dirc, name):
+        d = chain(dirc)
+        lfn = {}
+        for i in range(0, len(d), 32):
+            e = d[i:i + 32]
+            if e[0] == 0:
+                break
+            if e[0] == 0xe5:
+                lfn = {}
+                continue
+            if e[11] == 0x0f:
+                seq = e[0] & 0x1f
+                lfn[seq] = (e[1:11] + e[14:26] + e[28:32]).decode('utf-16le', 'replace')
+                continue
+            short = e[0:8].decode('latin-1').rstrip()
+            ext = e[8:11].decode('latin-1').rstrip()
+            names = {short + ('.' + ext if ext else '')}
+            if lfn:
+                names.add(''.join(lfn[k] for k in sorted(lfn)).split('\0')[0].split('￿')[0])
+            lfn = {}
+            if name.lower() in (n.lower() for n in names):
+                c = int.from_bytes(e[20:22], 'little') << 16 | int.from_bytes(e[26:28], 'little')
+                return c, int.from_bytes(e[28:32], 'little'), bool(e[11] & 0x10)
+        return None
+
+    c = root
+    parts = [p for p in path.split('/') if p]
+    for i, p in enumerate(parts):
+        hit = find(c, p)
+        if hit is None:
+            return None
+        c, size, is_dir = hit
+        if i == len(parts) - 1:
+            return None if is_dir else chain(c)[:size]
+    return None
+
+
 def status(qt, base):
     return {name: qt.read(base + 4 * i) for i, name in enumerate(FIELDS)}
 
@@ -286,10 +351,7 @@ def main():
     result['selftest_file'] = FS_PATTERN in image
     result['fsinfo_free_clusters'] = fsinfo_free(image)[1]
     result['settings_saved'] = b'brightness=80\nscreen_timeout=15\n' in image
-    log_at = image.find(b'lcd: transfer spacing')      # the first line,
-    log_at = log_at // 512 * 512 if log_at >= 0 else -1  # at a sector start
-    end = image.find(b'\0', log_at) if log_at >= 0 else -1
-    log_text = image[log_at:end].decode(errors='replace') if log_at >= 0 else ''
+    log_text = (card_file(image, '/b310e-os/log.txt') or b'').decode(errors='replace')
     result['card_log'] = log_text.splitlines()[:10]
     (out / 'card-log.txt').write_text(log_text)
     assert result['selftest_file'], 'self-test file not on the card image'

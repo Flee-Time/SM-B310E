@@ -77,6 +77,7 @@ bool adi_write(uint32_t addr, uint32_t value);
 void timer_init(unsigned hz, void (*tick)(void));
 uint32_t timer_count(void);         /* the tick's 26 MHz down-counter */
 uint32_t timer_cycles(void);        /* 26 MHz cycles since start (irqs off) */
+void timer_restart(uint32_t cycles);    /* a new period from now (irqs off) */
 uint32_t timer_load(void);          /* its reload value */
 uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
 

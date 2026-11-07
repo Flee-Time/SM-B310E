@@ -123,7 +123,9 @@ static void end_key_main(void *arg)
             if ((held ^ hs_was) & hs[i].bit)
                 post(hs[i].code, (held & hs[i].bit) != 0);
         hs_was = held;
-        thread_sleep(20);
+        /* 20 ms while the screen is on; with the panel asleep 100 ms is
+         * plenty for END to wake it and saves four wake-ups in five */
+        thread_sleep(lcd_asleep() ? 100 : 20);
     }
 }
 

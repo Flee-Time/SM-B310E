@@ -21,7 +21,7 @@
 #define DARK_AFTER_MS  10000            /* after dimming */
 #define SETTINGS_FILE  OS_DIR "/settings.txt"
 
-ui_settings_t ui_settings = { 60, 30, 0 };
+ui_settings_t ui_settings = { 60, 30, 0, 1, 0, 7 * 60 };
 
 static screen_t *stack[MAX_DEPTH];
 static int depth;
@@ -41,7 +41,7 @@ static uint32_t tick_period(const screen_t *s)
 static uint8_t held_key, swallow_key;
 static int light;                       /* 0 on, 1 dim, 2 dark */
 static int bat_mv = -1;
-static bool charging;
+static int charging;                    /* CHARGE_* */
 
 /* ---- settings ------------------------------------------------------------ */
 
@@ -76,17 +76,26 @@ static void settings_load(void)
             ui_settings.screen_timeout_s = v;
         else if (!strcmp(line, "cpu_max"))
             ui_settings.cpu_max = v != 0;
+        else if (!strcmp(line, "deep_idle"))
+            ui_settings.deep_idle = v != 0;
+        else if (!strcmp(line, "alarm_on"))
+            ui_settings.alarm_on = v != 0;
+        else if (!strcmp(line, "alarm_min") && v < 24 * 60)
+            ui_settings.alarm_min = v;
     }
 }
 
 void ui_settings_save(void)
 {
-    char buf[96];
+    char buf[160];
     FIL f;
     UINT n;
-    int len = snprintf(buf, sizeof(buf), "brightness=%d\nscreen_timeout=%d\ncpu_max=%d\n",
+    int len = snprintf(buf, sizeof(buf),
+                       "brightness=%d\nscreen_timeout=%d\ncpu_max=%d\ndeep_idle=%d\n"
+                       "alarm_on=%d\nalarm_min=%d\n",
                        ui_settings.brightness, ui_settings.screen_timeout_s,
-                       ui_settings.cpu_max);
+                       ui_settings.cpu_max, ui_settings.deep_idle,
+                       ui_settings.alarm_on, ui_settings.alarm_min);
 
     if (f_open(&f, SETTINGS_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
         f_write(&f, buf, (UINT)len, &n);
@@ -182,7 +191,9 @@ static void draw_status(void)
     if (pct > 0 || charging)
         gfx_fill(x + 2, 4, charging ? 11 : (pct * 11 + 99) / 100, 3,
                  charging ? C_OK : pct <= 15 ? C_BAD : C_TEXT);
-    if (charging)
+    if (charging == CHARGE_DONE)
+        snprintf(buf, sizeof(buf), "full");
+    else if (charging)
         snprintf(buf, sizeof(buf), "chg");
     else if (pct >= 0)
         snprintf(buf, sizeof(buf), "%d%%", pct);
@@ -322,6 +333,12 @@ static void wake(void)
     }
 }
 
+void ui_wake(void)
+{
+    last_input = kernel_ticks();
+    wake();
+}
+
 static void on_key(const key_event_t *ev, uint32_t now)
 {
     os_status.keys++;
@@ -359,17 +376,39 @@ static void on_key(const key_event_t *ev, uint32_t now)
     }
 }
 
+/* Battery and power state to the card log, to read a day's drain and the
+ * clock against the RTC (uptime and RTC time side by side). */
+static void drain_log(uint32_t now)
+{
+    rtc_datetime_t t;
+    uint32_t load = 1000 - kernel_idle_permille();
+
+    rtc_get(&t);
+    klog("battery: %d mV %d%%%s, load %lu.%lu%%, %d MHz, screen %s, rtc %02d:%02d:%02d, up %lu s",
+         bat_mv, battery_percent(bat_mv),
+         charging == CHARGE_CHARGING ? ", charging" : charging == CHARGE_DONE ? ", charged" : "",
+         (unsigned long)(load / 10), (unsigned long)(load % 10), clock_mhz(),
+         light == 0 ? "on" : light == 1 ? "dim" : "dark", t.hour, t.min, t.sec,
+         (unsigned long)(now / 1000));
+}
+
 static void every_second(uint32_t now)
 {
     static unsigned n;
     uint32_t timeout = (uint32_t)ui_settings.screen_timeout_s * 1000u;
+    int h, m, sec;
 
-
-    if (n++ % 30 == 0) {                /* the ADC is slow: twice a minute */
-        charging = charger_present();
+    rtc_time(&h, &m, &sec);
+    alarm_check(h, m);
+    if (n % 30 == 0) {                  /* the ADC is slow: twice a minute */
+        charging = charge_state();
         bat_mv = battery_mv();
         os_status.battery_mv = (uint32_t)bat_mv;
     }
+    if (n && n % 600 == 0)              /* the drain log: every 10 minutes
+                                         * (not at boot: its load is boot work) */
+        drain_log(now);
+    n++;
     os_status.ticks = now;
     os_status.idle_permille = kernel_idle_permille();
     os_status.cpu_mhz = (uint32_t)clock_mhz();
@@ -389,6 +428,7 @@ void ui_run(screen_t *home)
 
     settings_load();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
+    kernel_set_tickless(ui_settings.deep_idle);
     ui_apply_brightness();
     keylight_set(true);
     last_input = kernel_ticks();

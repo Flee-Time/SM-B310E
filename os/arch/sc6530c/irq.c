@@ -35,8 +35,15 @@ void irq_disable_line(unsigned line)
 /* IRQ mode, interrupts off, the interrupted thread's context saved. */
 void irq_dispatch(void)
 {
-    uint32_t pending;
+    uint32_t pending = REG32(INTC_STATUS);
 
+    kernel_irq_entry();                 /* the ticks catch up after a long sleep */
+    /* ending a long sleep, the catch-up restarts the tick and so acks the
+     * timer's interrupt itself: count it, it was a wake-up all the same */
+    if (pending & ~REG32(INTC_STATUS) & (1u << IRQ_TIMER2)) {
+        irq_count++;
+        irq_line_count[IRQ_TIMER2]++;
+    }
     while ((pending = REG32(INTC_STATUS)) != 0) {
         unsigned line = 31 - __builtin_clz(pending);
 

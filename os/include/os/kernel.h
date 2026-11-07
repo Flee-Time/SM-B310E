@@ -121,6 +121,8 @@ extern thread_t *kernel_current;
 void kernel_reschedule(void);   /* svc and irq exit, interrupts off */
 void kernel_irq_exit(void);
 void kernel_tick(void);
+void kernel_irq_entry(void);        /* every interrupt, first */
+void kernel_set_tickless(bool on);  /* tickless idle (on by default) */
 
 /* CPU clock governor (kernel/cpufreq.c) */
 enum { CPUFREQ_AUTO, CPUFREQ_MAX };

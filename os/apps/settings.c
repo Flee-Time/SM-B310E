@@ -38,24 +38,34 @@ static void set_item(void *ctx, int i, char *text, int tn, char *detail, int dn)
         snprintf(detail, (size_t)dn, "%s", ui_settings.cpu_max ? "208 MHz" : "Auto");
         break;
     case 3:
-        snprintf(text, (size_t)tn, "Date & time");
+        snprintf(text, (size_t)tn, "Deep idle");
         break;
     case 4:
+        snprintf(text, (size_t)tn, "Date & time");
+        break;
+    case 5:
         snprintf(text, (size_t)tn, "About");
         break;
     }
 }
 
+static int set_toggle(void *ctx, int i)
+{
+    return i == 3 ? ui_settings.deep_idle : -1;
+}
+
 static const icon_t *set_icon(void *ctx, int i)
 {
     static const icon_t *const icons[] = {
-        &icon_sun, &icon_screen, &icon_cpu, &icon_clock, &icon_info,
+        &icon_sun, &icon_screen, &icon_cpu, &icon_power, &icon_clock, &icon_info,
     };
 
     return icons[i];
 }
 
-static list_t set_list = { .count = 5, .item = set_item, .icon = set_icon };
+static list_t set_list = {
+    .count = 6, .item = set_item, .icon = set_icon, .toggle = set_toggle,
+};
 
 static void set_draw(screen_t *s)
 {
@@ -85,9 +95,14 @@ static void set_key(screen_t *s, const key_event_t *ev)
             ui_settings_save();
             break;
         case 3:
-            ui_push(app_clock());
+            ui_settings.deep_idle = !ui_settings.deep_idle;
+            kernel_set_tickless(ui_settings.deep_idle);
+            ui_settings_save();
             break;
         case 4:
+            ui_push(app_clock());
+            break;
+        case 5:
             ui_message("About", "B310E OS 0.3\n\nbuilt " BUILD_DATE
                        "\n\nGPLv2 or later\nFatFs (C) ChaN");
             break;

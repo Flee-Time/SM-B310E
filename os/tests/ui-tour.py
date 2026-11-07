@@ -124,7 +124,7 @@ def main():
         shot('system')
         menu('Settings')
         shot('settings')
-        for _ in range(3):
+        for _ in range(4):
             key('down', 0.3)
         key('ret', 1)
         shot('date-time')

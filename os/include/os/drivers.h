@@ -69,6 +69,8 @@ void keypad_resume(void);
 /* ---- battery, charger, clock (drivers/battery.c) ------------------------ */
 uint32_t adc_read(unsigned ch);     /* raw 10-bit, or 0xffffffff */
 bool charger_present(void);
+enum { CHARGE_NONE, CHARGE_CHARGING, CHARGE_DONE };
+int charge_state(void);             /* CHARGE_* from the charger's lines */
 int battery_mv(void);               /* last unplugged reading, -1 unknown */
 int battery_percent(int mv);        /* -1 unknown */
 void rtc_time(int *h, int *m, int *s);

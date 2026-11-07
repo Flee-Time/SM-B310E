@@ -76,7 +76,8 @@ void gfx_switch(int x, int y, bool on);         /* 20 x 10 */
 extern const icon_t icon_apps, icon_folder, icon_file, icon_music, icon_radio,
     icon_tools, icon_chart, icon_gear, icon_power, icon_torch, icon_vibrate,
     icon_sim, icon_usb, icon_clock, icon_sun, icon_screen, icon_cpu, icon_info,
-    icon_play, icon_record, icon_mic, icon_restart;
+    icon_play, icon_record, icon_mic, icon_restart,
+    icon_calc, icon_notes, icon_alarm;
 
 /* ---- screens (ui/ui.c) -------------------------------------------------- */
 typedef struct screen screen_t;
@@ -111,11 +112,15 @@ typedef struct {
     int brightness;                 /* percent */
     int screen_timeout_s;           /* 0: never */
     int cpu_max;                    /* 1: always 208 MHz, 0: governor */
+    int deep_idle;                  /* 1: tickless idle (default) */
+    int alarm_on;                   /* the alarm clock (apps/alarm.c) */
+    int alarm_min;                  /* its time: minutes after midnight */
 } ui_settings_t;
 
 extern ui_settings_t ui_settings;
 void ui_settings_save(void);
 void ui_apply_brightness(void);
+void ui_wake(void);                 /* light the screen, as a key would */
 
 /* ---- widgets (ui/widgets.c) --------------------------------------------- */
 typedef struct {
@@ -138,6 +143,11 @@ void ui_confirm(const char *title, const char *message, void (*yes)(void));
 void ui_message(const char *title, const char *message);
 /* A scrolling text view of a copy of text (lines split at '\n' and wrapped). */
 void ui_text_view(const char *title, const char *text);
+/* A multi-tap text editor (ui/textedit.c) with a copy of initial, up to
+ * max characters; Center calls done() with the text, RSoft just leaves.
+ * multiline: # starts a new line. title must outlive the screen. */
+void ui_text_edit(const char *title, const char *initial, int max, bool multiline,
+                  void (*done)(const char *text, void *ctx), void *ctx);
 
 /* ---- apps (os/apps/) ---------------------------------------------------- */
 screen_t *app_home(void);
@@ -151,5 +161,9 @@ screen_t *app_radio(void);
 screen_t *app_tools(void);
 screen_t *app_sim(void);            /* apps/sim.c */
 screen_t *app_clock(void);          /* apps/clock.c: Date & time */
+screen_t *app_calc(void);           /* apps/calc.c */
+screen_t *app_alarm(void);          /* apps/alarm.c: set the alarm */
+void alarm_check(int h, int m);     /* once a second: rings when due */
+screen_t *app_notes(void);          /* apps/notes.c */
 
 #endif

@@ -172,7 +172,7 @@ def main():
             for _ in range(MENU.index('Settings')):
                 key('down')
             to('ret', 'Settings')
-            for _ in range(3):
+            for _ in range(4):                       # Date & time is the 5th row
                 key('down')
             to('ret', TITLE)
             time.sleep(0.6)

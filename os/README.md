@@ -31,19 +31,28 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 - **CPU clock scaling** and the corrected CPU accounting: run on the
   phone 2026-11-07: 1.3% load at rest, 0.2% with the screen dark, the
   tick at 1000 interrupts a second, 3913 KB heap free.
+- **Battery life** (2026-11-07, in QEMU; not yet on the phone): tickless
+  idle (about 50 wake-ups a second on the lit Home screen instead of
+  1000, nearly all the END and headset poll; Settings → Deep idle turns
+  it off), END polled every 100 ms with the panel asleep, the charger's
+  charging / charged lines in the status bar, and a battery line in the
+  card log every 10 minutes.
+- **More apps** (2026-11-07, in QEMU; not yet on the phone): Calculator,
+  Alarm (one daily alarm with snooze; rings while the OS runs), Notes
+  (multi-tap text entry), and rename / delete in Files.
 
 | Part | What there is |
 |---|---|
 | Start-up | identity MMU with cached PSRAM, the high-vector page, I- and D-cache (`arch/sc6530c/cpu.S`) |
-| Kernel | preemptive threads, 32 priorities, round robin within one, 1 ms tick, sleep, semaphores, mutexes with priority inheritance, message queues, heap, CPU clock governor (`kernel/`) |
+| Kernel | preemptive threads, 32 priorities, round robin within one, 1 ms tick (tickless while idle), sleep, semaphores, mutexes with priority inheritance, message queues, heap, CPU clock governor (`kernel/`) |
 | Clock | 208, 104 or 26 MHz, chosen by load every 50 ms; 26 MHz only with the panel asleep; Settings → CPU speed: Auto or 208 MHz (`arch/sc6530c/clock.c`, `kernel/cpufreq.c`) |
 | Drivers | LCD (ST7735S, panel sleep), backlight and keypad light, vibrator, torch (GPIO7), keypad matrix and END, text console, SD card (multi-block, IRAM bounce, retries), battery voltage and charger, RTC calendar: date and time, set from the UI (`drivers/rtc.c`), SIM reader: activation, ATR, T=0 APDUs, both slots (`drivers/sim.c`) (`drivers/`) |
 | Audio | codec power, speaker or headphones by the jack, volume, PCM playback and mono recording on DMA through the VBC, phone mic, 4-pole headset mic, FM line-in; headset detection and its three buttons (KEY_HS_*); all on the ARM, no DSP (`drivers/audio.c`, `pcm.c`, `include/os/audio.h`) |
 | USB storage | the card as a USB mass storage device (1209:0001): our own small stack on the Rockbox port's controller driver, all PIO (DMA once wrote stale FIFO words into the card's root directory); Bulk-Only Transport, the SCSI commands Windows and Linux use, two 16 KB buffers; the OS lets go of the card meanwhile (`fs_suspend`) (`drivers/usb.c`, `usb_msc.c`, `apps/usb.c`) |
 | FM radio | RTC6211N on I2C 1, tune, seek, RSSI, stereo, mute, the stock bank tables read from the phone's own NOR when their CRC matches (`drivers/fm.c`) |
 | Storage | FatFs R0.15a on the card: long names, UTF-8, thread-safe; a card log in `/b310e-os/log.txt` (`fs/`) |
-| UI | screen stack with status, title and soft-key bars; card lists with icons, switches and details, floating dialogs, text view, key repeat, screen timeout: dim, then LEDs off and panel asleep; drawing with alpha blending, anti-aliased text (Montserrat 9/10/12/24 px) and rounded shapes (`ui/`) |
-| Apps | built in: Home (clock, date), Menu, Apps, Files, Sound (tone, WAV player, mic recorder), FM radio (with recording), Tools (torch, vibrator, SIM cards, USB storage), System, Settings (brightness, screen timeout, CPU speed, Date & time), Power (`apps/`) |
+| UI | screen stack with status, title and soft-key bars; card lists with icons, switches and details, floating dialogs, text view, a multi-tap text editor (`ui/textedit.c`), key repeat, screen timeout: dim, then LEDs off and panel asleep; drawing with alpha blending, anti-aliased text (Montserrat 9/10/12/24 px) and rounded shapes (`ui/`) |
+| Apps | built in: Home (clock, date), Menu, Apps, Files (rename, delete), Sound (tone, WAV player, mic recorder), FM radio (with recording), Tools (torch, vibrator, SIM cards, USB storage, Calculator, Alarm, Notes), System, Settings (brightness, screen timeout, CPU speed, Date & time), Power (`apps/`) |
 | Loadable apps | `.app` files from `/b310e-os/apps/`, relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); first app: Stopwatch (`modules/stopwatch/`) |
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
 | Faults | undefined instruction and aborts show the registers on screen |
@@ -126,6 +135,8 @@ settings and the log. Screenshots of every screen go to `build/os/test-boot/`.
 python os/tests/test-audio.py
 python os/tests/test-sim.py
 python os/tests/test-rtc.py --build build/os
+python os/tests/test-tickless.py
+python os/tests/test-apps.py
 ```
 
 `test-audio.py` plugs in a 4-pole headset, checks its centre button,
@@ -135,7 +146,13 @@ starts the FM radio (probe, start-up and seek in the tuner model's
 trace). `test-sim.py` reads both slots with a card in either and checks
 that only SELECT MF reached the card and nothing identifying was logged.
 `test-rtc.py` sets dates through the Date & time screen and reads the
-RTC registers back.
+RTC registers back. `test-tickless.py` counts the interrupts a second on
+the idle Home screen and checks the kernel's time against the RTC model,
+then turns Deep idle off and checks that the tick is back. `test-apps.py`
+works the calculator, sets the alarm to 00:01 and snoozes it when it
+rings, and types a note by multi-tap; the tests read the card's files
+through its FAT (`card_file()` in `test-boot.py`), since the log is
+fragmented once other files are written.
 
 ## Layout
 
@@ -146,7 +163,8 @@ drivers/        LCD, backlight, keypad, console, SD/SDIO, battery, fonts
 fs/             FatFs glue (disk, locks, config), card log
 loader/         app loader, the API table apps get
 ui/             drawing, screen stack, widgets, fonts (OFL), icons
-apps/           built-in screens: home, menu, apps, files, system, settings, power
+apps/           built-in screens: home, menu, apps, files, system, settings, power,
+                sound, radio, tools, calculator, alarm, notes
 sdk/            for loadable apps: app.h, app.ld, start.c, mkapp.py
 modules/        loadable apps, one folder each
 tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py
@@ -166,9 +184,28 @@ main.c          start-up; selftest.c: the boot self-test
   frame on the thread's stack (`cpu.S`).
 - The LCD transfer is started, not waited for: the LCDC's done flag does
   not report reliably, and polling it cost half the CPU.
-- QEMU on Windows delivers about 700 of the 1000 ticks a second, so time
-  in QEMU runs slow; the idle share is a ratio of counted cycles and stays
-  right.
+- QEMU on Windows loses about 0.25 ms per timer period (its periodic
+  ptimer restarts each period from the late host callback), so with the
+  1 ms tick time in QEMU runs some 26% slow; tickless, with about 50
+  periods a second, within 1%. The idle share is a ratio of counted cycles
+  and stays right. The chip reloads in hardware.
+- Tickless idle (`kernel/thread.c`): with only the idle thread ready and
+  the next timeout three or more ticks away, the idle thread loads timer 2
+  with that many ticks (a second at most) before WFI. Ticks follow the
+  timer's cycle total (`timer_cycles()`), so any interrupt first catches
+  them up (`kernel_irq_entry()`), then loads the rest of the tick and,
+  when that ends, the tick again: the reload repeats the last load. A
+  woken thread mostly runs for well under a tick, so the idle thread may
+  sleep again from that rest-of-tick period (waiting for it first doubled
+  the interrupts: 100 a second instead of 50). The idle thread catches
+  the ticks up before it decides; when that wakes a thread, it runs it
+  instead of sleeping. It slept on at first, so a thread whose timeout had
+  just passed waited for the next timeout instead: the END key's 20 ms
+  poll once slept 585 ms, and short END presses were lost (QEMU tests,
+  about one press in 30). The first version stalled
+  at tick 19: catching up took longer than the rest
+  of the tick, and the negative load ran as a 165 s period; the rest is
+  signed now, and a late one skips to the next boundary.
 - Pixels are plain RGB565. Milestone 1 packed them byte-swapped (copied
   from Rockbox's video helper), which only white survived; the QEMU
   model showed it.

@@ -39,6 +39,7 @@ boot = runpy.run_path(str(Path(__file__).with_name('test-boot.py')))
 FIELDS, MAGIC, MENU = boot['FIELDS'], boot['MAGIC'], boot['MENU']
 symbol, status, string = boot['symbol'], boot['status'], boot['string']
 wait_for, free_port = boot['wait_for'], boot['free_port']
+card_file = boot['card_file']
 KEY_HS_CENTER = 0x70
 
 
@@ -226,18 +227,15 @@ def main():
     assert 900 < result['recorded_hz'] < 1100, result
 
     # the card log
-    log_at = image.find(b'lcd: transfer spacing')
-    log_at = log_at // 512 * 512
-    log_text = image[log_at:image.find(b'\0', log_at)].decode(errors='replace')
+    # read through the FAT: the recording folder fragments the log
+    log_text = (card_file(image, '/b310e-os/log.txt') or b'').decode(errors='replace')
     (out / 'card-log.txt').write_text(log_text)
     result['log'] = [l for l in log_text.splitlines() if 'audio:' in l or 'fm:' in l]
-    # the log may be fragmented (the recording folder took the next cluster),
-    # so look for the later lines anywhere on the card
-    assert b'audio: recording /b310e-os/rec/REC0001.WAV' in image, log_text
-    assert b'audio: recorded' in image, log_text
-    fm_at = image.find(b'fm: id 1688')
-    assert fm_at >= 0, 'no FM probe in the log'
-    result['fm_log'] = image[fm_at:image.find(bytes([10]), fm_at)].decode(errors='replace')
+    assert 'audio: recording /b310e-os/rec/REC0001.WAV' in log_text, log_text
+    assert 'audio: recorded' in log_text, log_text
+    fm_lines = [l.split(' fm: ', 1)[1] for l in log_text.splitlines() if ' fm: id 1688' in l]
+    assert fm_lines, 'no FM probe in the log'
+    result['fm_log'] = 'fm: ' + fm_lines[0]
     assert 'present 1' in result['fm_log'], result
     at = image.find(b'WAVEfmt ')
     fm_rec = None

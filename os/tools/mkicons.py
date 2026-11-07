@@ -186,8 +186,31 @@ def restart(d):
     d.polygon([tuple(P(*p)) for p in ((8.5, 0), (13, 2.5), (8.5, 5))], fill=255)
 
 
+def calc(d):
+    rrect(d, 2.5, 1, 11.5, 13, 1.5)
+    d.rectangle(P(4, 2.5, 10, 5), fill=0)            # the display
+    for y in (7, 9.5):
+        for x in (4, 6.6, 9.2):
+            d.rectangle(P(x, y, x + 1.6, y + 1.5), fill=0)
+    d.rectangle(P(4, 11.5 - 0.4, 10.8, 12), fill=0)
+
+
+def notes(d):
+    rrect(d, 2, 1, 12, 13, 1.2)
+    for y in (4, 6.8, 9.6):
+        d.rectangle(P(4, y, 10 if y < 9 else 7.5, y + 1.1), fill=0)
+
+
+def alarm(d):
+    d.chord(P(2.5, 1.5, 11.5, 13), start=180, end=360, fill=255)    # the bell
+    d.rectangle(P(2.5, 7.2, 11.5, 10.5), fill=255)
+    rrect(d, 1, 10, 13, 11.6, 0.6)
+    d.ellipse(P(5.6, 11.4, 8.4, 14), fill=255)                      # the clapper
+
+
 ICONS = [apps, folder, file, music, radio, tools, chart, gear, power, torch, vibrate,
-         sim, usb, clock, sun, screen, cpu, info, play, record, mic, restart]
+         sim, usb, clock, sun, screen, cpu, info, play, record, mic, restart,
+         calc, notes, alarm]
 
 
 def main():
@@ -209,7 +232,7 @@ def main():
         for i in range(0, len(data), 12):
             out.append('    ' + ', '.join(f'0x{b:02x}' for b in data[i:i + 12]) + ',')
         out.append('} };')
-    (REPO / 'os/ui/icons.c').write_text('\n'.join(out) + '\n')
+    (REPO / 'os/ui/icons.c').write_text('\n'.join(out) + '\n', newline='\n')
     print(f'os/ui/icons.c: {len(ICONS)} icons')
 
 

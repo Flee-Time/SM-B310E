@@ -42,7 +42,9 @@ static void home_draw(screen_t *s)
         snprintf(buf, sizeof(buf), "date not set");
     gfx_text_centered(UI_TOP + 40, buf, C_DIM, FONT_BODY, 1);
 
-    if (charger_present())
+    if (charge_state() == CHARGE_DONE)
+        snprintf(buf, sizeof(buf), "charged");
+    else if (charge_state() == CHARGE_CHARGING)
         snprintf(buf, sizeof(buf), "charging");
     else if (pct >= 0)
         snprintf(buf, sizeof(buf), "%d%%  %d.%02d V", pct, mv / 1000, mv % 1000 / 10);
