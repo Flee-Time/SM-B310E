@@ -31,13 +31,33 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "ff.h"
+#include "os/alarm.h"
+#include "os/audio.h"
+#include "os/fs.h"
+#include "os/kernel.h"
+#include "os/media.h"
+#include "os/notify.h"
+#include "os/rtc.h"
 #include "os/ui.h"
 
 /* 2.0 (2026-11-07): the new UI. screen_t gained overlay, list_t icon and
  * toggle, so 1.x apps are refused; the table gained the drawing calls
  * after f_rename. */
+/* 2.1 (2026-11-07): the multi-tap editor, label/value rows, graphs,
+ * strrchr, icons by name and the card's state, after gfx_switch (the
+ * Calculator and Notes moved out of the OS image). */
+/* 2.2 (2026-11-07): the hardware and the services (threads, the clock, the
+ * device, sound by category, WAV, the playback engine and play queue,
+ * album art, the FM radio, alarms), appended after card_mounted; Music,
+ * Recorder, FM radio and Alarm left the OS image for apps of their own. */
+/* 2.3 (2026-11-07): app_info_t gained the app's own icon (the Apps list
+ * reads it from the file, see app_peek_icon); the FM radio's speaker
+ * (fm_set_speaker, audio_force_speaker) and ui_refresh (a redraw asked
+ * from another thread), appended after alarm_days_text. */
+/* 2.4 (2026-11-07): notifications (os/notify.h: post, remove, count, get),
+ * shown in the quick panel; an app with one posted stays loaded. */
 #define OS_API_MAJOR 2
-#define OS_API_MINOR 0
+#define OS_API_MINOR 4
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -61,7 +81,9 @@ typedef struct {
     const char *name;
     screen_t *(*start)(const os_api_t *os);
     void (*stop)(void);                 /* may be NULL */
+    const icon_t *icon;                 /* 2.3: in the Apps list; NULL: the default */
 } app_info_t;
+#define APP_INFO_ICON 16                /* its offset: the list reads it from the file */
 
 struct os_api {
     uint16_t major, minor;
@@ -136,6 +158,154 @@ struct os_api {
     void (*gfx_icon)(int x, int y, const icon_t *icon, uint16_t c);
     void (*gfx_bar)(int x, int y, int w, int h, int value, int max, uint16_t c);
     void (*gfx_switch)(int x, int y, bool on);
+
+    /* 2.1 */
+    void (*ui_text_edit)(const char *title, const char *initial, int max, bool multiline,
+                         void (*done)(const char *text, void *ctx), void *ctx);
+    void (*ui_kv)(int x, int y, int w, const char *label, const char *value, uint16_t c);
+    int (*gfx_graph)(int x, int y, int w, int h, const uint16_t *v, int n, int head,
+                     int max, uint16_t c);
+    char *(*strrchr)(const char *s, int c);
+    const icon_t *(*icon)(const char *name);    /* "file", "notes" ...; NULL if none */
+    bool (*card_mounted)(void);
+
+    /* 2.2: the hardware and the OS services, each through a wrapper */
+    /* apps, threads (an app's thread keeps it loaded while it runs; below the UI) */
+    const char *(*app_arg)(void);
+    const char *(*app_launch)(const char *name, const char *arg);
+    thread_t *(*thread_create)(const char *name, int prio, size_t stack, void (*fn)(void *), void *arg);
+    void (*thread_yield)(void);
+    void (*sem_init)(sem_t *s, int count);
+    int (*sem_wait)(sem_t *s, uint32_t timeout_ms);
+    void (*sem_post)(sem_t *s);
+    void (*mutex_init)(mutex_t *m);
+    int (*mutex_lock)(mutex_t *m, uint32_t timeout_ms);
+    void (*mutex_unlock)(mutex_t *m);
+    int (*queue_init)(queue_t *q, size_t msg_size, unsigned capacity);
+    int (*queue_send)(queue_t *q, const void *msg, uint32_t timeout_ms);
+    int (*queue_recv)(queue_t *q, void *msg, uint32_t timeout_ms);
+    /* the UI */
+    void (*ui_choose)(const char *title, const char *const *options, int n, int current, void (*picked)(int i, void *ctx), void *ctx);
+    void (*gfx_blit)(int x, int y, int w, int h, const uint16_t *px);
+    void (*ui_wake)(void);
+    void (*ui_settings_save)(void);
+    /* the clock */
+    int (*rtc_get)(rtc_datetime_t *t);
+    int (*rtc_set)(const rtc_datetime_t *t);
+    int (*rtc_weekday)(int year, int month, int day);
+    /* the device (adi_*: the analog die's registers, raw) */
+    void (*torch_set)(bool on);
+    bool (*torch_get)(void);
+    void (*vibrator_set)(int level);
+    void (*vibrate)(int level, uint32_t ms);
+    void (*backlight_set)(int percent);
+    void (*keylight_set)(bool on);
+    int (*charge_state)(void);
+    uint32_t (*adi_read)(uint32_t addr);
+    bool (*adi_write)(uint32_t addr, uint32_t value);
+    /* the system */
+    size_t (*heap_free)(void);
+    uint32_t (*cpu_idle)(void);
+    int (*cpu_mhz)(void);
+    void (*cpufreq_hold)(void);
+    void (*cpufreq_release)(void);
+    void (*power_off)(void);
+    void (*reboot)(void);
+    const fs_info_t *(*fs_info)(void);
+    /* sound: the volume categories (VOL_*), PCM playback and recording (the fill and sink callbacks run in the DMA interrupt: copy only) */
+    int (*volume_level)(int cat);
+    void (*volume_set)(int cat, int level);
+    void (*volume_use)(int cat);
+    int (*audio_play)(unsigned rate, audio_fill_fn fill, void *ctx);
+    void (*audio_play_stop)(void);
+    bool (*audio_playing)(void);
+    int (*audio_record)(unsigned rate, int source, audio_sink_fn sink, void *ctx);
+    void (*audio_record_stop)(void);
+    bool (*audio_recording)(void);
+    unsigned (*audio_peak)(void);
+    bool (*audio_headphones)(void);
+    bool (*audio_speaker)(void);
+    void (*audio_set_mic_gain)(int gain);
+    int (*audio_get_mic_gain)(void);
+    bool (*audio_rate_ok)(unsigned rate);
+    void (*audio_headset_info)(audio_headset_info_t *out);
+    /* WAV files (/b310e-os/rec for recordings); the UI loop keeps them going */
+    const char *(*wav_play_file)(const char *path);
+    const char *(*wav_play_tone)(unsigned hz);
+    void (*wav_stop)(void);
+    bool (*wav_playing)(void);
+    bool (*wav_recording)(void);
+    uint32_t (*wav_seconds)(void);
+    const char *(*wav_name)(void);
+    const char *(*wav_record)(unsigned rate, int source);
+    uint32_t (*wav_dropped)(void);
+    const char *(*wav_last_recording)(void);
+    /* the playback engine (every format a codec module plays) */
+    bool (*media_supported)(const char *path);
+    const char *(*media_extensions)(void);
+    int (*media_play)(const char *path);
+    void (*media_stop)(void);
+    void (*media_pause)(bool pause);
+    void (*media_seek)(uint32_t ms);
+    media_state_t (*media_state)(void);
+    uint32_t (*media_position)(void);
+    uint32_t (*media_duration)(void);
+    bool (*media_info)(media_info_t *out);
+    const char *(*media_error)(void);
+    /* the play queue: plays on in the background */
+    void (*media_queue_clear)(void);
+    bool (*media_queue_add)(const char *path);
+    int (*media_queue_add_folder)(const char *dir, int depth);
+    int (*media_queue_add_m3u)(const char *path);
+    int (*media_queue_count)(void);
+    const char *(*media_queue_path)(int i);
+    int (*media_queue_find)(const char *path);
+    int (*media_queue_current)(void);
+    bool (*media_queue_active)(void);
+    int (*media_queue_play)(int i);
+    void (*media_queue_step)(int d);
+    void (*media_queue_toggle)(void);
+    void (*media_queue_set_shuffle)(bool on);
+    bool (*media_queue_shuffle)(void);
+    void (*media_queue_set_repeat)(int mode);
+    int (*media_queue_repeat)(void);
+    const char *(*media_queue_source)(void);
+    void (*media_queue_set_source)(const char *s);
+    const char *(*media_queue_error)(void);
+    const char *(*media_queue_now)(void);
+    void (*art_request)(const char *path, const media_info_t *info, int side);
+    const uint16_t *(*art_get)(const char *path, int side, int *state);
+    /* the FM radio */
+    bool (*fm_present)(void);
+    int (*fm_on)(void);
+    void (*fm_off)(void);
+    bool (*fm_is_on)(void);
+    void (*fm_tune)(int khz);
+    int (*fm_frequency)(void);
+    bool (*fm_station)(int rssi);
+    int (*fm_rssi)(void);
+    bool (*fm_stereo)(void);
+    void (*fm_mute)(bool mute);
+    /* alarms (the OS rings them) */
+    int (*alarm_count)(void);
+    bool (*alarm_get)(int i, alarm_t *out);
+    int (*alarm_set)(int i, const alarm_t *a);
+    bool (*alarm_delete)(int i);
+    int (*alarm_next)(uint32_t *minutes_until);
+    void (*alarm_days_text)(uint8_t days, char *out, int n);
+
+    /* 2.3: the output */
+    void (*audio_force_speaker)(bool on);
+    bool (*audio_forced_speaker)(void);
+    void (*fm_set_speaker)(bool on);
+    bool (*fm_speaker)(void);
+    void (*ui_refresh)(void);
+
+    /* 2.4: notifications */
+    bool (*notify_post)(notify_t *n);
+    void (*notify_remove)(notify_t *n);
+    int (*notify_count)(void);
+    notify_t *(*notify_get)(int i);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */
@@ -145,8 +315,15 @@ extern const os_api_t os_api;
 
 /* Load and start an app; NULL on success, else why it failed. */
 const char *app_open(const char *path);
+/* An app by its name or file name, with an argument (app_arg() in it). */
+const char *app_launch(const char *name, const char *arg);
+const char *app_arg(void);
+thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *), void *arg);
 /* Read only the header (for listings); 0, or -1 when it is not an app. */
 int app_peek(const char *path, app_file_t *out);
+const char *app_name(const app_t *a);
+/* The icon an app declared (API 2.3 and later), read from its file. */
+bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out);
 /* Unload the apps that have no screen on the stack (the UI loop calls it). */
 void app_collect(screen_t *const *stack, int depth);
 int app_count(void);

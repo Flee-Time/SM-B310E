@@ -159,6 +159,7 @@ const char *wav_play_file(const char *path)
     total_bytes = 0;
     snprintf(name, sizeof(name), "%s", path);
     refill();
+    volume_use(VOL_APP);                /* recordings play at the apps' level */
     if (audio_play(rate, fill, NULL)) {
         wav_stop();
         return "audio did not start";

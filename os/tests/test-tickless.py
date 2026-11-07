@@ -104,13 +104,15 @@ def main():
         for _ in range(MENU.index('Settings')):
             press('down', 'Menu')
         press('ret', 'Settings')
-        for _ in range(3):
+        for _ in range(boot['SETTINGS'].index('Power')):
             press('down', 'Settings')
-        press('ret', 'Settings')            # Deep idle off
+        press('ret', 'Power')               # the Power page: CPU speed, Deep idle
+        press('down', 'Power')
+        press('ret', 'Power')               # Deep idle off
         irqs, ms_per_s = measure(4)
         result.update({'irqs_per_s_ticking': round(irqs), 'kernel_ms_per_rtc_s_ticking': round(ms_per_s, 1)})
         assert irqs >= 900, f'deep idle switch had no effect: {result}'
-        press('ret', 'Settings')            # and on again
+        press('ret', 'Power')               # and on again
     except Exception:
         print(json.dumps(result, indent=2))
         raise

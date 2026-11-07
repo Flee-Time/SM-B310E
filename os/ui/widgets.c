@@ -16,6 +16,20 @@
 #define LIST_ROWS  (UI_CONTENT_H / UI_ROW_H)
 #define CARD_H     (UI_ROW_H - 2)
 
+/* A label at x and its value right-aligned at x + w, FONT_SMALL. The value
+ * keeps up to two thirds of the width; the label gets the rest and is cut
+ * with ".." before it can run into the value. */
+void ui_kv(int x, int y, int w, const char *label, const char *value, uint16_t c)
+{
+    int vw = gfx_text_width(value, FONT_SMALL, 1), room;
+
+    if (vw > w * 2 / 3)
+        vw = w * 2 / 3;
+    room = w - vw - 4;
+    gfx_text(x, y, label, C_DIM, FONT_SMALL, 1, room > 8 ? room : 8);
+    gfx_text(x + w - vw, y, value, c, FONT_SMALL, 1, vw);
+}
+
 void list_draw(list_t *l)
 {
     char text[48], detail[24];
@@ -161,6 +175,7 @@ static int draw_lines(const char *text, int font, int first, int x, int y, int w
 typedef struct {
     screen_t s;
     void (*yes)(void);
+    bool no;                            /* No is the selected button */
     char text[];
 } dialog_t;
 
@@ -195,8 +210,8 @@ static void dialog_draw(screen_t *s)
     gfx_text(DLG_X + 7, y + 7, s->title ? s->title : "", C_TEXT, FONT_LARGE, 1, DLG_W - 14);
     draw_lines(d->text, FONT_BODY, 0, DLG_X + 7, y + 22, DLG_W - 14, lines, 12, C_DIM, false);
     if (d->yes) {                       /* where their soft keys are */
-        button(DLG_X + 6, y + h - 20, 44, "Yes", true);
-        button(DLG_X + DLG_W - 50, y + h - 20, 44, "No", false);
+        button(DLG_X + 6, y + h - 20, 44, "Yes", !d->no);
+        button(DLG_X + DLG_W - 50, y + h - 20, 44, "No", d->no);
     } else {
         button(DLG_X + (DLG_W - 50) / 2, y + h - 20, 50, "OK", true);
     }
@@ -208,11 +223,25 @@ static void dialog_key(screen_t *s, const key_event_t *ev)
     void (*yes)(void) = d->yes;
 
     if (yes) {
-        if (ev->code == KEY_LSOFT || ev->code == KEY_CENTER) {
+        switch (ev->code) {
+        case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
+            d->no = !d->no;             /* two buttons: any direction moves */
+            ui_redraw();
+            break;
+        case KEY_CENTER:                /* the selected one */
+            ui_pop();
+            if (!d->no)
+                yes();
+            break;
+        case KEY_LSOFT:                 /* the soft keys under Yes and No */
             ui_pop();
             yes();
-        } else if (ev->code == KEY_RSOFT) {
+            break;
+        case KEY_RSOFT:
             ui_pop();
+            break;
+        default:
+            break;
         }
     } else {
         ui_pop();                       /* a message: any key */
@@ -311,4 +340,83 @@ void ui_text_view(const char *title, const char *text)
     v->s.key = view_key;
     v->s.free_on_pop = true;
     ui_push(&v->s);
+}
+
+/* ---- the option picker ------------------------------------------------------ */
+
+typedef struct {
+    screen_t s;
+    list_t list;
+    const char *const *options;
+    int current;
+    void (*picked)(int i, void *ctx);
+    void *ctx;
+} picker_t;
+
+static void picker_item(void *ctx, int i, char *text, int tn, char *detail, int dn)
+{
+    picker_t *p = ctx;
+
+    snprintf(text, (size_t)tn, "%s", p->options[i]);
+}
+
+static const icon_t *picker_icon(void *ctx, int i)
+{
+    picker_t *p = ctx;
+
+    return i == p->current ? &icon_dot_on : &icon_dot_off;
+}
+
+static void picker_draw(screen_t *s)
+{
+    list_draw(&((picker_t *)s->data)->list);
+}
+
+static void picker_key(screen_t *s, const key_event_t *ev)
+{
+    picker_t *p = s->data;
+
+    if (list_key(&p->list, ev))
+        return;
+    if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT) {
+        void (*picked)(int, void *) = p->picked;
+        void *ctx = p->ctx;
+        int i = p->list.sel;
+
+        ui_pop();                       /* frees p */
+        if (picked)
+            picked(i, ctx);
+    } else if (ev->code == KEY_RSOFT) {
+        ui_pop();
+    }
+}
+
+/* A list of options, the current one marked; Center picks one and calls
+ * picked(i, ctx) after the picker has closed, RSoft leaves it as it was.
+ * title and options must outlive the picker (string constants do). */
+void ui_choose(const char *title, const char *const *options, int n, int current,
+               void (*picked)(int i, void *ctx), void *ctx)
+{
+    picker_t *p = kzalloc(sizeof(*p));
+
+    if (!p)
+        return;
+    p->options = options;
+    p->current = current;
+    p->picked = picked;
+    p->ctx = ctx;
+    p->list.count = n;
+    p->list.sel = current >= 0 && current < n ? current : 0;
+    p->list.item = picker_item;
+    p->list.icon = picker_icon;
+    p->list.ctx = p;
+    p->s.title = title;
+    p->s.left = "Select";
+    p->s.center = "OK";
+    p->s.right = "Back";
+    p->s.draw = picker_draw;
+    p->s.key = picker_key;
+    p->s.data = p;
+    p->s.free_on_pop = true;
+    ui_push(&p->s);
 }

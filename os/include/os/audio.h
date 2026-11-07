@@ -24,6 +24,8 @@ int audio_get_volume(void);
 void audio_mute(bool mute);
 bool audio_headphones(void);        /* the jack */
 bool audio_speaker(void);           /* the output in use */
+void audio_force_speaker(bool on);  /* the speaker even with headphones in */
+bool audio_forced_speaker(void);
 void audio_set_mic_gain(int gain);  /* 0..15 */
 int audio_get_mic_gain(void);
 void audio_fm_route(bool on);       /* FM line-in straight to the output */
@@ -46,6 +48,19 @@ typedef struct {
     unsigned held;                  /* AUDIO_HS_* */
 } audio_headset_info_t;
 void audio_headset_info(audio_headset_info_t *out);
+
+/* ---- volume by category (ui/volume.c) ------------------------------------- */
+/* Each kind of sound has its own level, 0 (mute) .. VOL_LEVELS, kept in the
+ * settings; whoever starts a sound says which kind it is (volume_use) and
+ * the codec takes that level. VOL_TACTILE is the key feedback's vibration
+ * strength, 0 (off) .. 3, not a codec level. */
+enum { VOL_MUSIC, VOL_APP, VOL_ALARM, VOL_CALL, VOL_TACTILE, VOL_COUNT };
+#define VOL_LEVELS 10
+int volume_level(int cat);
+void volume_set(int cat, int level);    /* saved; heard at once if that kind plays */
+void volume_use(int cat);               /* a sound of this kind starts */
+int volume_active(void);                /* the kind playing (last used) */
+int volume_db10(int level);             /* the codec's tenths of a dB for a level */
 
 /* ---- playback and recording (drivers/pcm.c) ----------------------------- */
 /* Fill up to frames stereo frames (L, R interleaved); return how many were
@@ -72,5 +87,7 @@ bool fm_station(int rssi);          /* strong enough to stop a seek */
 int fm_rssi(void);
 bool fm_stereo(void);
 void fm_mute(bool mute);
+void fm_set_speaker(bool on);       /* the speaker even with the headset in */
+bool fm_speaker(void);
 
 #endif

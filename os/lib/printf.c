@@ -75,6 +75,12 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         if (*fmt == '.') {
             prec = 0;
             fmt++;
+            if (*fmt == '*') {          /* "%.*s": the precision from the args */
+                prec = va_arg(ap, int);
+                if (prec < 0)
+                    prec = -1;
+                fmt++;
+            }
             while (*fmt >= '0' && *fmt <= '9')
                 prec = prec * 10 + (*fmt++ - '0');
         }

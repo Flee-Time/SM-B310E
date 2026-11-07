@@ -51,6 +51,7 @@ struct thread {
     size_t stack_size;
     uint32_t cycles;            /* 26 MHz cycles run (statistics) */
     thread_t *all_next;         /* every thread, for listings */
+    void *owner;                /* the app that started it, or NULL */
 };
 
 #define WAIT_OK       0
@@ -63,6 +64,7 @@ void thread_sleep(uint32_t ms);
 void thread_yield(void);
 void thread_exit(void) __attribute__((noreturn));
 thread_t *thread_self(void);
+int thread_count_owned(const void *owner);  /* threads of an app still running */
 void thread_set_priority(thread_t *t, int prio);
 thread_t *thread_first(void);   /* walk all threads (interrupts off) */
 thread_t *thread_next(thread_t *t);
@@ -115,6 +117,7 @@ void *kmalloc(size_t size);
 void *kzalloc(size_t size);
 void kfree(void *p);
 size_t heap_free_bytes(void);
+void heap_stats(size_t *free, size_t *largest, unsigned *blocks);
 
 /* internal, used by the architecture layer */
 extern thread_t *kernel_current;

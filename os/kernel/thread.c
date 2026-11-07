@@ -241,10 +241,14 @@ void kernel_irq_exit(void)
 static void advance(void)
 {
     thread_t *cur = kernel_current;
-    uint32_t p = timer_load(), n = (timer_cycles() - tick_mark) / p;
+    uint32_t p = timer_load();
+    int32_t since = (int32_t)(timer_cycles() - tick_mark);
+    uint32_t n;
 
-    if (!n)
+    if (since < (int32_t)p)             /* not a tick yet, or a read behind the
+                                         * mark: never 2^32 cycles ahead */
         return;
+    n = (uint32_t)since / p;
     tick_mark += n * p;
     ticks += n;
     account();
@@ -439,6 +443,18 @@ void thread_exit(void)
 thread_t *thread_self(void)
 {
     return kernel_current;
+}
+
+int thread_count_owned(const void *owner)
+{
+    uint32_t s = arch_irq_save();
+    int n = 0;
+
+    for (thread_t *t = all_threads; t; t = t->all_next)
+        if (t->owner == owner && t->state != T_DEAD)
+            n++;
+    arch_irq_restore(s);
+    return n;
 }
 
 void thread_set_priority(thread_t *t, int prio)

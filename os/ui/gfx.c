@@ -70,6 +70,18 @@ void gfx_fill(int x, int y, int w, int h, uint16_t c)
     }
 }
 
+/* w x h RGB565 pixels (rows of w) at x, y, clipped to the screen */
+void gfx_blit(int x, int y, int w, int h, const uint16_t *px)
+{
+    int x0 = x, y0 = y, cw = w, ch = h;
+
+    if (!clip(&x, &y, &cw, &ch))
+        return;
+    for (int j = 0; j < ch; j++)
+        memcpy(lcd_fb + (y + j) * LCD_WIDTH + x, px + (y - y0 + j) * w + (x - x0),
+               (size_t)cw * 2);
+}
+
 void gfx_shade(int x, int y, int w, int h, uint16_t c, int alpha)
 {
     uint32_t fg = spread(c);
@@ -336,6 +348,46 @@ void gfx_bar(int x, int y, int w, int h, int value, int max, uint16_t c)
     gfx_round(x, y, w, h, 1, C_CARD_HI);
     if (fill > 0)
         gfx_round(x, y, fill < 2 ? 2 : fill, h, 1, c);
+}
+
+/* A history graph: n samples in a ring (newest at v[(head - 1) mod n]),
+ * oldest at the left; scaled to max (0: the largest sample, at least 1).
+ * A card with two faint grid lines, the area under the line tinted, the
+ * line itself in c. Returns the max used. */
+int gfx_graph(int x, int y, int w, int h, const uint16_t *v, int n, int head,
+              int max, uint16_t c)
+{
+    int px = -1, py = 0;
+
+    if (max <= 0) {
+        max = 1;
+        for (int i = 0; i < n; i++)
+            if (v[i] > max)
+                max = v[i];
+    }
+    gfx_round(x, y, w, h, 1, C_CARD);
+    gfx_hline(x + 2, y + h / 4, w - 4, C_BG);
+    gfx_hline(x + 2, y + h / 2, w - 4, C_BG);
+    gfx_hline(x + 2, y + h * 3 / 4, w - 4, C_BG);
+    for (int i = 0; i < n; i++) {
+        int s = v[(head + i) % n], cx = x + 1 + (int)((int64_t)(w - 3) * i / (n > 1 ? n - 1 : 1));
+        int cy = y + h - 2 - (int)((int64_t)(h - 4) * (s > max ? max : s) / max);
+
+        if (px >= 0) {
+            for (int xx = px + 1; xx <= cx; xx++) {     /* a column per pixel */
+                int yy = py + (cy - py) * (xx - px) / (cx - px);
+
+                gfx_shade(xx, yy, 1, y + h - 1 - yy, c, 60);
+                gfx_fill(xx, yy, 1, 1, c);
+                if (yy != py)                           /* steep: close the gap */
+                    gfx_fill(xx, yy < py ? yy : py, 1, (yy < py ? py - yy : yy - py), c);
+                py = yy;
+            }
+        }
+        px = cx;
+        py = cy;
+    }
+    return max;
 }
 
 void gfx_switch(int x, int y, bool on)

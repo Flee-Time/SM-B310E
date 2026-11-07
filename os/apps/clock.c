@@ -222,6 +222,7 @@ static void save(void)
     t.wday = 0;
     r = rtc_set(&t);
     if (r == 0) {
+        rtc_save();                     /* a clock set back is not "restored" */
         ui_pop();
         return;
     }

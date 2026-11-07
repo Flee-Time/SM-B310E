@@ -68,16 +68,20 @@ void gfx_shade(int x, int y, int w, int h, uint16_t c, int alpha);
 typedef struct { uint8_t a[72]; } icon_t;      /* 12 x 12, 4-bit alpha */
 #define ICON_SIZE 12
 void gfx_icon(int x, int y, const icon_t *icon, uint16_t c);
+void gfx_blit(int x, int y, int w, int h, const uint16_t *px);  /* RGB565 rows of w */
 
 /* widgets drawn in place */
 void gfx_bar(int x, int y, int w, int h, int value, int max, uint16_t c);
 void gfx_switch(int x, int y, bool on);         /* 20 x 10 */
+/* history: n samples in a ring, the newest at v[head - 1]; max 0: auto */
+int gfx_graph(int x, int y, int w, int h, const uint16_t *v, int n, int head,
+              int max, uint16_t c);
 
 extern const icon_t icon_apps, icon_folder, icon_file, icon_music, icon_radio,
     icon_tools, icon_chart, icon_gear, icon_power, icon_torch, icon_vibrate,
     icon_sim, icon_usb, icon_clock, icon_sun, icon_screen, icon_cpu, icon_info,
     icon_play, icon_record, icon_mic, icon_restart,
-    icon_calc, icon_notes, icon_alarm;
+    icon_calc, icon_notes, icon_alarm, icon_dot_on, icon_dot_off, icon_speaker, icon_card;
 
 /* ---- screens (ui/ui.c) -------------------------------------------------- */
 typedef struct screen screen_t;
@@ -102,10 +106,21 @@ void ui_push(screen_t *s);
 void ui_pop(void);
 void ui_home(void);                 /* back to the bottom screen */
 void ui_redraw(void);
+void ui_refresh(void);
+void ui_collect_apps(void);          /* unload apps that are no longer used */               /* ui_redraw from another thread: at once */
 int ui_depth(void);
 void ui_run(screen_t *home) __attribute__((noreturn));   /* the UI thread */
 void ui_power_off(void) __attribute__((noreturn));
 void ui_reboot(void) __attribute__((noreturn));
+/* Start another image from the card in place of this OS (no reset: the
+ * boot menu needs a key held at power-on). Returns only on an error. */
+const char *ui_chain(const char *path, const char *what);
+#define BOOT_MENU_PATH "/fpbin/fpmain.bin"
+#define OS_IMAGE_PATH  "/progs/b310e-os.bin"
+/* From another thread: run fn(arg) in the UI thread and wait for it.
+ * false when the UI did not take it within timeout_ms (then it never
+ * runs). arg must stay valid until it returns. */
+bool ui_call(void (*fn)(void *arg), void *arg, uint32_t timeout_ms);
 
 /* settings, kept in /b310e-os/settings.txt */
 typedef struct {
@@ -113,14 +128,20 @@ typedef struct {
     int screen_timeout_s;           /* 0: never */
     int cpu_max;                    /* 1: always 208 MHz, 0: governor */
     int deep_idle;                  /* 1: tickless idle (default) */
-    int alarm_on;                   /* the alarm clock (apps/alarm.c) */
-    int alarm_min;                  /* its time: minutes after midnight */
+    int alarm_on;                   /* the 2026-11-07 single alarm: read once, */
+    int alarm_min;                  /* moved into the alarm service's list */
+    int vol[5];                     /* VOL_*: 0 mute .. 10 (tactile 0 .. 3) */
+    int keylight;                   /* 1: the keypad light while the screen is on */
+    int usb_default;                /* on the plug: 0 charge only, 1 storage, 2 network */
+    int tz_min;                     /* the time zone: minutes from UTC */
+    int net_time;                   /* 1: the clock from the network (SNTP) */
 } ui_settings_t;
 
 extern ui_settings_t ui_settings;
 void ui_settings_save(void);
 void ui_apply_brightness(void);
 void ui_wake(void);                 /* light the screen, as a key would */
+void ui_buzz(int level, uint32_t ms);   /* vibrate at level 1..7 for ms (5 s at most) */
 
 /* ---- widgets (ui/widgets.c) --------------------------------------------- */
 typedef struct {
@@ -143,6 +164,12 @@ void ui_confirm(const char *title, const char *message, void (*yes)(void));
 void ui_message(const char *title, const char *message);
 /* A scrolling text view of a copy of text (lines split at '\n' and wrapped). */
 void ui_text_view(const char *title, const char *text);
+/* Options to pick from (the current one marked); picked(i, ctx) once one
+ * is chosen. title and options must outlive the picker. */
+void ui_choose(const char *title, const char *const *options, int n, int current,
+               void (*picked)(int i, void *ctx), void *ctx);
+/* label ... value in one line of w pixels; neither runs into the other */
+void ui_kv(int x, int y, int w, const char *label, const char *value, uint16_t c);
 /* A multi-tap text editor (ui/textedit.c) with a copy of initial, up to
  * max characters; Center calls done() with the text, RSoft just leaves.
  * multiline: # starts a new line. title must outlive the screen. */
@@ -156,14 +183,8 @@ screen_t *app_files(const char *path);
 screen_t *app_system(void);
 screen_t *app_settings(void);
 screen_t *app_power(void);
-screen_t *app_sound(void);
-screen_t *app_radio(void);
 screen_t *app_tools(void);
 screen_t *app_sim(void);            /* apps/sim.c */
 screen_t *app_clock(void);          /* apps/clock.c: Date & time */
-screen_t *app_calc(void);           /* apps/calc.c */
-screen_t *app_alarm(void);          /* apps/alarm.c: set the alarm */
-void alarm_check(int h, int m);     /* once a second: rings when due */
-screen_t *app_notes(void);          /* apps/notes.c */
 
 #endif

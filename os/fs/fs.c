@@ -10,6 +10,7 @@
 
 #define LOG_BUF      4096
 #define LOG_ROTATE   (256u * 1024)
+#define LOG_TAIL     8192               /* the last lines, for klog_read() */
 
 static FATFS fat;
 static fs_info_t info;
@@ -18,6 +19,8 @@ static size_t log_len;
 static bool log_dropped;
 static mutex_t log_lock;
 static sem_t log_kick;
+static char log_tail[LOG_TAIL];
+static uint32_t tail_pos;               /* bytes ever logged */
 
 const fs_info_t *fs_info(void)
 {
@@ -40,6 +43,8 @@ void klog(const char *fmt, ...)
     line[n++] = '\n';
 
     mutex_lock(&log_lock, WAIT_FOREVER);
+    for (int i = 0; i < n; i++)
+        log_tail[tail_pos++ % LOG_TAIL] = line[i];
     if (log_len + (size_t)n <= LOG_BUF) {
         memcpy(log_buf + log_len, line, (size_t)n);
         log_len += (size_t)n;
@@ -47,6 +52,30 @@ void klog(const char *fmt, ...)
         log_dropped = true;
     }
     mutex_unlock(&log_lock);
+}
+
+/* What was logged since *pos (from the last LOG_TAIL bytes; older lines
+ * are skipped), at most n bytes; *pos moves on. */
+size_t klog_read(uint32_t *pos, char *buf, size_t n)
+{
+    size_t k;
+
+    mutex_lock(&log_lock, WAIT_FOREVER);
+    if (tail_pos - *pos > LOG_TAIL)
+        *pos = tail_pos - LOG_TAIL;
+    k = tail_pos - *pos;
+    if (k > n)
+        k = n;
+    for (size_t i = 0; i < k; i++)
+        buf[i] = log_tail[(*pos + i) % LOG_TAIL];
+    *pos += (uint32_t)k;
+    mutex_unlock(&log_lock);
+    return k;
+}
+
+uint32_t klog_pos(void)
+{
+    return tail_pos;
 }
 
 static void log_flush(void)

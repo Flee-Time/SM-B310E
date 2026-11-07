@@ -18,15 +18,25 @@ static void (*tick_fn)(void);
 static uint32_t period;                 /* the tick: 26000 cycles */
 static uint32_t cur;                    /* the load running now */
 static uint32_t base;                   /* cycles before the current period */
+static uint32_t low;                    /* the lowest count read this period */
 
 /* Cycles into the current period; a period that ended but whose interrupt
- * has not run yet (bit 2 pending) counts whole. Interrupts off. */
+ * has not run yet counts whole. It ended when bit 2 is pending, or when
+ * the count is above one already read this period: the countdown can
+ * reload before the pending bit shows (QEMU's timer does; the chip is not
+ * known not to), and reading that as early in the period put the time
+ * back by a period, which the kernel's unsigned tick count turned into a
+ * jump of 2^32 cycles (165 s): a playing track was then "taken".
+ * Interrupts off. */
 static uint32_t into_period(void)
 {
     uint32_t c = REG32(T2_COUNT);
 
     if (REG32(T2_INT) & 4)
         return cur + (cur - REG32(T2_COUNT));
+    if (c > low)
+        return cur + (cur - c);         /* reloaded, the bit not yet set */
+    low = c;
     return cur - c;
 }
 
@@ -35,6 +45,7 @@ static void timer2_isr(void)
     if (REG32(T2_INT) & 4) {
         REG32(T2_INT) = 9;
         base += cur;
+        low = cur;                      /* a new period */
     }
     tick_fn();
 }
@@ -42,7 +53,7 @@ static void timer2_isr(void)
 void timer_init(unsigned hz, void (*tick)(void))
 {
     tick_fn = tick;
-    period = cur = TIMER_HZ / hz;
+    period = cur = low = TIMER_HZ / hz;
 
     REG32(0x8b0000a0) = 0x410000u;      /* timer clock gate */
     REG32(0x8b000060) = 0x2000u;        /* reset pulse */
@@ -86,7 +97,7 @@ void timer_restart(uint32_t cycles)
     REG32(T2_CTL) = 0;
     REG32(T2_LOAD) = cycles;
     REG32(T2_CTL) = 0xc0;
-    cur = cycles;
+    cur = low = cycles;
 }
 
 uint32_t timer_load(void)

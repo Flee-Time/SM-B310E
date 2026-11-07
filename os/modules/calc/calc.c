@@ -6,11 +6,12 @@
  * so far (a pocket calculator, no precedence). Soft-float doubles
  * (libgcc); shown to 9 significant digits.
  *
+ * A loadable app (os/modules); it was built into the OS until 2026-11-07.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-#include "os/drivers.h"
-#include "os/lib.h"
-#include "os/ui.h"
+#include "app.h"
+#include "icons.h"
 
 #define ENTRY_MAX 12                    /* characters typed, sign and point too */
 #define LIMIT     1e12                  /* beyond: "Overflow" */
@@ -258,8 +259,11 @@ static screen_t screen = {
     .draw = draw, .key = key,
 };
 
-screen_t *app_calc(void)
+static screen_t *start(void)
 {
     clear_all();
     return &screen;
 }
+
+static const icon_t app_icon = APP_ICON_CALC;
+APP("Calculator", start, NULL, &app_icon);

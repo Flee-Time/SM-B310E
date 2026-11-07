@@ -7,10 +7,45 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
+#include "os/art.h"
+#include "apps/wavio.h"
+
+/* PCM playback for apps: at the apps' volume */
+static int app_audio_play(unsigned rate, audio_fill_fn fill, void *ctx)
+{
+    volume_use(VOL_APP);
+    return audio_play(rate, fill, ctx);
+}
 
 void *app_malloc(size_t size);
 void *app_zalloc(size_t size);
 void app_free(void *p);
+
+/* the list icons by name, for apps (2.1) */
+static const icon_t *icon_by_name(const char *name)
+{
+    static const struct { const char *name; const icon_t *icon; } icons[] = {
+        { "apps", &icon_apps }, { "folder", &icon_folder }, { "file", &icon_file },
+        { "music", &icon_music }, { "radio", &icon_radio }, { "tools", &icon_tools },
+        { "chart", &icon_chart }, { "gear", &icon_gear }, { "power", &icon_power },
+        { "torch", &icon_torch }, { "vibrate", &icon_vibrate }, { "sim", &icon_sim },
+        { "usb", &icon_usb }, { "clock", &icon_clock }, { "sun", &icon_sun },
+        { "screen", &icon_screen }, { "cpu", &icon_cpu }, { "info", &icon_info },
+        { "play", &icon_play }, { "record", &icon_record }, { "mic", &icon_mic },
+        { "restart", &icon_restart }, { "calc", &icon_calc }, { "notes", &icon_notes },
+        { "alarm", &icon_alarm },
+    };
+
+    for (unsigned i = 0; i < ARRAY_SIZE(icons); i++)
+        if (!strcmp(icons[i].name, name))
+            return icons[i].icon;
+    return NULL;
+}
+
+static bool card_mounted(void)
+{
+    return fs_info()->mounted;
+}
 
 const os_api_t os_api = {
     .major = OS_API_MAJOR, .minor = OS_API_MINOR, .size = sizeof(os_api_t),
@@ -42,4 +77,129 @@ const os_api_t os_api = {
     .gfx_text_height = gfx_text_height, .gfx_round = gfx_round,
     .gfx_round_alpha = gfx_round_alpha, .gfx_shade = gfx_shade,
     .gfx_icon = gfx_icon, .gfx_bar = gfx_bar, .gfx_switch = gfx_switch,
+
+    .ui_text_edit = ui_text_edit, .ui_kv = ui_kv, .gfx_graph = gfx_graph,
+    .strrchr = strrchr, .icon = icon_by_name, .card_mounted = card_mounted,
+
+    .app_arg = app_arg,
+    .app_launch = app_launch,
+    .thread_create = app_thread,
+    .thread_yield = thread_yield,
+    .sem_init = sem_init,
+    .sem_wait = sem_wait,
+    .sem_post = sem_post,
+    .mutex_init = mutex_init,
+    .mutex_lock = mutex_lock,
+    .mutex_unlock = mutex_unlock,
+    .queue_init = queue_init,
+    .queue_send = queue_send,
+    .queue_recv = queue_recv,
+    .ui_choose = ui_choose,
+    .gfx_blit = gfx_blit,
+    .ui_wake = ui_wake,
+    .ui_settings_save = ui_settings_save,
+    .rtc_get = rtc_get,
+    .rtc_set = rtc_set,
+    .rtc_weekday = rtc_weekday,
+    .torch_set = torch_set,
+    .torch_get = torch_get,
+    .vibrator_set = vibrator_set,
+    .vibrate = ui_buzz,
+    .backlight_set = backlight_set,
+    .keylight_set = keylight_set,
+    .charge_state = charge_state,
+    .adi_read = adi_read,
+    .adi_write = adi_write,
+    .heap_free = heap_free_bytes,
+    .cpu_idle = kernel_idle_permille,
+    .cpu_mhz = clock_mhz,
+    .cpufreq_hold = cpufreq_hold,
+    .cpufreq_release = cpufreq_release,
+    .power_off = ui_power_off,
+    .reboot = ui_reboot,
+    .fs_info = fs_info,
+    .volume_level = volume_level,
+    .volume_set = volume_set,
+    .volume_use = volume_use,
+    .audio_play = app_audio_play,
+    .audio_play_stop = audio_play_stop,
+    .audio_playing = audio_playing,
+    .audio_record = audio_record,
+    .audio_record_stop = audio_record_stop,
+    .audio_recording = audio_recording,
+    .audio_peak = audio_peak,
+    .audio_headphones = audio_headphones,
+    .audio_speaker = audio_speaker,
+    .audio_set_mic_gain = audio_set_mic_gain,
+    .audio_get_mic_gain = audio_get_mic_gain,
+    .audio_rate_ok = audio_rate_ok,
+    .audio_headset_info = audio_headset_info,
+    .wav_play_file = wav_play_file,
+    .wav_play_tone = wav_play_tone,
+    .wav_stop = wav_stop,
+    .wav_playing = wav_playing,
+    .wav_recording = wav_recording,
+    .wav_seconds = wav_seconds,
+    .wav_name = wav_name,
+    .wav_record = wav_record,
+    .wav_dropped = wav_dropped,
+    .wav_last_recording = wav_last_recording,
+    .media_supported = media_supported,
+    .media_extensions = media_extensions,
+    .media_play = media_play,
+    .media_stop = media_stop,
+    .media_pause = media_pause,
+    .media_seek = media_seek,
+    .media_state = media_state,
+    .media_position = media_position,
+    .media_duration = media_duration,
+    .media_info = media_info,
+    .media_error = media_error,
+    .media_queue_clear = media_queue_clear,
+    .media_queue_add = media_queue_add,
+    .media_queue_add_folder = media_queue_add_folder,
+    .media_queue_add_m3u = media_queue_add_m3u,
+    .media_queue_count = media_queue_count,
+    .media_queue_path = media_queue_path,
+    .media_queue_find = media_queue_find,
+    .media_queue_current = media_queue_current,
+    .media_queue_active = media_queue_active,
+    .media_queue_play = media_queue_play,
+    .media_queue_step = media_queue_step,
+    .media_queue_toggle = media_queue_toggle,
+    .media_queue_set_shuffle = media_queue_set_shuffle,
+    .media_queue_shuffle = media_queue_shuffle,
+    .media_queue_set_repeat = media_queue_set_repeat,
+    .media_queue_repeat = media_queue_repeat,
+    .media_queue_source = media_queue_source,
+    .media_queue_set_source = media_queue_set_source,
+    .media_queue_error = media_queue_error,
+    .media_queue_now = media_queue_now,
+    .art_request = art_request,
+    .art_get = art_get,
+    .fm_present = fm_present,
+    .fm_on = fm_on,
+    .fm_off = fm_off,
+    .fm_is_on = fm_is_on,
+    .fm_tune = fm_tune,
+    .fm_frequency = fm_frequency,
+    .fm_station = fm_station,
+    .fm_rssi = fm_rssi,
+    .fm_stereo = fm_stereo,
+    .fm_mute = fm_mute,
+    .alarm_count = alarm_count,
+    .alarm_get = alarm_get,
+    .alarm_set = alarm_set,
+    .alarm_delete = alarm_delete,
+    .alarm_next = alarm_next,
+    .alarm_days_text = alarm_days_text,
+    .audio_force_speaker = audio_force_speaker,
+    .audio_forced_speaker = audio_forced_speaker,
+    .fm_set_speaker = fm_set_speaker,
+    .fm_speaker = fm_speaker,
+    .ui_refresh = ui_refresh,
+    .notify_post = notify_post,
+    .notify_remove = notify_remove,
+    .notify_count = notify_count,
+    .notify_get = notify_get,
 };

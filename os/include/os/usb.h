@@ -1,4 +1,5 @@
-/* B310E OS — USB mass storage: the SD card as a removable disk on a PC.
+/* B310E OS — USB device: the SD card as a removable disk on a PC, or a
+ * network adapter (RNDIS) with the development shell.
  *
  * usb_start() brings the SC6530C's full-speed device controller up (PIO
  * only, never DMA), connects to the host and serves the card through the
@@ -6,6 +7,8 @@
  * off the bus again. The caller owns the card in between: fs_suspend()
  * before usb_start(), fs_resume() after usb_stop(), and cpufreq_hold()
  * for as long as the controller runs (apps/usb.c does all of this).
+ * usb_start_function(USB_FN_NETWORK) is the network instead (the card
+ * stays mounted; include/os/net.h).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -42,20 +45,35 @@ typedef struct {
     uint32_t ejected;           /* the host ejected the medium */
     uint32_t polled;            /* interrupt storm: line 25 masked, polled */
     uint32_t sd_errors;         /* failed card reads or writes */
+    uint32_t function;          /* USB_FN_STORAGE or USB_FN_NETWORK */
 } usb_stat_t;
 
 extern volatile usb_stat_t usb_stat;
 
-/* 0 when started (or already running); -1 without a card or memory. */
+/* One function at a time: the card as a disk, or a network adapter
+ * (RNDIS) with the development shell on it (net/, include/os/net.h). */
+enum { USB_FN_STORAGE, USB_FN_NETWORK };
+
+/* 0 when started (or already running); -1 without a card or memory.
+ * usb_start() is the storage function. Network needs no card: the OS
+ * keeps the card mounted and serves files over the network instead. */
 int usb_start(void);
+int usb_start_function(int which);
 /* Off the bus; returns when mass storage has finished with the card. */
 void usb_stop(void);
 bool usb_running(void);
 /* VBUS: the micro-USB socket is the only power input, so the charger. */
 bool usb_cable(void);
 
-/* The "USB storage" screen (apps/usb.c). */
+/* apps/usb.c: "USB storage" (app_usb), "USB network" (app_usb_net) and
+ * the choice between them (app_usb_menu, the Tools entry). */
 struct screen *app_usb(void);
+struct screen *app_usb_net(void);
+struct screen *app_usb_menu(void);
+/* the default function in the background (Settings -> USB): the UI calls
+ * it every second; the label for the status bar, or NULL */
+void usb_auto_tick(void);
+const char *usb_auto_label(void);
 
 /* The last mass storage commands of the session (opcode, page, direction,
  * length, result, sense) to the card log; the USB screen calls it once

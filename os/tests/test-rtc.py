@@ -97,10 +97,16 @@ def main():
     state = sym['clock_state'][0]
 
     card = out / 'card.img'
+    # the clock saved at the last power-off: 2025-12-31 12:00:00; the RTC
+    # model starts cleared (day 0), as the phone's after a reset
+    saved_day = days(2025, 12, 31)
+    clock_txt = out / 'clock.txt'
+    clock_txt.write_text(f'{saved_day * 86400 + 12 * 3600}\n')
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
                     '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--add', f'b310e-os/clock.txt={clock_txt}',
                     '--output', str(card)], check=True, capture_output=True)
 
     qmp_port, qtest_port = free_port(), free_port()
@@ -159,7 +165,8 @@ def main():
             wait_for(qt, base, lambda s: s['magic'] == MAGIC, 10, 'OS never started')
             wait_for(qt, base, lambda s: s['selftest_done'] == ST_ALL, 60, 'self-test incomplete')
             wait_for(qt, base, lambda s: s['ui_depth'] == 1, 10, 'no UI')
-
+            result['restored'] = rtc()
+            assert result['restored'][3] == saved_day and result['restored'][2] == 12, result
 
             # A clock as the stock firmware leaves it: 2026-03-15 10:20:30.
             preset = days(2026, 3, 15)
@@ -172,8 +179,9 @@ def main():
             for _ in range(MENU.index('Settings')):
                 key('down')
             to('ret', 'Settings')
-            for _ in range(4):                       # Date & time is the 5th row
+            for _ in range(BOOT['SETTINGS'].index('Date & time')):    # the 4th category
                 key('down')
+            to('ret', TITLE)                     # the page: Set the clock first
             to('ret', TITLE)
             time.sleep(0.6)
             f = fields()
@@ -191,7 +199,7 @@ def main():
             result['typed'] = f
             assert f == [7, 11, 2026, 14, 4, 10], f
             shot('clock-typed')
-            to('f1', 'Settings')                     # Save
+            to('f1', TITLE)                     # Save
             r = rtc()
             result['rtc_after_save'] = r
             assert r[3] == days(2026, 11, 7) == 17112 and r[2] == 14 and r[1] == 4, r
@@ -204,7 +212,7 @@ def main():
             assert f[:5] == [7, 11, 2026, 14, 4], f
             for d in '31022028':
                 key(d, 0.15)
-            to('f1', 'Settings')
+            to('f1', TITLE)
             r = rtc()
             result['rtc_leap'] = r
             assert r[3] == days(2028, 2, 29) and r[2] == 14 and r[1] == 4, r
@@ -217,7 +225,7 @@ def main():
             shot('clock-leap')
             key('up')                                # 29.02. -> 01.02.
             assert fields()[0] == 1, fields()
-            to('f2', 'Settings')                     # Cancel
+            to('f2', TITLE)                     # Cancel
             assert rtc()[3] == days(2028, 2, 29), rtc()
             result['cancel_kept'] = True
             time.sleep(2.5)                          # the log thread writes

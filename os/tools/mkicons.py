@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Draw the OS's 12 x 12 list icons into os/ui/icons.c (4-bit alpha).
+"""Draw the OS's 12 x 12 list icons into os/ui/icons.c (4-bit alpha), and
+the same as initializers for apps into os/sdk/icons.h (an app's own icon
+in the Apps list: `static const icon_t icon = APP_ICON_MUSIC;`).
 
 Simple geometric icons of our own, drawn at 8x and scaled down so the
 edges are anti-aliased; the UI tints them (ui/gfx.c, gfx_icon).
@@ -208,9 +210,29 @@ def alarm(d):
     d.ellipse(P(5.6, 11.4, 8.4, 14), fill=255)                      # the clapper
 
 
+def dot_on(d):
+    d.ellipse(P(1.5, 1.5, 12.5, 12.5), outline=255, width=round(1.4 * S))
+    d.ellipse(P(4.5, 4.5, 9.5, 9.5), fill=255)
+
+
+def dot_off(d):
+    d.ellipse(P(1.5, 1.5, 12.5, 12.5), outline=255, width=round(1.4 * S))
+
+
+def speaker(d):
+    d.polygon([tuple(P(*p)) for p in ((1.5, 5), (4.5, 5), (8, 2), (8, 12), (4.5, 9), (1.5, 9))], fill=255)
+    d.arc(P(6, 3.5, 12, 10.5), start=-60, end=60, fill=255, width=round(1.2 * S))
+
+
+def card(d):
+    d.polygon([tuple(P(*p)) for p in ((3, 1), (9.5, 1), (12, 3.5), (12, 13), (3, 13))], fill=255)
+    for x in (5, 7, 9):
+        d.rectangle(P(x, 2.5, x + 1, 5), fill=0)
+
+
 ICONS = [apps, folder, file, music, radio, tools, chart, gear, power, torch, vibrate,
          sim, usb, clock, sun, screen, cpu, info, play, record, mic, restart,
-         calc, notes, alarm]
+         calc, notes, alarm, dot_on, dot_off, speaker, card]
 
 
 def main():
@@ -218,6 +240,20 @@ def main():
            ' * SPDX-License-Identifier: GPL-2.0-or-later',
            ' */',
            '#include "os/ui.h"',
+           '']
+    sdk = ["/* B310E OS app SDK — the OS's icons as initializers (os/tools/mkicons.py).",
+           ' *',
+           ' *     static const icon_t icon = APP_ICON_MUSIC;',
+           ' *     APP("Music", start, NULL, &icon);',
+           ' *',
+           ' * An icon is 12 x 12 pixels, 4-bit alpha, row by row, two pixels a byte',
+           ' * (the left one in the high nibble); the UI tints it. Your own: 72 bytes',
+           ' * in the same order.',
+           ' *',
+           ' * SPDX-License-Identifier: GPL-2.0-or-later',
+           ' */',
+           '#ifndef OS_SDK_ICONS_H',
+           '#define OS_SDK_ICONS_H',
            '']
     for fn in ICONS:
         img, d = canvas()
@@ -232,8 +268,14 @@ def main():
         for i in range(0, len(data), 12):
             out.append('    ' + ', '.join(f'0x{b:02x}' for b in data[i:i + 12]) + ',')
         out.append('} };')
-    (REPO / 'os/ui/icons.c').write_text('\n'.join(out) + '\n', newline='\n')
-    print(f'os/ui/icons.c: {len(ICONS)} icons')
+        sdk.append(f'#define APP_ICON_{fn.__name__.upper()} {{ {{ \\')
+        for i in range(0, len(data), 12):
+            sdk.append('    ' + ', '.join(f'0x{b:02x}' for b in data[i:i + 12]) + ', \\')
+        sdk.append('} }')
+    (REPO / 'os/ui/icons.c').write_text('\n'.join(out) + '\n', encoding='utf-8', newline='\n')
+    sdk += ['', '#endif']
+    (REPO / 'os/sdk/icons.h').write_text('\n'.join(sdk) + '\n', encoding='utf-8', newline='\n')
+    print(f'os/ui/icons.c, os/sdk/icons.h: {len(ICONS)} icons')
 
 
 if __name__ == '__main__':

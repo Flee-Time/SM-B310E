@@ -96,6 +96,12 @@ static void irq_update(void)
 
 /* ---- playback ----------------------------------------------------------- */
 
+/* why the last playback stopped (the engine logs it when it thinks the
+ * audio was taken): 1 stop asked, 2 a DMA error (status in pcm_stop_status),
+ * 3 drained to the end */
+volatile int pcm_stop_why;
+volatile uint32_t pcm_stop_status;
+
 static void play_hw_stop(void)
 {
     /* VB enable (bit 15) is shared with capture */
@@ -234,6 +240,8 @@ static void dma_isr(void)
             continue;
         status = DMA_REG(ch, 12);
         DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+        if (status & (1u << 12))
+            pcm_stop_status = status | ch << 28;
         error |= (status & (1u << 12)) != 0;
         if (status & (1u << 9))
             completed |= 1u << ch;
@@ -242,12 +250,14 @@ static void dma_isr(void)
         return;
     if (error) {
         play_hw_stop();
+        pcm_stop_why = 2;
         return;
     }
     if (completed != DMA_PLAY_MASK)     /* both channels done with the plane */
         return;
     if (draining) {
         play_hw_stop();
+        pcm_stop_why = 3;
         return;
     }
     draining = fill_plane() == 0 && eof;
@@ -287,8 +297,10 @@ void audio_play_stop(void)
 {
     uint32_t s = arch_irq_save();
 
-    if (running)
+    if (running) {
         play_hw_stop();
+        pcm_stop_why = 1;
+    }
     arch_irq_restore(s);
 }
 

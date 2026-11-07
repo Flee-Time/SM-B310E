@@ -7,6 +7,7 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
+#include "os/notify.h"
 #include "os/status.h"
 
 #define RELOC_CHUNK 64
@@ -19,6 +20,7 @@ struct app {
     void **allocs;                      /* api->malloc blocks, freed with it */
     int n_allocs, cap_allocs;
     char name[20];
+    char *arg;                          /* what it was opened with, or NULL */
 };
 
 static app_t *apps;
@@ -129,10 +131,38 @@ int app_peek(const char *path, app_file_t *out)
     return -1;
 }
 
+/* The icon an app built for 2.3 or later declared: app_info_t is at the
+ * start of the image, linked at 0, so its icon pointer in the file is the
+ * icon's offset in the image (the loader relocates it only when loading). */
+bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out)
+{
+    FIL f;
+    UINT n = 0;
+    uint32_t off = 0;
+    bool ok = false;
+
+    if (h->api_minor < 3 || f_open(&f, path, FA_READ) != FR_OK)
+        return false;
+    if (f_lseek(&f, h->header_size + APP_INFO_ICON) == FR_OK &&
+        f_read(&f, &off, 4, &n) == FR_OK && n == 4 && off >= sizeof(app_info_t) &&
+        off <= h->image_size - sizeof(*out) &&
+        f_lseek(&f, h->header_size + off) == FR_OK &&
+        f_read(&f, out, sizeof(*out), &n) == FR_OK && n == sizeof(*out))
+        ok = true;
+    f_close(&f);
+    return ok;
+}
+
+const char *app_name(const app_t *a)
+{
+    return a->name;
+}
+
 static void unload(app_t *a)
 {
     app_t **pp;
 
+    notify_drop_owner(a);
     if (a->info->stop) {
         app_t *saved = app_current;
 
@@ -149,6 +179,7 @@ static void unload(app_t *a)
         kfree(a->allocs[i]);
     os_status.apps_loaded = (uint32_t)app_count();
     klog("app: %s closed (%d blocks freed)", a->name, a->n_allocs);
+    kfree(a->arg);
     kfree(a->allocs);
     kfree(a->image);
     kfree(a);
@@ -186,7 +217,85 @@ static const char *load(FIL *f, app_t *a, const app_file_t *h)
     return NULL;
 }
 
+static const char *open_with(const char *path, const char *arg);
+
+/* An app already loaded: its start() again, with the new argument. */
+static const char *restart(app_t *a, const char *arg)
+{
+    screen_t *s;
+    app_t *saved = app_current;
+
+    kfree(a->arg);
+    a->arg = NULL;
+    if (arg && (a->arg = kmalloc(strlen(arg) + 1)))
+        memcpy(a->arg, arg, strlen(arg) + 1);
+    app_current = a;
+    s = a->info->start(&os_api);
+    if (s)
+        ui_push(s);
+    app_current = saved;
+    klog("app: %s started again", a->name);
+    return s ? NULL : "the app did not start";
+}
+
 const char *app_open(const char *path)
+{
+    return open_with(path, NULL);
+}
+
+/* An app on the card by its name ("Music") or file ("music.app"), opened
+ * with an argument it reads through app_arg(). An app that is open already
+ * gets the argument and starts again (start() pushes its screen anew). */
+const char *app_launch(const char *name, const char *arg)
+{
+    DIR d;
+    FILINFO fi;
+    char path[80];
+    const char *err = "no such app";
+
+    for (app_t *a = apps; a; a = a->next)
+        if (!strcmp(a->name, name))
+            return restart(a, arg);
+    if (f_opendir(&d, APP_DIR) != FR_OK)
+        return "no apps folder";
+    while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
+        app_file_t h;
+        size_t n = strlen(fi.fname);
+
+        if (n < 5 || strcmp(fi.fname + n - 4, ".app"))
+            continue;
+        snprintf(path, sizeof(path), APP_DIR "/%s", fi.fname);
+        if ((app_peek(path, &h) == 0 && !strcmp(h.name, name)) || !strcmp(fi.fname, name)) {
+            f_closedir(&d);
+            return open_with(path, arg);
+        }
+    }
+    f_closedir(&d);
+    return err;
+}
+
+const char *app_arg(void)
+{
+    return app_current ? app_current->arg : NULL;
+}
+
+/* A thread of the app's: the app stays loaded while it runs, even with no
+ * screen of its own on the stack (a background job). Below the UI. */
+thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *), void *arg)
+{
+    thread_t *t;
+
+    if (prio >= PRIO_NORMAL)
+        prio = PRIO_NORMAL - 1;
+    if (prio < PRIO_LOW)
+        prio = PRIO_LOW;
+    t = thread_create(name, prio, stack, fn, arg);
+    if (t)
+        t->owner = app_current;
+    return t;
+}
+
+static const char *open_with(const char *path, const char *arg)
 {
     app_file_t h;
     FIL f;
@@ -206,6 +315,13 @@ const char *app_open(const char *path)
         f_close(&f);
         return err;
     }
+    h.name[sizeof(h.name) - 1] = 0;
+    for (a = apps; a; a = a->next)      /* still loaded (a notification, a
+                                         * thread): start that one again */
+        if (!strcmp(a->name, h.name)) {
+            f_close(&f);
+            return restart(a, arg);
+        }
     a = kzalloc(sizeof(*a));
     if (a) {
         a->size = h.image_size + h.bss_size;
@@ -236,6 +352,8 @@ const char *app_open(const char *path)
 
     memcpy(a->name, h.name, sizeof(a->name));
     a->name[sizeof(a->name) - 1] = 0;
+    if (arg && (a->arg = kmalloc(strlen(arg) + 1)))
+        memcpy(a->arg, arg, strlen(arg) + 1);
     a->next = apps;
     apps = a;
     os_status.apps_loaded = (uint32_t)app_count();
@@ -269,6 +387,10 @@ void app_collect(screen_t *const *stack, int depth)
         next = a->next;
         for (int i = 0; i < depth && !used; i++)
             used = stack[i]->app == a;
+        if (!used && thread_count_owned(a))
+            used = true;                /* its threads still run: kept */
+        if (!used && notify_owned(a))
+            used = true;                /* a notification of its is up */
         if (!used)
             unload(a);
     }

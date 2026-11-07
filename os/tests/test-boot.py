@@ -9,8 +9,9 @@ through QTest while the guest runs, and drives it with key presses:
   - the CPU is mostly idle on the home screen;
   - Menu -> Apps lists the card's apps and opens the Stopwatch app, which
     is freed again when closed; Files lists the card, System and Settings
-    open, Settings changes the brightness and the screen timeout, END
-    returns home;
+    open, Settings -> Display changes the brightness (60% -> 80%) and the
+    screen timeout (30 s -> 15 s) through the option picker, END returns
+    home;
   - the screen dims and then goes dark (panel asleep), a key wakes it;
   - the clock governor runs 104 MHz at rest and 26 MHz with the panel
     asleep, and the idle share stays high while dark (the accounting);
@@ -44,7 +45,9 @@ FIELDS = ('magic ticks idle_permille selftest_done selftest_pass pi_wait_ms '
           'sd_code fs_mounted fs_free_kib sd_retries sd_failures fs_write_kib_per_s '
           'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz').split()
 MAGIC = 0x534f3342
-MENU = ['Apps', 'Files', 'Sound', 'FM radio', 'Tools', 'System', 'Settings', 'Power']
+MENU = ['Apps', 'Files', 'Tools', 'System', 'Settings', 'Power']
+SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'USB', 'Storage', 'About']
+DISPLAY = ['Brightness', 'Screen off', 'Keypad light']
 ST_ALL = 0x3f
 FS_PATTERN = bytes((i * 7 + (i >> 8)) & 0xff for i in range(512))
 
@@ -73,7 +76,13 @@ def fsinfo_free(image):
     raise AssertionError('no FSINFO sector in the card image')
 
 
-def card_file(image, path):
+def card_list(image, path):
+    """[(name, is_dir, hidden)] of a folder on the FAT32 card image, in
+    directory order (as the OS's Files lists them, folders first), or None."""
+    return card_file(image, path, listing=True)
+
+
+def card_file(image, path, listing=False):
     """The bytes of a file on the FAT32 card image (8.3 or long names; the
     path like '/b310e-os/log.txt', case-insensitive), or None. Follows the
     cluster chain, so a fragmented log reads whole."""
@@ -104,6 +113,7 @@ def card_file(image, path):
     def find(dirc, name):
         d = chain(dirc)
         lfn = {}
+        entries = []
         for i in range(0, len(d), 32):
             e = d[i:i + 32]
             if e[0] == 0:
@@ -120,14 +130,27 @@ def card_file(image, path):
             names = {short + ('.' + ext if ext else '')}
             if lfn:
                 names.add(''.join(lfn[k] for k in sorted(lfn)).split('\0')[0].split('￿')[0])
+            long_name = ''.join(lfn[k] for k in sorted(lfn)).split('\0')[0].split('￿')[0] if lfn else None
             lfn = {}
+            if name is None:                # a listing
+                if not (e[11] & 0x08) and short not in ('.', '..'):
+                    entries.append((long_name or (short + ('.' + ext if ext else '')),
+                                    bool(e[11] & 0x10), bool(e[11] & 0x06)))
+                continue
             if name.lower() in (n.lower() for n in names):
                 c = int.from_bytes(e[20:22], 'little') << 16 | int.from_bytes(e[26:28], 'little')
                 return c, int.from_bytes(e[28:32], 'little'), bool(e[11] & 0x10)
-        return None
+        return entries if name is None else None
 
     c = root
     parts = [p for p in path.split('/') if p]
+    if listing:
+        for p in parts:
+            hit = find(c, p)
+            if hit is None or not hit[2]:
+                return None
+            c = hit[0]
+        return find(c, None)
     for i, p in enumerate(parts):
         hit = find(c, p)
         if hit is None:
@@ -180,6 +203,7 @@ def main():
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
                     '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
                     '--add', f'b310e-os/apps/stopwatch.app={args.app.resolve()}',
+                    '--add', f'progs/b310e-os.bin={args.image.resolve()}',
                     '--output', str(card)], check=True, capture_output=True)
     # No free count in FSINFO (as on the phone's card, whose first boot took
     # 15 s counting): the OS must count in the background, not at boot.
@@ -290,12 +314,25 @@ def main():
             shot('system')
             press('f2', 'Menu')
             press('down', 'Menu')
-            press('ret', 'Settings')
-            press('ret', 'Settings')         # brightness 60 -> 80, saved
-            press('down', 'Settings')
-            for _ in range(4):               # timeout 30 -> 60 -> 120 -> never -> 15
-                press('ret', 'Settings')
+            s = press('ret', 'Settings')
+            assert s['ui_list_count'] == len(SETTINGS), s
             shot('settings')
+            s = press('ret', 'Display')      # the first category
+            assert s['ui_list_count'] == len(DISPLAY), s
+            shot('settings-display')
+            s = press('ret', 'Brightness')   # the picker, on the current 60%
+            assert s['ui_list_count'] == 10, s
+            press('down', 'Brightness')
+            press('down', 'Brightness')
+            shot('settings-brightness')
+            press('ret', 'Display')          # 80%: applied and saved
+            press('down', 'Display')
+            s = press('ret', 'Screen off')    # on the current 30 s
+            assert s['ui_list_count'] == 7, s
+            press('up', 'Screen off')
+            press('ret', 'Display')          # 15 s
+            shot('settings-display-set')
+            press('f2', 'Settings')
             s = press('esc', 'B310E OS')     # END: home
             assert s['ui_depth'] == 1, s
             # 15 s to dim, 10 s more to dark (QEMU runs ~0.7x real time)
@@ -325,10 +362,32 @@ def main():
             for _ in range(MENU.index('Power')):
                 press('down', 'Menu')
             press('ret', 'Power')
+            # Restart B310E OS: the image from the card, no reset (the boot
+            # menu needs a key at power-on); the OS starts again from zero
+            press('down', 'Power')
+            press('down', 'Power')
+            press('ret', 'Restart')
+            t_before = status(qt, base)['ticks']
+            qmp.hmp('sendkey ret 100')       # Yes
+            wait_for(qt, base, lambda s: s['ticks'] < t_before and s['ui_depth'] == 1 and
+                     string(qt, s['ui_title']) == 'B310E OS', 30, 'no restart')
+            result['restarted_at_ticks'] = status(qt, base)['ticks']
+            time.sleep(1.5)
+            shot('restarted')
+            press('ret', 'Menu')
+            for _ in range(MENU.index('Power')):
+                press('down', 'Menu')
+            press('ret', 'Power')
             press('ret', 'Power off')        # the confirmation
+            press('right', 'Power off')      # No selected: Center keeps it on
+            shot('confirm-no')
+            press('ret', 'Power')
+            press('ret', 'Power off')
+            press('down', 'Power off')       # any direction moves: No,
+            press('up', 'Power off')         # then Yes again
             shot('confirm')
             result['stray_irqs'] = status(qt, base)['stray_irqs']
-            qmp.hmp('sendkey f1 100')        # Yes
+            qmp.hmp('sendkey ret 100')       # Center on Yes
             try:
                 process.wait(timeout=15)
                 result['powered_off'] = True
@@ -350,13 +409,16 @@ def main():
     image = card.read_bytes()
     result['selftest_file'] = FS_PATTERN in image
     result['fsinfo_free_clusters'] = fsinfo_free(image)[1]
-    result['settings_saved'] = b'brightness=80\nscreen_timeout=15\n' in image
+    settings = (card_file(image, '/b310e-os/settings.txt') or b'').decode(errors='replace')
+    result['settings_file'] = settings.splitlines()
+    result['settings_saved'] = ('brightness=80' in result['settings_file'] and
+                                'screen_timeout=15' in result['settings_file'])
     log_text = (card_file(image, '/b310e-os/log.txt') or b'').decode(errors='replace')
     result['card_log'] = log_text.splitlines()[:10]
     (out / 'card-log.txt').write_text(log_text)
     assert result['selftest_file'], 'self-test file not on the card image'
     assert result['fsinfo_free_clusters'] != 0xffffffff, 'free count not written back to FSINFO'
-    assert result['settings_saved'], 'brightness setting not saved'
+    assert result['settings_saved'], ('brightness and timeout not saved', result['settings_file'])
     assert 'self-test card ok' in log_text and 'power off' in log_text, log_text
     assert 'boot: B310E OS built' in log_text and 'counted in' in log_text, log_text
     assert 'app: Stopwatch loaded' in log_text and 'stopwatch: started' in log_text, log_text

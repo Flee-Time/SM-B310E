@@ -457,12 +457,15 @@ bool fm_present(void)
     return probed > 0;
 }
 
+static bool on_speaker;                 /* fm_set_speaker */
+
 int fm_on(void)
 {
     int rc = 0;
 
     if (!fm_present())
         return -1;
+    volume_use(VOL_MUSIC);              /* the radio is listened to as music */
     mutex_lock(&lock, WAIT_FOREVER);
     if (!is_on) {
         if (power_up()) {
@@ -475,16 +478,34 @@ int fm_on(void)
         }
     }
     mutex_unlock(&lock);
-    if (!rc)
+    if (!rc) {
+        audio_force_speaker(on_speaker);
         audio_fm_route(true);
+    }
     return rc;
+}
+
+/* The speaker while the radio plays, even with the headset (the antenna)
+ * plugged in; the jack decides again once it is off. */
+void fm_set_speaker(bool on)
+{
+    on_speaker = on;
+    if (is_on)
+        audio_force_speaker(on);
+}
+
+bool fm_speaker(void)
+{
+    return on_speaker;
 }
 
 void fm_off(void)
 {
     lock_init();
-    if (is_on)
+    if (is_on) {
         audio_fm_route(false);
+        audio_force_speaker(false);
+    }
     mutex_lock(&lock, WAIT_FOREVER);
     if (is_on) {
         muted = true;

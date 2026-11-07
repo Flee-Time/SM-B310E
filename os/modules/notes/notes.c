@@ -2,13 +2,14 @@
  * (NOTE0001.TXT ...), written with the multi-tap editor. The list shows
  * each note's first line, newest first; Center opens one, LSoft deletes.
  *
+ * A loadable app (os/modules); it was built into the OS until 2026-11-07.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-#include "os/fs.h"
-#include "os/kernel.h"
-#include "os/lib.h"
-#include "os/ui.h"
+#include "app.h"
+#include "icons.h"
 
+#define OS_DIR     "/b310e-os"
 #define NOTES_DIR  OS_DIR "/notes"
 #define NOTE_MAX   2000                 /* characters in one note */
 #define MAX_NOTES  64
@@ -52,7 +53,7 @@ static void load(void)
     count = 0;
     stale = false;
     if (!notes)
-        notes = kmalloc(sizeof(*notes) * MAX_NOTES);
+        notes = malloc(sizeof(*notes) * MAX_NOTES);
     if (!notes || f_opendir(&dir, NOTES_DIR) != FR_OK)
         goto done;
     while (count < MAX_NOTES && f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
@@ -104,7 +105,7 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 
 static const icon_t *item_icon(void *ctx, int i)
 {
-    return i == 0 ? &icon_notes : &icon_file;
+    return i == 0 ? ui_icon("notes") : ui_icon("file");
 }
 
 static void saved(const char *text, void *ctx)
@@ -148,7 +149,7 @@ static void open_note(int i)
         ui_text_edit("New note", "", NOTE_MAX, true, saved, NULL);
         return;
     }
-    buf = kmalloc(NOTE_MAX + 1);
+    buf = malloc(NOTE_MAX + 1);
     if (!buf)
         return;
     editing = notes[i - 1].number;
@@ -162,7 +163,7 @@ static void open_note(int i)
         if (buf[k] == '\r')
             buf[k] = ' ';
     ui_text_edit("Note", buf, NOTE_MAX, true, saved, NULL);
-    kfree(buf);
+    free(buf);
 }
 
 static int to_delete;
@@ -182,7 +183,7 @@ static void draw(screen_t *s)
     if (stale)
         load();
     list_draw(&list);
-    if (!fs_info()->mounted)
+    if (!card_mounted())
         gfx_text_centered(UI_BOTTOM - 12, "no card", C_BAD, FONT_SMALL, 1);
 }
 
@@ -193,7 +194,7 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     }
     if (ev->code == KEY_CENTER || (ev->code == KEY_LSOFT && list.sel == 0)) {
-        if (fs_info()->mounted)
+        if (card_mounted())
             open_note(list.sel);
     } else if (ev->code == KEY_LSOFT && list.sel > 0) {
         to_delete = notes[list.sel - 1].number;
@@ -205,7 +206,7 @@ static void key(screen_t *s, const key_event_t *ev)
 
 static void leave(screen_t *s)
 {
-    kfree(notes);
+    free(notes);
     notes = NULL;
     stale = true;
 }
@@ -215,7 +216,7 @@ static screen_t screen = {
     .draw = draw, .key = key, .leave = leave,
 };
 
-screen_t *app_notes(void)
+static screen_t *start(void)
 {
     list.count = 1;
     list.sel = 0;
@@ -225,3 +226,6 @@ screen_t *app_notes(void)
     screen.left = "New";
     return &screen;
 }
+
+static const icon_t app_icon = APP_ICON_NOTES;
+APP("Notes", start, NULL, &app_icon);

@@ -501,8 +501,12 @@ static uint8_t host_in(Sc6530UsbState *s, int n, uint8_t *data, uint16_t *len,
     if (n != 0 && size && f->count < size) {
         return 'N';                     /* packet not loaded (yet) */
     }
-    if (n == 0 && size && !f->count) {
-        return 'N';                     /* armed, next packet not loaded */
+    /* armed, next packet not (fully) loaded: TX start stays set across an
+     * EP0 data stage, so a token that arrives while the driver refills the
+     * FIFO for the next packet must not take the part already written (a
+     * short packet that ended the stage early, test-net.py 2026-11-07) */
+    if (n == 0 && size && f->count < size) {
+        return 'N';
     }
     size = MIN(size, MIN(f->count, (uint32_t)max));
     memcpy(data, f->data, size);

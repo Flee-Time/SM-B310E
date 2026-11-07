@@ -84,6 +84,9 @@ uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
 /* ---- power (arch/sc6530c/power.c) -------------------------------------- */
 void watchdog_stop(void);
 void arch_reboot(void) __attribute__((noreturn));
+/* Copy image to 0x04000000 and enter it, MMU and caches off (from IRAM). */
+void arch_chain(const void *image, uint32_t len) __attribute__((noreturn));
+bool arch_chain_fits(const void *image, uint32_t len);   /* lies above the copy */
 void arch_power_off(void) __attribute__((noreturn));
 
 #endif /* __ASSEMBLER__ */

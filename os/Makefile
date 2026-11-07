@@ -22,10 +22,12 @@ CFLAGS  := $(ARCH_FLAGS) -mthumb -Os -g -std=gnu11 -ffreestanding \
 ASFLAGS := $(ARCH_FLAGS) -marm -g -Iinclude
 LDFLAGS := $(ARCH_FLAGS) -nostdlib -T link/os.ld -Wl,--gc-sections \
            -Wl,-Map,$(BUILD)/b310e-os.map -Wl,--no-warn-rwx-segments
+CFLAGS  += $(EXTRA_CFLAGS)
+LDFLAGS += $(EXTRA_LDFLAGS)
 
 SRCS_S := $(wildcard arch/sc6530c/*.S)
 SRCS_C := $(wildcard arch/sc6530c/*.c kernel/*.c drivers/*.c fs/*.c lib/*.c \
-          loader/*.c ui/*.c apps/*.c) main.c selftest.c
+          loader/*.c ui/*.c apps/*.c net/*.c media/*.c) main.c selftest.c
 OBJS   := $(addprefix $(BUILD)/,$(SRCS_S:.S=.o) $(SRCS_C:.c=.o)) \
           $(BUILD)/fatfs/ff.o $(BUILD)/fatfs/ffunicode.o
 
@@ -35,10 +37,17 @@ PYTHON      ?= python3
 APP_NAMES   := $(notdir $(patsubst %/,%,$(wildcard modules/*/)))
 APPS        := $(APP_NAMES:%=$(BUILD)/modules/%.app)
 APP_CFLAGS  := $(CFLAGS) -Isdk -fno-unwind-tables -fno-asynchronous-unwind-tables
+# --pic-veneer: the linker's ARM/Thumb stubs (libgcc's soft-float and
+# division are ARM code) must be PC-relative, as an app runs wherever the
+# loader puts it; the default stubs load an absolute address mkapp.py does
+# not see (the first calculator app jumped to 0x125d, 2026-11-07).
 APP_LDFLAGS := $(ARCH_FLAGS) -nostdlib -T sdk/app.ld -Wl,-q -Wl,--gc-sections \
-               -Wl,--no-warn-rwx-segments
+               -Wl,--pic-veneer -Wl,--no-warn-rwx-segments
 
 all: $(BUILD)/b310e-os.bin $(APPS)
+
+# Codec modules (media/codecs.mk): $(BUILD)/codecs/<name>.cdc
+include media/codecs.mk
 
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf

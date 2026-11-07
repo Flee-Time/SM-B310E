@@ -23,6 +23,32 @@ void watchdog_stop(void)
     adi_write(WDG_LOCK, ~WDG_KEY);
 }
 
+#define CHAIN_IRAM 0x4000f800u          /* above sd.c's bounce buffer */
+#define CHAIN_TO   0x04000000u          /* where sdboot puts the menu, the menu us */
+
+/* Run another image as if loaded fresh: the boot menu, or this OS again.
+ * The image must lie above the copy's end (the heap does). */
+void arch_chain(const void *image, uint32_t len)
+{
+    extern char chain_tramp[], chain_tramp_end[];
+    void (*tramp)(const void *, uint32_t, uint32_t) = (void (*)(const void *, uint32_t, uint32_t))CHAIN_IRAM;
+
+    arch_irq_save();
+    REG32(INTC_DISABLE) = 0xffffffffu;
+    dma_quiesce();
+    memcpy((void *)CHAIN_IRAM, chain_tramp, (size_t)(chain_tramp_end - chain_tramp));
+    dcache_clean_range((void *)CHAIN_IRAM, (size_t)(chain_tramp_end - chain_tramp));
+    icache_invalidate_all();
+    tramp(image, (len + 3) & ~3u, CHAIN_TO);
+    for (;;)
+        ;
+}
+
+bool arch_chain_fits(const void *image, uint32_t len)
+{
+    return (uintptr_t)image >= CHAIN_TO + len;
+}
+
 void arch_reboot(void)
 {
     arch_irq_save();

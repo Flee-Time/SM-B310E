@@ -133,7 +133,9 @@ int battery_mv(void)
 {
     static int last = -1;
 
-    if (!charger_present()) {
+    /* On the charger the line reads the charging voltage, a little high:
+     * only when there is nothing better (booted on the charger). */
+    if (!charger_present() || last < 0) {
         uint32_t raw = adc_read(5);
 
         if (raw != TIMEOUT)

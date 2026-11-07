@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Turn an app ELF (linked by os/sdk/app.ld with -q) into a B310E OS .app.
+"""Turn an app ELF (linked by os/sdk/app.ld with -q) into a B310E OS .app,
+or a codec ELF (os/media/codecs/codec.ld) into a .cdc (--magic, --info).
 
 The .app is a 48-byte header, the image (address 0 up to __image_end)
 and the offsets of the words the loader must relocate: R_ARM_ABS32 (and
@@ -34,6 +35,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('elf', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--magic', type=lambda v: int(v, 0), default=APP_MAGIC,
+                        help='file magic (codec modules: 0x44433342, os/codec.h)')
+    parser.add_argument('--info', default='app_info',
+                        help='the info block at offset 0 (codec modules: codec_module)')
     args = parser.parse_args()
     elf = args.elf.read_bytes()
     if elf[:4] != b'\x7fELF' or elf[4] != 1 or elf[5] != 1 or \
@@ -67,11 +72,11 @@ def main():
     undefined = [s[0] for s in symbols[1:] if s[3] == SHN_UNDEF and s[0] and s[2] >> 4 != 2]
     if undefined:
         fail('undefined symbols: ' + ', '.join(sorted(set(undefined))))
-    for need in ('app_info', '__image_end', '__bss_end'):
+    for need in (args.info, '__image_end', '__bss_end'):
         if need not in by_name:
             fail(f'missing symbol {need} (link with os/sdk/app.ld)')
-    if by_name['app_info'][1] != 0:
-        fail('app_info is not at offset 0 (use the APP() macro)')
+    if by_name[args.info][1] != 0:
+        fail(f'{args.info} is not at offset 0 (use the APP() or CODEC_MODULE() macro)')
     image_size, bss_end = by_name['__image_end'][1], by_name['__bss_end'][1]
 
     image = bytearray(image_size)
@@ -114,13 +119,13 @@ def main():
 
     major, minor, name_ptr = struct.unpack_from('<HHI', image, 0)
     if name_ptr >= image_size:
-        fail('app_info.name is not in the image')
+        fail(f'{args.info}.name is not in the image')
     name = bytes(image[name_ptr:image.index(b'\0', name_ptr)])
     if len(name) >= 20:
         fail(f'app name {name!r} is longer than 19 bytes')
     reloc_bytes = b''.join(struct.pack('<I', r) for r in sorted(relocs))
     crc = zlib.crc32(bytes(image) + reloc_bytes) & 0xffffffff
-    header = HEADER.pack(APP_MAGIC, major, minor, HEADER.size, image_size,
+    header = HEADER.pack(args.magic, major, minor, HEADER.size, image_size,
                          bss_end - image_size, len(relocs), crc, name)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(header + bytes(image) + reloc_bytes)

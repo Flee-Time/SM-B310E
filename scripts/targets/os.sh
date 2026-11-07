@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the B310E OS (os/) and stage it as sdcard/progs/b310e-os.bin, its
-# loadable apps as sdcard/b310e-os/apps/*.app.
+# loadable apps as sdcard/b310e-os/apps/*.app, its codec modules as
+# sdcard/b310e-os/codecs/*.cdc.
 # FatFs R0.15a (ChaN, 1-clause BSD) is fetched once into build/fatfs and
 # checked against its SHA-256; only the sources are unpacked (the OS has
 # its own os/fs/ffconf.h).
@@ -31,3 +32,12 @@ mkdir -p "$REPO_DIR/sdcard/progs" "$REPO_DIR/sdcard/b310e-os/apps"
 cp -f "$BUILD_DIR/b310e-os.bin" "$REPO_DIR/sdcard/progs/b310e-os.bin"
 cp -f "$BUILD_DIR"/modules/*.app "$REPO_DIR/sdcard/b310e-os/apps/"
 ls -l "$REPO_DIR/sdcard/progs/b310e-os.bin" "$REPO_DIR"/sdcard/b310e-os/apps/*.app
+# codec modules: built from the Rockbox tree (build/rockbox, fetched by the
+# rockbox target) when it is there
+if ls "$BUILD_DIR"/codecs/*.cdc >/dev/null 2>&1; then
+    mkdir -p "$REPO_DIR/sdcard/b310e-os/codecs"
+    cp -f "$BUILD_DIR"/codecs/*.cdc "$REPO_DIR/sdcard/b310e-os/codecs/"
+    ls -l "$REPO_DIR"/sdcard/b310e-os/codecs/*.cdc
+else
+    echo "no codec modules: build the rockbox target first (it fetches build/rockbox)"
+fi

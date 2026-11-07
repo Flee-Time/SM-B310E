@@ -59,4 +59,14 @@ const char *rtc_weekday_name(int wday);             /* "Sun" .. "Sat" */
  * 2026-01-01 00:00 when the RTC cannot be read as a date. */
 uint32_t rtc_fattime(void);
 
+/* The clock kept on the card (/b310e-os/clock.txt): saved at power-off,
+ * before a restart and every 10 minutes; at boot a clock behind the saved
+ * one was cleared (a reset, the stock firmware's 2015-01-01) and gets the
+ * saved time back. The time it was off is lost, not the date. */
+void rtc_save(void);
+/* Set the clock from Unix time (UTC) and the zone in minutes; 0 if set. */
+int rtc_set_unix(uint32_t unix_s, int tz_min);
+uint32_t rtc_unix(int tz_min);              /* the clock as Unix time (UTC) */
+void rtc_restore(void);
+
 #endif

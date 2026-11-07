@@ -322,46 +322,112 @@ void lcd_init(void)
     lcd_update();
 }
 
-/* Copy the back buffer to the frame, start one transfer and return. A new
- * copy and transfer wait (sleeping) until the previous one has had
- * transfer_ms, computed from the bus timing (14 ms for the BOE panel), so
- * the copy never overwrites a frame being sent and a kick is never lost
- * in a running transfer. Until 2026-11-07 the spacing was 8, then 10 ms
- * against a 10.6 ms frame: the phone showed half-drawn frames and screens
- * that lagged until the next redraw. Polling the LCDC's done flag instead
- * cost up to half the CPU (Rockbox found it unreliable); lcd_measure()
- * only times it once for the log. */
 #define TRANSFER_MS transfer_ms
 
 uint16_t lcd_back[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(32)));
 
 static bool asleep;
-static uint32_t last_kick;
+static uint32_t last_kick, last_ms;     /* the last transfer: start, length */
 volatile uint32_t lcd_kicks;            /* transfers started (diagnostics) */
+volatile uint32_t lcd_rows_sent;        /* rows sent, all transfers (diagnostics) */
+volatile uint32_t lcd_skipped;          /* updates with nothing changed */
 static bool kicked;
+static bool send_all = true;            /* the next update sends every row */
+static int band_y = -1, band_h;         /* the panel window and LCM crop set now */
 
+/* Rows y .. y+h-1 as the panel's row window (RASET, then RAMWR) and the
+ * LCDC's LCM crop (lcm_start/lcm_size): the LCDC still reads the whole
+ * frame, and sends the cropped rows (the stock firmware's partial update;
+ * the QEMU model follows it). The bus is idle: the caller waited out the
+ * last transfer. The DBI goes to command mode and back, as lcd_wake()
+ * does on the phone. */
+static void set_band(int y, int h)
+{
+    lcdc_t *lc = LCDC;
+    uint8_t raset[] = {
+        LCM_CMD(0x2b, 4), 0x00, (uint8_t)y, 0x00, (uint8_t)(y + h - 1),
+        LCM_CMD(0x2c, 0),
+        LCM_END
+    };
+
+    if (y == band_y && h == band_h)
+        return;
+    lcm_set_mode(1);
+    lcm_exec(raset);
+    lcm_set_mode(0x28);
+    lc->lcm_start = (uint32_t)y << 16;
+    lc->lcm_size = LCD_WIDTH | (uint32_t)h << 16;
+    band_y = y;
+    band_h = h;
+}
+
+static bool row_same(const uint16_t *a, const uint16_t *b)
+{
+    const uint32_t *p = (const uint32_t *)a, *q = (const uint32_t *)b;
+
+    for (int i = 0; i < LCD_WIDTH / 2; i++)
+        if (p[i] != q[i])
+            return false;
+    return true;
+}
+
+/* Send what changed: the back buffer against the frame last sent (the
+ * LCDC's source still holds it). Nothing changed (the status clock shows
+ * minutes, so 59 seconds in 60): no transfer. Otherwise the band of rows
+ * from the first changed to the last, copied and sent alone; a band of
+ * most of the screen goes whole. A copy and transfer wait (sleeping) until
+ * the previous one has had its time, computed from the bus timing and the
+ * rows sent (14 ms a full frame on the BOE panel), so the copy never
+ * overwrites a frame being sent and a kick is never lost in a running
+ * transfer. Until 2026-11-07 the spacing was 8, then 10 ms against a
+ * 10.6 ms frame: the phone showed half-drawn frames and screens that
+ * lagged until the next redraw. Polling the LCDC's done flag instead cost
+ * up to half the CPU (Rockbox found it unreliable); lcd_measure() only
+ * times it once for the log. */
 void lcd_update(void)
 {
     lcdc_t *lc = LCDC;
+    const uint16_t *frame = (const uint16_t *)FRAME_ADDR;
+    int y0 = 0, y1 = LCD_HEIGHT;
 
     if (asleep)
         return;
+    if (!send_all) {
+        while (y0 < LCD_HEIGHT && row_same(lcd_back + y0 * LCD_WIDTH, frame + y0 * LCD_WIDTH))
+            y0++;
+        if (y0 == LCD_HEIGHT) {
+            lcd_skipped++;
+            return;
+        }
+        while (y1 > y0 && row_same(lcd_back + (y1 - 1) * LCD_WIDTH, frame + (y1 - 1) * LCD_WIDTH))
+            y1--;
+        if (y1 - y0 > LCD_HEIGHT * 3 / 4) {
+            y0 = 0;
+            y1 = LCD_HEIGHT;
+        }
+    }
     if (kicked) {
         uint32_t since = kernel_ticks() - last_kick;
 
-        if (since < TRANSFER_MS) {
+        if (since < last_ms) {
             if (kernel_running() && !arch_in_irq())
-                thread_sleep(TRANSFER_MS - since);
+                thread_sleep(last_ms - since);
             else
-                udelay((TRANSFER_MS - since) * 1000);
+                udelay((last_ms - since) * 1000);
         }
     }
-    memcpy((void *)FRAME_ADDR, lcd_back, sizeof(lcd_back));
-    dcache_clean_range((void *)FRAME_ADDR, sizeof(lcd_back));
+    memcpy((void *)(FRAME_ADDR + y0 * LCD_WIDTH * 2), lcd_back + y0 * LCD_WIDTH,
+           (size_t)(y1 - y0) * LCD_WIDTH * 2);
+    dcache_clean_range((void *)(FRAME_ADDR + y0 * LCD_WIDTH * 2),
+                       (size_t)(y1 - y0) * LCD_WIDTH * 2);
+    set_band(y0, y1 - y0);
+    send_all = false;
     lc->irq.clr |= 1;
     lc->ctrl |= 8;
     lcd_kicks++;
+    lcd_rows_sent += (uint32_t)(y1 - y0);
     last_kick = kernel_ticks();
+    last_ms = TRANSFER_MS * (uint32_t)(y1 - y0) / LCD_HEIGHT + 2;
     kicked = true;
 }
 
@@ -405,9 +471,14 @@ void lcd_wake(void)
     lcm_send(0, 0x29);
     lcm_exec(init_window);              /* a command ends RAMWR */
     lcm_set_mode(0x28);
+    LCDC->lcm_start = 0;                /* the full window init_window set */
+    LCDC->lcm_size = LCD_WIDTH | LCD_HEIGHT << 16;
+    band_y = 0;
+    band_h = LCD_HEIGHT;
     LCDC->ctrl |= 1;
     asleep = false;
     kicked = false;
+    send_all = true;
     lcd_update();
 }
 
@@ -426,6 +497,7 @@ uint32_t lcd_measure(void)
 
     if (asleep)
         return 0;
+    send_all = true;                    /* a whole frame, to time */
     lcd_update();                       /* waits out the previous transfer */
     thread_sleep(TRANSFER_MS + 2);
     s = arch_irq_save();
@@ -436,6 +508,8 @@ uint32_t lcd_measure(void)
     while (timer_cycles() - start < 50u * 26000u) {
         if (lc->irq.raw & 1) {
             us = (timer_cycles() - start) / 26u;
+            if (!us)                    /* seen, under 1 us (QEMU: at once) */
+                us = 1;
             break;
         }
     }
@@ -443,6 +517,7 @@ uint32_t lcd_measure(void)
     lc->irq.en &= ~1u;
     arch_irq_restore(s);
     last_kick = kernel_ticks();
+    last_ms = TRANSFER_MS;
     kicked = true;
     measured_us = us;
     return us;

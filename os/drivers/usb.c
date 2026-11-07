@@ -5,11 +5,14 @@
  * (docs/usb.md): the register map, the stock bring-up, the FIFO byte
  * order, EP0's whole-stage TR_SIZE, one interrupt per bulk packet, the
  * bus resets inferred from the host's requests. Rockbox's USB core is
- * replaced by the few standard and class requests mass storage needs,
- * answered in the interrupt handler.
+ * replaced by the few standard requests a device needs, answered in the
+ * interrupt handler; the function (usb_function_t: mass storage in
+ * usb_msc.c, or the RNDIS network adapter in usb_rndis.c) brings its
+ * descriptors and its class requests.
  *
- * Fixed endpoints with 64-byte FIFOs: EP0 control, EP1 IN, EP2 OUT (mass
- * storage, as in the stock descriptors), EP3 IN and EP4 OUT unused. Each
+ * Fixed endpoints with 64-byte FIFOs: EP0 control, EP1 IN, EP2 OUT (bulk,
+ * as in the stock descriptors), EP3 IN (RNDIS: the interrupt endpoint)
+ * and EP4 OUT unused. Each
  * bulk packet is its own transfer: packet and transfer size set to its
  * length, FIFO filled (words, wire bytes most significant first), TX
  * start; "transfer end" (bit 9) when the host has taken it. OUT: buffer
@@ -95,13 +98,16 @@ struct ep_regs {
 };
 
 static const struct ep_regs ep0_regs = { 0x64, 0x40, 0x68, 0x6c, 0x70, 0x00, 1 << 0 };
+static const struct ep_regs ep0_out_regs = { 0x64, 0x40, 0x68, 0x6c, 0x70, 0x0c, 1 << 1 };
 static const struct ep_regs ep1_regs = { 0xc0, 0xc8, 0xcc, 0xd0, 0xd4, 0x04, 1 << 2 };
 static const struct ep_regs ep2_regs = { 0x100, 0x108, 0x10c, 0x110, 0x114, 0x10, 1 << 3 };
+static const struct ep_regs ep3_regs = { 0x140, 0x148, 0x14c, 0x150, 0x154, 0x08, 1 << 4 };
 
 struct endpoint {
     const struct ep_regs *r;
     uint8_t *buf;
-    int len;                    /* requested */
+    int len;                    /* requested (OUT: may shrink, see out_len) */
+    int cap;                    /* OUT: the buffer's size */
     int done;                   /* moved so far */
     int last;                   /* the packet in flight */
     volatile bool busy;
@@ -112,12 +118,16 @@ struct endpoint {
 };
 
 static struct endpoint ep0 = { .r = &ep0_regs };
+static struct endpoint ep0_out = { .r = &ep0_out_regs };   /* control write data */
 static struct endpoint ep_in = { .r = &ep1_regs };     /* EP1 */
 static struct endpoint ep_out = { .r = &ep2_regs };    /* EP2 */
+static struct endpoint ep_intr = { .r = &ep3_regs };   /* EP3, interrupt IN */
 
 #define R(e, reg) USB_REG((e)->r->reg)
 
 volatile usb_stat_t usb_stat;
+
+static const usb_function_t *fn = &usb_fn_storage;     /* this session's */
 
 static thread_t *session_thread;
 static bool running;
@@ -153,6 +163,23 @@ static const char *const strings[] = {
     NULL, "B310E OS", "B310E OS SD card", "B310E0000001",
 };
 
+static bool msc_request(uint8_t bm, uint8_t rq, uint16_t value,
+                        uint16_t index, uint16_t len);
+
+static bool msc_start(void)
+{
+    return sd_present() && usb_msc_init();
+}
+
+const usb_function_t usb_fn_storage = {
+    .dev_desc = dev_desc, .cfg_desc = cfg_desc, .cfg_len = sizeof(cfg_desc),
+    .strings = strings, .n_strings = ARRAY_SIZE(strings),
+    .request = msc_request,
+    .init = msc_start, .run = usb_msc_run, .exit = usb_msc_exit,
+};
+
+/* The MS OS 1.0 string (index 0xee): "MSFT100" and the vendor code that
+ * the host then asks the function's OS descriptors with. */
 static int string_desc(unsigned idx, uint8_t *b)
 {
     int n = 2;
@@ -164,9 +191,22 @@ static int string_desc(unsigned idx, uint8_t *b)
         b[3] = 0x04;
         return 4;
     }
-    if (idx >= ARRAY_SIZE(strings))
+    if (idx == 0xee && fn->ms_vendor_code) {
+        static const char sig[] = "MSFT100";
+
+        for (const char *p = sig; *p; p++) {
+            b[n++] = (uint8_t)*p;
+            b[n++] = 0;
+        }
+        b[n++] = fn->ms_vendor_code;
+        b[n++] = 0;                     /* bPad */
+        b[0] = (uint8_t)n;              /* 18 */
+        b[1] = 3;
+        return n;
+    }
+    if (idx >= fn->n_strings || !fn->strings[idx])
         return -1;
-    for (const char *p = strings[idx]; *p && n < 62; p++) {
+    for (const char *p = fn->strings[idx]; *p && n < 62; p++) {
         b[n++] = (uint8_t)*p;
         b[n++] = 0;
     }
@@ -264,6 +304,8 @@ static void complete(struct endpoint *e, int result)
     e->result = result ? result : e->done;
     if (e != &ep0)
         sem_post(&e->sem);
+    if (e == &ep_intr && fn->intr_done)
+        fn->intr_done();
 }
 
 static void cancel(struct endpoint *e)
@@ -327,10 +369,19 @@ static void out_done(struct endpoint *e)
         return;
     e->armed = false;
     n = (int)(R(e, ctrl) & EPCTRL_COUNT);
-    if (n > e->len - e->done)
-        n = e->len - e->done;
+    if (n > e->cap - e->done)
+        n = e->cap - e->done;
     fifo_read(e, e->buf + e->done, n);
     e->done += n;
+    /* The function may know the transfer's length from its first bytes
+     * (RNDIS: MessageLength), so one that ends on a packet boundary
+     * completes without waiting for a zero-length packet. */
+    if (e == &ep_out && fn->out_len) {
+        int want = fn->out_len(e->buf, e->done);
+
+        if (want > 0 && want < e->len)
+            e->len = want > e->done ? want : e->done;
+    }
     if (e->done < e->len && n == USB_PKT) {
         out_arm(e);
         return;
@@ -371,6 +422,7 @@ static void bulk_cancel_sw(void)
     gen++;
     cancel(&ep_in);
     cancel(&ep_out);
+    cancel(&ep_intr);
 }
 
 static void bulk_cancel(void)
@@ -379,17 +431,31 @@ static void bulk_cancel(void)
     R(&ep_in, ctrl) &= ~(EPCTRL_TX | EPCTRL_RX);
     R(&ep_out, ctrl) &= ~(EPCTRL_TX | EPCTRL_RX);
     USB_REG(USB_FIFO_RST) |= ep_in.r->fifo_rst | ep_out.r->fifo_rst;
+    if (fn->use_ep3) {
+        R(&ep_intr, ctrl) &= ~EPCTRL_TX;
+        USB_REG(USB_FIFO_RST) |= ep_intr.r->fifo_rst;
+    }
+}
+
+/* the function's endpoints, as stock vcom init programs EP1-EP4 */
+static void eps_program(void)
+{
+    ep_program(&ep_in);
+    ep_program(&ep_out);
+    if (fn->use_ep3)
+        ep_program(&ep_intr);
 }
 
 static void configure(void)
 {
     bulk_cancel();
-    ep_program(&ep_in);
-    ep_program(&ep_out);
+    eps_program();
     halted_in = halted_out = false;
     configured = true;
     set_config_seen = true;
     usb_stat.state = USB_CONNECTED;
+    if (fn->reset)
+        fn->reset();
     sem_post(&cfg_sem);
 }
 
@@ -402,13 +468,14 @@ static void bus_reset_seen(void)
     usb_stat.bus_resets++;
     bulk_cancel();
     cancel(&ep0);
+    cancel(&ep0_out);
     ep0_program();
-    if (configured) {
-        ep_program(&ep_in);
-        ep_program(&ep_out);
-    }
+    if (configured)
+        eps_program();
     halted_in = halted_out = false;
     set_config_seen = false;
+    if (fn->reset)
+        fn->reset();
     sem_post(&cfg_sem);
 }
 
@@ -417,7 +484,50 @@ static void bus_reset_seen(void)
 static void ep0_stall(void)
 {
     cancel(&ep0);
+    cancel(&ep0_out);
     USB_REG(USB_EP0_CTRL) |= EPCTRL_STALL;
+}
+
+/* The data stage of a control write (mass storage has none): one packet
+ * at a time into buf, as a bulk OUT. TR_SIZE holds the whole stage, as
+ * for a control read; the controller completes the status stage. A
+ * packet's length is what is left of the stage (at most 64), not
+ * CTRL[10:0], as in the Rockbox port's EP0 receive. Not yet run on the
+ * phone: mass storage never needed it. */
+static void ep0_recv_arm(void)
+{
+    uint32_t ctrl = USB_REG(USB_EP0_CTRL);
+
+    ep0_out.armed = true;
+    USB_REG(USB_EP0_CTRL) = (ctrl & ~EPCTRL_SIZE_MASK) | EPCTRL_SIZE(USB_PKT) |
+                            EPCTRL_RX;
+}
+
+void usb_ep0_recv(void *buf, int len)
+{
+    ep0_out.buf = buf;
+    ep0_out.len = ep0_out.cap = len;
+    ep0_out.done = 0;
+    ep0_out.busy = true;
+    USB_REG(USB_EP0_TRSIZE) = (uint32_t)len;
+    ep0_recv_arm();
+}
+
+static void ep0_out_packet(void)
+{
+    struct endpoint *e = &ep0_out;
+    int n = e->len - e->done < USB_PKT ? e->len - e->done : USB_PKT;
+
+    e->armed = false;
+    fifo_read(e, e->buf + e->done, n);
+    e->done += n;
+    if (e->done < e->len) {
+        ep0_recv_arm();
+        return;
+    }
+    e->busy = false;
+    if (fn->ep0_out_done)
+        fn->ep0_out_done(e->done);
 }
 
 /* the data stage of a control read; the controller ends it at TR_SIZE
@@ -435,6 +545,11 @@ static void ep0_send(const void *data, int len)
     ep0.busy = true;
     USB_REG(USB_EP0_TRSIZE) = (uint32_t)len;
     in_packet(&ep0);
+}
+
+void usb_ep0_send(const void *data, int len)
+{
+    ep0_send(data, len);
 }
 
 static void halt_set(bool in)
@@ -503,11 +618,11 @@ static void standard_request(uint8_t bm, uint8_t rq, uint16_t value,
             break;
         switch (value >> 8) {
         case 1:
-            ep0_send(dev_desc, sizeof(dev_desc));
+            ep0_send(fn->dev_desc, 18);
             return;
         case 2:
             if ((value & 0xff) == 0) {
-                ep0_send(cfg_desc, sizeof(cfg_desc));
+                ep0_send(fn->cfg_desc, fn->cfg_len);
                 return;
             }
             break;
@@ -548,6 +663,7 @@ static void ep0_setup(void)
     } req;
     uint8_t bm, rq;
     uint16_t value, index;
+    bool ms_os;
 
     req.w[0] = USB_REG(USB_SETUP_LO);
     req.w[1] = USB_REG(USB_SETUP_HI);
@@ -563,6 +679,7 @@ static void ep0_setup(void)
     /* a SETUP ends the previous request, stall included */
     USB_REG(USB_EP0_CTRL) &= ~(EPCTRL_STALL | EPCTRL_TX | EPCTRL_RX);
     cancel(&ep0);
+    cancel(&ep0_out);
 
     if (bm == 0x00 && rq == 5) {
         /* not seen on the phone (the controller answers it), but a host
@@ -582,7 +699,10 @@ static void ep0_setup(void)
             configure();
         return;
     }
-    if (!set_config_seen && ((bm & 0x60) != 0 || (bm & 0x1f) != 0)) {
+    /* The MS OS descriptor request comes during enumeration, before the
+     * configuration: it implies nothing. */
+    ms_os = fn->ms_vendor_code && (bm & 0x60) == 0x40 && rq == fn->ms_vendor_code;
+    if (!set_config_seen && !ms_os && ((bm & 0x60) != 0 || (bm & 0x1f) != 0)) {
         /* the first request for an interface or endpoint, or a class
          * request: the host has configured the device */
         config_value = 1;
@@ -592,11 +712,19 @@ static void ep0_setup(void)
         standard_request(bm, rq, value, index);
         return;
     }
+    if (fn->request && fn->request(bm, rq, value, index, ep0_wlength))
+        return;
+    ep0_stall();
+}
+
+static bool msc_request(uint8_t bm, uint8_t rq, uint16_t value,
+                        uint16_t index, uint16_t len)
+{
     if ((bm & 0x7f) == 0x21 && index == 0) {    /* class, interface 0 */
         if (bm == 0xa1 && rq == 0xfe) {         /* GET_MAX_LUN */
             ((uint8_t *)ep0_buf)[0] = 0;
             ep0_send(ep0_buf, 1);
-            return;
+            return true;
         }
         if (bm == 0x21 && rq == 0xff) {         /* Bulk-Only mass storage reset */
             bulk_cancel();
@@ -605,10 +733,10 @@ static void ep0_setup(void)
             halted_in = halted_out = false;
             usb_msc_reset();
             sem_post(&cfg_sem);
-            return;
+            return true;
         }
     }
-    ep0_stall();
+    return false;
 }
 
 /* ---- interrupt --------------------------------------------------------- */
@@ -623,7 +751,9 @@ static void udc_service(void)
         /* completions first: a SETUP ends the request they belong to. The
          * TX bit is not consulted (it stays set until TR_SIZE on the
          * phone); bit 0 alone steps, as the boot loader does. */
-        if ((s & (EPINT_XACT | EPINT_DONE)) && ep0.busy)
+        if ((s & (EPINT_XACT | EPINT_DONE)) && ep0_out.busy && ep0_out.armed)
+            ep0_out_packet();
+        else if ((s & (EPINT_XACT | EPINT_DONE)) && ep0.busy)
             in_done(&ep0);
         if (s & EPINT_SETUP)
             ep0_setup();
@@ -640,9 +770,13 @@ static void udc_service(void)
         if (s & EPINT_DONE)
             out_done(&ep_out);
     }
-    if (sts & (1u << 11))               /* EP3, EP4: unused */
-        USB_REG(0x154) = USB_REG(0x150);
-    if (sts & (1u << 12))
+    if (sts & (1u << 11)) {             /* EP3: the function's interrupt IN */
+        s = USB_REG(0x150);
+        USB_REG(0x154) = s;
+        if (fn->use_ep3 && (s & EPINT_DONE))
+            in_done(&ep_intr);
+    }
+    if (sts & (1u << 12))               /* EP4: unused */
         USB_REG(0x194) = USB_REG(0x190);
     USB_REG(USB_INT_CLR) = 0x7f;
 }
@@ -747,7 +881,7 @@ int usb_bulk_start_out(uint32_t g, void *buf, int len)
         return USB_EABORT;
     }
     e->buf = buf;
-    e->len = len;
+    e->len = e->cap = len;
     e->done = 0;
     e->result = 0;
     e->armed = false;
@@ -784,6 +918,56 @@ int usb_bulk_wait_in(void)
 int usb_bulk_wait_out(void)
 {
     return bulk_wait(&ep_out);
+}
+
+/* A send the host does not take within ms is taken back (the packet in
+ * the FIFO is dropped): a network adapter the host has stopped reading. */
+int usb_bulk_wait_in_ms(uint32_t ms)
+{
+    struct endpoint *e = &ep_in;
+    uint32_t t0 = kernel_ticks(), i;
+    int r;
+
+    while (e->busy && !stop_req && kernel_ticks() - t0 < ms)
+        wait_on(&e->sem, 10);
+    i = arch_irq_save();
+    if (e->busy) {
+        e->busy = false;
+        e->result = USB_EABORT;
+        R(e, ctrl) &= ~EPCTRL_TX;
+        USB_REG(USB_FIFO_RST) |= e->r->fifo_rst;
+    }
+    r = e->result;
+    arch_irq_restore(i);
+    return r;
+}
+
+/* Interrupt IN (EP3), from the interrupt handler or a thread; the
+ * function's intr_done() runs when the host has taken it. */
+int usb_intr_send(const void *buf, int len)
+{
+    struct endpoint *e = &ep_intr;
+    uint32_t i = arch_irq_save();
+
+    if (!fn->use_ep3 || !configured || stop_req || e->busy || len <= 0 ||
+        len > USB_PKT) {
+        arch_irq_restore(i);
+        return USB_EABORT;
+    }
+    e->buf = (uint8_t *)buf;
+    e->len = len;
+    e->done = 0;
+    e->zlp = false;
+    e->result = 0;
+    e->busy = true;
+    in_packet(e);
+    arch_irq_restore(i);
+    return 0;
+}
+
+bool usb_intr_busy(void)
+{
+    return ep_intr.busy;
 }
 
 void usb_bulk_halt(bool in)
@@ -859,10 +1043,10 @@ static void session(void *arg)
     if (!stop_req) {
         hw_connect();
         usb_stat.state = USB_WAITING;
-        usb_msc_run();
+        fn->run();
     }
     hw_stop();
-    usb_msc_exit();
+    fn->exit();
     usb_stat.state = USB_OFF;
     sem_post(&exited);
     thread_exit();
@@ -894,14 +1078,21 @@ bool usb_running(void)
 
 int usb_start(void)
 {
+    return usb_start_function(USB_FN_STORAGE);
+}
+
+int usb_start_function(int which)
+{
     uint32_t sessions = usb_stat.sessions;
 
     if (running)
         return 0;
-    if (!sd_present() || !usb_msc_init())
+    fn = which == USB_FN_NETWORK ? &usb_fn_network : &usb_fn_storage;
+    if (!fn->init())
         return -1;
     memset((void *)&usb_stat, 0, sizeof(usb_stat));
     usb_stat.sessions = sessions + 1;
+    usb_stat.function = (uint32_t)which;
     usb_stat.state = USB_STARTING;
     stop_req = false;
     polled = false;
@@ -910,15 +1101,16 @@ int usb_start(void)
     halted_in = halted_out = false;
     config_value = 0;
     idle_count = 0;
-    ep0.busy = ep_in.busy = ep_out.busy = false;
+    ep0.busy = ep0_out.busy = ep_in.busy = ep_out.busy = ep_intr.busy = false;
     sem_init(&ep_in.sem, 0);
     sem_init(&ep_out.sem, 0);
+    sem_init(&ep_intr.sem, 0);
     sem_init(&cfg_sem, 0);
     sem_init(&exited, 0);
     gen++;
     session_thread = thread_create("usb", PRIO_HIGH, 4096, session, NULL);
     if (!session_thread) {
-        usb_msc_exit();
+        fn->exit();
         usb_stat.state = USB_OFF;
         return -1;
     }

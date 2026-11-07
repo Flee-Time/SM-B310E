@@ -239,8 +239,23 @@ arch_thread_trampoline:
 undef_entry:    FAULT 0, 4
     .type   pabort_entry, %function
 pabort_entry:   FAULT 1, 4
+/* A data abort inside probe_read/probe_write (arch/sc6530c/probe.S)
+ * returns to its fixup address instead, in the mode and state it came
+ * from (ARM, interrupts off): the shell's peek and poke. */
     .type   dabort_entry, %function
-dabort_entry:   FAULT 2, 8
+dabort_entry:
+    stmfd   sp!, {r0, r1}
+    ldr     r0, =probe_fixup
+    ldr     r1, [r0]
+    cmp     r1, #0
+    beq     1f
+    mov     lr, r1
+    mov     r1, #0
+    str     r1, [r0]
+    ldmfd   sp!, {r0, r1}
+    movs    pc, lr
+1:  ldmfd   sp!, {r0, r1}
+    FAULT 2, 8
     .type   fiq_entry, %function
 fiq_entry:      FAULT 3, 4
     .ltorg
@@ -344,3 +359,36 @@ udelay:
     .align  2
 boot_control:                   /* the CP15 control register at entry */
     .space  4
+
+/* ---- chain to another image (arch_chain, power.c) -----------------------
+ * Copied to IRAM and run there: r0 the image, r1 its bytes (a multiple of
+ * 4), r2 where it goes and is entered (0x04000000, over this OS). The
+ * D-cache is written back, MMU and caches go off (the map is identity, so
+ * the addresses stay), then the copy and the jump: the state sdboot leaves
+ * for the boot menu and the boot menu leaves for us. Interrupts are off. */
+    .section .text.chain, "ax", %progbits
+    .global chain_tramp
+    .global chain_tramp_end
+chain_tramp:
+    mov     r4, r2
+1:  mrc     p15, 0, APSR_nzcv, c7, c14, 3   /* test, clean and invalidate */
+    bne     1b
+    mov     r3, #0
+    mcr     p15, 0, r3, c7, c10, 4      /* drain the write buffer */
+    mrc     p15, 0, r3, c1, c0, 0
+    bic     r3, r3, #0x1000             /* I */
+    bic     r3, r3, #0x0005             /* C, M */
+    mcr     p15, 0, r3, c1, c0, 0
+    nop
+    nop
+    mov     r3, #0
+    mcr     p15, 0, r3, c7, c5, 0       /* invalidate the I-cache */
+    mcr     p15, 0, r3, c8, c7, 0       /* and the TLBs */
+2:  ldr     r3, [r0], #4
+    str     r3, [r2], #4
+    subs    r1, r1, #4
+    bgt     2b
+    mov     r3, #0
+    mcr     p15, 0, r3, c7, c10, 4
+    mov     pc, r4
+chain_tramp_end:

@@ -161,10 +161,62 @@ static int reply_in(cmd_t *c, const void *data, uint32_t len, uint32_t alloc)
     return ST_GOOD;
 }
 
+/* ---- the profile: every 5 s with reads, a log line of where the time
+ * went (a Windows mount reads the whole FAT, 7.4 MB on a 16 GB card) */
+static struct {
+    uint32_t since, reads, blocks, small;   /* reads under 8 KB */
+    uint32_t ahead;                         /* reads that began read ahead */
+    uint32_t card_ms, usb_ms, host_ms;      /* in sd_read, waiting for USB IN, for the next CBW */
+} prof;
+
+static void prof_report(uint32_t now)
+{
+    uint32_t span = now - prof.since;
+
+    if (span < 5000)
+        return;
+    if (prof.reads)
+        klog("usb: msc %lu ms: %lu reads (%lu under 8 KB, %lu read ahead), %lu KB, "
+             "%lu KB/s; card %lu ms, usb %lu ms, host %lu ms", (unsigned long)span,
+             (unsigned long)prof.reads, (unsigned long)prof.small, (unsigned long)prof.ahead,
+             (unsigned long)(prof.blocks / 2),
+             (unsigned long)(prof.blocks / 2 * 1000 / span), (unsigned long)prof.card_ms,
+             (unsigned long)prof.usb_ms, (unsigned long)prof.host_ms);
+    memset(&prof, 0, sizeof(prof));
+    prof.since = now;
+}
+
+/* Read-ahead: a READ's next chunk, read after its status went out (while
+ * the host prepares the next command: a FAT scan reads on and on). Valid
+ * for the next command only. */
+static uint32_t ahead_lba, ahead_want;
+static unsigned ahead_n;
+static bool ahead_ok, ahead_asked;
+
+static void read_ahead(void)
+{
+    uint32_t t = kernel_ticks();
+
+    ahead_ok = false;
+    if (!ahead_asked)
+        return;
+    ahead_asked = false;
+    ahead_n = CHUNK_BLOCKS;
+    if (ahead_want >= sd_sectors())
+        return;
+    if (ahead_n > sd_sectors() - ahead_want)
+        ahead_n = sd_sectors() - ahead_want;
+    ahead_ok = sd_read(ahead_want, buf[0], ahead_n) == 0;
+    ahead_lba = ahead_want;
+    prof.card_ms += kernel_ticks() - t;
+}
+
 static int cmd_read(cmd_t *c, uint32_t lba, uint32_t count)
 {
+    uint32_t t;
     uint32_t bytes = count * 512, sent = 0;
     unsigned n, m, cur = 0;
+    bool ahead = ahead_ok && lba == ahead_lba;
 
     if (!ready())
         return fail(SK_NOT_READY, ASC_NO_MEDIUM);
@@ -174,10 +226,21 @@ static int cmd_read(cmd_t *c, uint32_t lba, uint32_t count)
         return ST_GOOD;
     if (!c->host_in || bytes > c->host_len)
         return ST_PHASE;
+    prof.reads++;
+    prof.blocks += count;
+    if (count < 16)
+        prof.small++;
     n = count < CHUNK_BLOCKS ? count : CHUNK_BLOCKS;
-    if (sd_read(lba, buf[0], n)) {
-        usb_stat.sd_errors++;
-        return fail(SK_MEDIUM_ERROR, ASC_READ_ERROR);
+    ahead_ok = false;
+    if (ahead && n <= ahead_n) {        /* the first chunk is in buf[0] already */
+        prof.ahead++;
+    } else {
+        t = kernel_ticks();
+        if (sd_read(lba, buf[0], n)) {
+            usb_stat.sd_errors++;
+            return fail(SK_MEDIUM_ERROR, ASC_READ_ERROR);
+        }
+        prof.card_ms += kernel_ticks() - t;
     }
     for (;;) {
         int rd = 0;
@@ -187,15 +250,22 @@ static int cmd_read(cmd_t *c, uint32_t lba, uint32_t count)
         count -= n;
         lba += n;
         m = count < CHUNK_BLOCKS ? count : CHUNK_BLOCKS;
+        t = kernel_ticks();
         if (m)                          /* while the interrupt sends */
             rd = sd_read(lba, buf[cur ^ 1], m);
+        prof.card_ms += kernel_ticks() - t;
+        t = kernel_ticks();
         if (usb_bulk_wait_in() < 0)
             return ST_ABORT;
+        prof.usb_ms += kernel_ticks() - t;
         sent += n * 512;
         c->residue = c->host_len - sent;
         activity(USB_READING, n * 512);
-        if (!m)
+        if (!m) {
+            ahead_want = lba;           /* where the next one would start */
+            ahead_asked = true;
             return ST_GOOD;
+        }
         if (rd) {
             usb_stat.sd_errors++;
             return fail(SK_MEDIUM_ERROR, ASC_READ_ERROR);
@@ -401,7 +471,13 @@ void usb_msc_run(void)
                 continue;
         }
         armed = false;
-        n = usb_bulk_wait_out();
+        {
+            uint32_t t = kernel_ticks();
+
+            n = usb_bulk_wait_out();
+            prof.host_ms += kernel_ticks() - t;
+            prof_report(kernel_ticks());
+        }
         if (n < 0 || !usb_gen_valid(gen))
             continue;
         if (n != 31 || le32(b) != CBW_SIG || b[14] < 1 || b[14] > 16) {
@@ -418,6 +494,8 @@ void usb_msc_run(void)
         c.data_ended = false;
         c.cb = b + 15;
         usb_stat.commands++;
+        if (c.cb[0] != 0x28)
+            ahead_ok = ahead_asked = false; /* a write may change what was read */
         st = (b[13] & 0x0f) ? fail(SK_ILLEGAL_REQUEST, ASC_LUN) : execute(&c);
         if (st == ST_ABORT)
             continue;
@@ -453,5 +531,6 @@ void usb_msc_run(void)
         armed = usb_bulk_start_out(gen, cbw, sizeof(cbw)) == 0;
         if (usb_bulk_wait_in() < 0)
             continue;
+        read_ahead();                   /* while the host sends the next CBW */
     }
 }

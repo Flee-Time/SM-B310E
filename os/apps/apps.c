@@ -13,6 +13,8 @@ typedef struct {
     char file[48];                      /* name in APP_DIR */
     char name[20];
     uint32_t kib;
+    bool has_icon;
+    icon_t icon;                        /* the app's own (API 2.3) */
 } item_t;
 
 static item_t *items;
@@ -51,6 +53,7 @@ static void scan(void)
         snprintf(it->file, sizeof(it->file), "%s", fi.fname);
         snprintf(it->name, sizeof(it->name), "%s", h.name[0] ? h.name : fi.fname);
         it->kib = (h.image_size + h.bss_size + 1023) / 1024;
+        it->has_icon = app_peek_icon(path, &h, &it->icon);
     }
     f_closedir(&d);
 }
@@ -101,7 +104,7 @@ static screen_t screen = {
 
 static const icon_t *app_icon(void *ctx, int i)
 {
-    return &icon_apps;
+    return items[i].has_icon ? &items[i].icon : &icon_apps;
 }
 
 screen_t *app_apps(void)

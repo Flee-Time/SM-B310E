@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "app.h"
+#include "icons.h"
 
 #define MAX_LAPS 6
 
@@ -102,4 +103,5 @@ static screen_t *start(void)
     return &screen;
 }
 
-APP("Stopwatch", start, NULL);
+static const icon_t app_icon = APP_ICON_CLOCK;
+APP("Stopwatch", start, NULL, &app_icon);

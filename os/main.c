@@ -15,8 +15,7 @@ extern char __heap_start[], __heap_end[];
 
 volatile os_status_t os_status __attribute__((used));
 
-void selftest_kernel(void);
-void selftest_card(void);
+void selftest_start(void);
 void selftest_show_card(void);
 
 static void main_thread(void *arg)
@@ -40,10 +39,7 @@ static void main_thread(void *arg)
              us ? "" : " (none)");
     }
     selftest_show_card();
-    selftest_kernel();
-    selftest_card();
-    console_flush();
-    thread_sleep(800);
+    selftest_start();                   /* behind the UI */
     ui_run(app_home());                 /* this thread becomes the UI */
 }
 

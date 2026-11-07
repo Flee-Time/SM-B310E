@@ -5,6 +5,10 @@ sources). Rockbox now drives it as a mass-storage device exposing the SD card.
 Mass storage was chosen over MTP. Rockbox's USB stack ships it, every desktop
 OS mounts it without drivers, and the stock firmware uses the same class.
 
+The B310E OS (`os/`) runs the same controller driver with its own small
+stack: mass storage, or an RNDIS network adapter with a development shell
+(the last section, "B310E OS: the USB network").
+
 **Status (2026-11-02):** mass storage works on the phone: the card mounts on
 Windows, and unplugging is clean. The fourth build fixes the HID failure
 and the resets behind the slowness found on hardware; that build is
@@ -480,6 +484,49 @@ share stays in the log's rate line (`irq N%`). A long write with the log
 on would confirm the write speed per setting; the log's RAM buffer would
 then need to be larger, or the bulk lines fewer.
 
+### B310E OS: the mount profile and multi-packet PIO (2026-11-07)
+
+The OS's mass storage (`os/drivers/usb_msc.c`) logs where each 5 s of
+reads went: the card, the USB send, and the wait for the host's next
+command (`usb: msc ...`). It also reads the next 16 KB once a READ's
+status has gone out.
+
+**What a Windows mount reads:** the whole FAT. On the 16 GB card with
+8 KB clusters that is 1.94 million entries, 7.4 MiB, read in 64 KB
+READ(10) commands one after another. The FAT32 driver reads all of it at
+mount, so only a faster send or bigger clusters help (32 KB clusters: a
+FAT a quarter the size).
+
+**Hardware report 17:**
+
+| Each 5 s of the FAT read | |
+|---|---|
+| Card (sd_read) | ~290 ms, 6% (the card reads 3.5 MB/s) |
+| Waiting for the host's next CBW | ~0 ms |
+| Sending bulk IN | ~4,850 ms, 94% |
+| Read-ahead hits | 16 of 17 commands |
+| Throughput | 203–221 KB/s, about 7.7 MB in 37 s |
+
+An A/B build then switched every 5 s between one packet per transfer and
+one transfer of the whole read, TR_SIZE = the length with the next packet
+loaded at each packet's XACT (bit 0). That is how EP0 runs and how stock
+programs bulk IN for DMA. It worked on the phone: no stall, the data
+correct, the mount completed. But both modes gave the same rate:
+
+| Mode | KB/s per 5 s window |
+|---|---|
+| multi-packet | 210, 221, 213, 203 |
+| single-packet | 210, 213, 207 |
+
+So the transfer mode does not matter either. As in reports 9 and 16, the
+host paces the reads: with one 64-byte FIFO the device answers "not
+ready" after every packet, and the PC's controller retries about 300 µs
+later. The multi-packet mode was taken out again. Left to try:
+- through a USB 2.0 hub, whose transaction translator retries full-speed
+  NAKs itself;
+- whether the FIFO takes a second packet ahead (a read-only test);
+- bigger clusters on the card.
+
 ### Twelfth build: DMA exactly as stock EP1 does it
 
 A second pass over the stock bulk routines found two differences from the
@@ -857,3 +904,197 @@ driver matches that interpretation, not the silicon.
 4. Also try a wall charger: Rockbox should keep playing and charge.
 5. Report what Windows shows (Device Manager error, "device descriptor
    request failed", nothing at all), and whether a charger alone behaves.
+
+## B310E OS: the USB network (RNDIS) and the development shell
+
+**Status (2026-11-07): works in QEMU (`os/tests/test-net.py`); not yet
+run on the phone, nor against a real Windows or Linux host.** How to use
+it: `os/README.md`, "USB network and the shell".
+
+The OS's USB stack (`os/drivers/usb.c`, the Rockbox port's controller
+driver, all PIO) now carries one *function* at a time
+(`usb_function_t` in `usb_internal.h`): mass storage (`usb_msc.c`,
+unchanged: same descriptors, same requests, same register traffic, and
+`test-usb.py` passes as before) or the network adapter
+(`usb_rndis.c`). Tools → USB asks which.
+
+### Descriptors and why Windows binds without a driver
+
+| Item | Value |
+|---|---|
+| Device | 1209:0001, **bcdDevice 2.00**, class EF/02/01 (interface associations), serial `B310E0000002` |
+| Association | interfaces 0-1, function class E0/01/03 |
+| Interface 0 (control) | class E0/01/03; CDC header, call management, ACM (no capabilities), union 0→1; EP3 IN interrupt, 8 bytes, every 1 ms |
+| Interface 1 (data) | class 0A; EP1 IN bulk, EP2 OUT bulk, 64 bytes |
+| MS OS 1.0 | string 0xee = "MSFT100", vendor code 0x42; extended compat ID (vendor request, wIndex 4): interface 0 = `RNDIS` / `5162001`; extended properties (wIndex 5) stalled |
+
+Windows 10/11's in-box `rndiscmp.inf` ("Remote NDIS Compatible Device")
+matches `USB\MS_COMP_RNDIS&MS_SUBCOMP_5162001`, the compatible ID the MS
+OS 1.0 descriptor produces; this is what the task asked for and what
+Linux's configfs RNDIS function offers Windows (`os_desc`, "RNDIS" /
+"5162001"). The class triple E0/01/03 is the second, independent way:
+the same .inf matches `USB\Class_E0&SubClass_01&Prot_03` (Android's USB
+tethering uses it and binds on Windows 10 without a driver), and Linux's
+`rndis_host` binds E0/01/03 ("RNDIS for tethering devices"); it needs
+the union descriptor and an interrupt IN endpoint of at least 8 bytes.
+With two interfaces the device is composite, so Windows loads usbccgp;
+the association keeps both interfaces in one function.
+
+Windows asks for string 0xee once per VID/PID/bcdDevice and remembers the
+answer under `HKLM\SYSTEM\CurrentControlSet\Control\usbflags`. Mass
+storage (1209:0001 rev 1.00) never had the string, so the network
+function has its own bcdDevice; its own serial number gives it its own
+device instance, so the storage driver bound to rev 1.00 never sees it.
+
+The vendor request for the compat ID comes during enumeration, before
+the configuration. The driver infers "configured" from the first class,
+vendor, interface or endpoint request (the controller swallows
+SET_CONFIGURATION); the MS OS request is excluded from that. The first
+RNDIS message (a class request) configures the device.
+
+### RNDIS
+
+**Control:** SEND_ENCAPSULATED_COMMAND (class OUT, interface 0) carries a
+message; it is answered in the interrupt handler into one of four
+response slots, and an 8-byte RESPONSE_AVAILABLE (`01 00 00 00 00 00 00
+00`) goes out on EP3; GET_ENCAPSULATED_RESPONSE returns the oldest answer
+(a single zero byte when there is none). Handled: INITIALIZE (version
+1.0, connectionless, 802.3, one packet per transfer, MaxTransferSize
+1600), HALT, QUERY, SET, RESET (pending answers dropped, addressing
+kept), KEEPALIVE. QUERY answers 32 OIDs: the general ones Windows and
+Linux ask (supported list, hardware status, media, frame size 1500,
+link speed 12 Mbit/s, block and total sizes, vendor, packet filter,
+lookahead, MAC options, connect status: connected, send packets, driver
+version, physical medium: unspecified, the five counters) and the 802.3
+ones (permanent and current address: the PC's MAC 02:b3:10:e0:00:02,
+multicast list, list size, MAC options, the three error counters).
+Others: NOT_SUPPORTED. SET: the packet filter (the data path opens when
+it is nonzero, as RNDIS requires), multicast list, lookahead, config
+parameter, network layer addresses are accepted. An answer whose length
+is a multiple of 64 gets 4 bytes more, so no control read needs a
+zero-length packet.
+
+**Data:** one RNDIS_PACKET_MSG (44-byte header, then the Ethernet frame)
+per bulk transfer each way, PIO, one interrupt per 64-byte packet as for
+mass storage. The phone pads its own transfer by one byte when it would
+end on a packet boundary (no zero-length packet). For the PC's transfers
+the driver reads MessageLength from the first packet (`out_len`), so a
+frame that ends on a packet boundary completes whether the PC then sends
+a zero-length packet (Windows), a one-byte pad (Linux pads) or nothing;
+the pad or ZLP then arrives as a transfer of its own and is dropped.
+
+**New for this controller, not yet run on the phone:**
+- **The data stage of a control write** (SEND_ENCAPSULATED_COMMAND). Mass
+  storage never had one. The driver arms EP0 OUT (packet size 64, buffer
+  ready) in the SETUP interrupt, sets TR_SIZE to the whole stage as for
+  a control read, and takes one packet per bit 0/9; the length of each is
+  what is left of the stage (at most 64), as the Rockbox port's EP0
+  receive does, not CTRL[10:0]. The controller completes the status
+  stage. If RNDIS never initializes on the phone, this is the first
+  suspect; the card log's `usb: network session ... ended` line counts
+  the RNDIS messages that arrived.
+- **EP3 IN** as an interrupt endpoint: programmed like the bulk ones
+  (type bits clear, as stock vcom init does for EP1-EP4); at full speed
+  an interrupt IN transaction is the same as a bulk one on the wire.
+- **EP0 replies longer than 64 bytes**: the 75-byte configuration
+  descriptor and the 152-byte OID list. The driver follows the boot
+  loader (0xa1a4: TR_SIZE the whole stage, the next packet on bit 0), as
+  for Rockbox's HID report descriptor; on the phone that one never got
+  past its first packet before the fix (hardware report 6), and HID was
+  dropped before the fix could be tried there.
+
+### The QEMU model: a race in multi-packet EP0 replies
+
+The model kept EP0's TX start set for the whole data stage (as the phone
+does) and answered an IN token with whatever the EP0 FIFO held. A token
+that QEMU's main loop handled while the guest was refilling the FIFO
+for the next packet got a short packet, which ends the stage early: one
+`test-net.py` run read 144 of the OID list's 152 bytes. The model now
+answers "not ready" until the packet size set in CTRL is in the FIFO
+(`emulator/qemu/machine/hw/misc/sc6530_usb.c`, `host_in`). The shared
+QEMU build (`build/qemu`) has not been rebuilt with it; until it is,
+`test-net.py` repeats a multi-packet read that came back short and
+reports how often (`model_races_retried`; 0 in the runs so far).
+`test-usb.py` never reads more than 64 bytes on EP0.
+
+### The TCP/IP stack: our own, not lwIP
+
+Our own (`os/net/ip.c`, `tcp.c`; about 7 KB of code), because:
+- the link is one cable to one PC: no routing, no fragments, no
+  congestion, one subnet, one DHCP lease; most of lwIP is not needed;
+- lwIP has no DHCP server in its core, so that would have been ours
+  anyway, as would the glue to our kernel (its sys_arch, timers, pbufs
+  over our buffers);
+- the build needs no second download (FatFs already is one), and the
+  whole network adds about 20 KB to a 104 KB image;
+- one mutex and one thread that sends every frame are easy to reason
+  about next to USB's PIO and the card.
+
+The price: the TCP is minimal. Passive opens only (listeners), four
+connections, an 8 KB receive window (no window scaling) and an 8 KB
+send ring per connection, MSS 1460 (or the PC's), PSH on every segment,
+no Nagle and no delayed ACKs, no congestion control, go-back-N on a
+timeout (500 ms, above Windows' 200 ms delayed ACK, doubling to 4 s; reset after 10 tries; the timer is not
+adapted to the round trip), an ACK beyond the resend point accepted, out
+of order segments dropped (the PC resends), zero-window probes, a 2 s
+TIME_WAIT and a 15 s FIN_WAIT_2. ARP learns the PC from its own frames.
+IPv6 and everything not for 192.168.7.1 is dropped.
+
+Threads: the USB session thread (priority 20) receives transfers into
+eight 1600-byte buffers and queues them; "net" (14) runs the stack under
+one mutex and sends every frame (a send the PC does not take within
+300 ms is dropped); "netsh" (11) accepts; each shell session is a thread
+of its own (10, 8 KB stack), below the UI (12), so the phone stays
+responsive while files move. The CPU clock is held at 104 MHz or more
+while the screen is open, as for mass storage.
+
+### The shell
+
+Commands, ports and the helper: `os/README.md`. The shell keeps the
+card mounted and uses FatFs from its own thread (FatFs is reentrant
+here). `run` and `close` happen in the UI thread (`ui_call()` in
+`os/ui/ui.c`, woken by a code-0 key event, `keypad_inject()`): the
+screens above "USB network" are popped, then `app_open()`. The live log
+is an 8 KB ring that `klog()` now also writes (`klog_read()` in
+`os/fs/fs.c`), so it works with or without a card.
+
+peek and poke go through `probe_read`/`probe_write`
+(`os/arch/sc6530c/probe.S`): with interrupts off they leave a fixup
+address that the data abort vector (`cpu.S`) returns to instead of
+showing the fault screen. QEMU, like the phone presumably, returns 0 for
+unmapped bus space rather than aborting, so the test uses the MMU's
+unmapped pages next to the high vectors (0xfff00000) for a real abort.
+The address check, not the abort handler, is what protects against the
+real danger, a clock-gated block that stalls the bus.
+
+### Test (`os/tests/test-net.py`)
+
+The script is the PC over the model's chardev: enumeration as Windows
+does it (MS OS string and compat ID included), RNDIS INITIALIZE, QUERY,
+SET (one message over two EP0 packets), KEEPALIVE, RESET, every answer
+after its notification on EP3; then its own little IPv4 stack: DHCP with
+a NAK for a foreign address, ARP, ping of 56, 1400 and 1472 bytes, TCP
+to both shell ports (every command group, 96 KB up and down with CRCs,
+an app uploaded and run while a second session follows the log, the
+telnet negotiation and echo, a lost segment retransmitted, a frame whose
+transfer ends on a packet boundary), the helper script's own calls, and
+unplugging. Afterwards the files are checked in the card image.
+
+| Item (QEMU, 2026-11-07) | Result |
+|---|---|
+| Enumeration, RNDIS, DHCP, ARP, ping | pass (ping 12-40 ms: one socket round trip per 64-byte packet) |
+| Upload / download, 96 KB | about 55 KB/s / 100-290 KB/s (the model's packet-per-round-trip pace, not the phone's) |
+| Every other OS test | pass, `test-usb.py` with and without `--irq-stuck` |
+
+### Hardware test (to do)
+
+1. Build, copy `build/os/b310e-os.bin` to the card's `progs/`, boot it.
+2. Tools → USB → Network, plug into a Windows PC. Expected: "Remote NDIS
+   Compatible Device" under Network adapters, the phone's screen
+   "Online" and "PC 192.168.7.2".
+3. `ping 192.168.7.1`, `telnet 192.168.7.1`, `python
+   os\tools\b310e-shell.py run build\os\modules\stopwatch.app`.
+4. The same on Linux (`dmesg` should show `rndis_host`).
+5. If Windows shows the device with a yellow mark or "RNDIS" never
+   comes up, the card log's `usb: network session` line (messages,
+   frames, setups, resets) tells how far it got.

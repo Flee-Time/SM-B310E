@@ -26,6 +26,7 @@
 static mutex_t lock;
 static bool lock_ready;
 static bool initialized, speaker_enabled, fm_routed, recording_on;
+static bool force_speaker;              /* the speaker even with headphones in */
 static uint16_t rec_mic_path;           /* +0x64 bits: 0xc0 phone, 0x0c headset */
 static bool rec_fm_mix;
 static unsigned current_rate = 44100;
@@ -261,7 +262,7 @@ static void codec_init(void)
     adi_update(CODEC + 0x98, 0xf0, 0);
     adi_update(0x82001290, 1, 0);       /* ARM analog ownership gate */
     initialized = true;
-    select_output(!audio_headphones());
+    select_output(force_speaker || !audio_headphones());
 
     REG32(VBC_BASE + 0x10) = (REG32(VBC_BASE + 0x10) & ~0xff00u) |
                              ((VBC_FRAMES - 1) << 8);
@@ -379,10 +380,28 @@ bool audio_speaker(void)
 /* Follow the jack (the headset tick calls it). */
 static void follow_jack(bool inserted)
 {
+    bool speaker = force_speaker || !inserted;
+
     enter();
-    if (initialized && speaker_enabled == inserted)
-        select_output(!inserted);
+    if (initialized && speaker_enabled != speaker)
+        select_output(speaker);
     leave();
+}
+
+/* The speaker even with headphones plugged in (the FM radio: the headset
+ * cable stays in as the antenna); off: the output follows the jack again. */
+void audio_force_speaker(bool on)
+{
+    enter();
+    force_speaker = on;
+    if (initialized && speaker_enabled != (on || !audio_headphones()))
+        select_output(on || !audio_headphones());
+    leave();
+}
+
+bool audio_forced_speaker(void)
+{
+    return force_speaker;
 }
 
 /* ---- recording routes --------------------------------------------------- */

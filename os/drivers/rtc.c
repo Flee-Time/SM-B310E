@@ -38,6 +38,7 @@
 #include "os/arch.h"
 #include "os/fs.h"
 #include "os/kernel.h"
+#include "os/lib.h"
 #include "os/rtc.h"
 
 #define RTC_BASE      0x82001600u
@@ -289,6 +290,69 @@ int rtc_set(const rtc_datetime_t *t)
          (unsigned long)(got % 86400u / 3600u),
          (unsigned long)(got % 3600u / 60u), (unsigned long)(got % 60u));
     return result;
+}
+
+#define UNIX_1980  315532800u              /* 1980-01-01 00:00:00 UTC */
+
+int rtc_set_unix(uint32_t unix_s, int tz_min)
+{
+    int64_t local = (int64_t)unix_s + (int64_t)tz_min * 60 - UNIX_1980;
+    rtc_datetime_t t;
+
+    if (local < 0 || !rtc_date_from_days((uint32_t)(local / 86400), &t))
+        return RTC_EINVAL;
+    t.hour = (uint8_t)(local % 86400 / 3600);
+    t.min = (uint8_t)(local % 3600 / 60);
+    t.sec = (uint8_t)(local % 60);
+    return rtc_set(&t);
+}
+
+uint32_t rtc_unix(int tz_min)
+{
+    return (uint32_t)((int64_t)now_seconds() + UNIX_1980 - (int64_t)tz_min * 60);
+}
+
+#define CLOCK_FILE OS_DIR "/clock.txt"
+
+void rtc_save(void)
+{
+    char buf[16];
+    FIL f;
+    UINT n;
+    int len = snprintf(buf, sizeof(buf), "%lu\n", (unsigned long)now_seconds());
+
+    if (f_open(&f, CLOCK_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
+        f_write(&f, buf, (UINT)len, &n);
+        f_close(&f);
+    }
+}
+
+void rtc_restore(void)
+{
+    char buf[16];
+    FIL f;
+    UINT n = 0;
+    uint32_t saved = 0, now = now_seconds();
+    rtc_datetime_t t;
+
+    if (f_open(&f, CLOCK_FILE, FA_READ) != FR_OK)
+        return;
+    f_read(&f, buf, sizeof(buf) - 1, &n);
+    f_close(&f);
+    buf[n] = 0;
+    for (char *p = buf; *p >= '0' && *p <= '9'; p++)
+        saved = saved * 10 + (uint32_t)(*p - '0');
+    if (!saved || now + 60 >= saved)
+        return;                         /* the clock kept going */
+    if (!rtc_date_from_days(saved / 86400u, &t))
+        return;
+    t.hour = (uint8_t)(saved % 86400u / 3600u);
+    t.min = (uint8_t)(saved % 3600u / 60u);
+    t.sec = (uint8_t)(saved % 60u);
+    klog("rtc: day %lu at boot is behind the saved day %lu: the clock was cleared, "
+         "set back to the saved time", (unsigned long)(now / 86400u),
+         (unsigned long)(saved / 86400u));
+    rtc_set(&t);
 }
 
 uint32_t rtc_fattime(void)

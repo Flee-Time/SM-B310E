@@ -1,6 +1,8 @@
 /* B310E OS — boot self-test: kernel objects (sleep, semaphore, priority
- * inheritance, queue, heap) and a card write and read, reported on the
- * console and in os_status.
+ * inheritance, queue, heap) and a card write and read, reported in
+ * os_status and the card log. It runs in its own thread behind the UI
+ * (selftest_start), so Home comes up at once: until 2026-11-07 it ran
+ * on the boot console first and the UI waited for it and 0.8 s more.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
@@ -26,10 +28,8 @@ static void report(uint32_t bit, bool ok, const char *what)
     os_status.selftest_done |= bit;
     if (ok)
         os_status.selftest_pass |= bit;
-    console_set_color(ok ? RGB(120, 255, 120) : RGB(255, 90, 90), RGB(0, 0, 0));
-    console_printf("%s %s\n", ok ? "ok  " : "FAIL", what);
-    console_set_color(RGB(255, 255, 255), RGB(0, 0, 0));
-    console_flush();
+    else
+        klog("self-test FAIL: %s", what);   /* the screen is the UI's now */
 }
 
 static sem_t ping, pong;
@@ -189,6 +189,19 @@ void selftest_card(void)
     klog("self-test card %s, %lu KB/s write, %lu KB/s read", ok ? "ok" : "FAIL",
          (unsigned long)os_status.fs_write_kib_per_s,
          (unsigned long)os_status.fs_read_kib_per_s);
+}
+
+static void selftest_main(void *arg)
+{
+    selftest_kernel();
+    selftest_card();
+}
+
+/* Above the UI's priority, so the timing checks (sleep within 2 ms, the
+ * inheritance wait) hold; the tests mostly sleep. */
+void selftest_start(void)
+{
+    thread_create("selftest", PRIO_NORMAL + 1, 2048, selftest_main, NULL);
 }
 
 void selftest_show_card(void)

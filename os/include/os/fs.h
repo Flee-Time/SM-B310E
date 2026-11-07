@@ -10,6 +10,7 @@
 #define OS_FS_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "ff.h"
 
@@ -43,5 +44,9 @@ int fs_resume(void);            /* mount again; 0 when mounted */
 /* The card log: lines with uptime, buffered in RAM, written once a
  * second by a low-priority thread (OS_LOG; rotated past 256 KB). */
 void klog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* The last 8 KB of the log in RAM, card or not (the network shell's
+ * "log"): bytes since *pos, which moves on; klog_pos() is the end now. */
+size_t klog_read(uint32_t *pos, char *buf, size_t n);
+uint32_t klog_pos(void);
 
 #endif

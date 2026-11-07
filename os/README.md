@@ -40,6 +40,170 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 - **More apps** (2026-11-07, in QEMU; not yet on the phone): Calculator,
   Alarm (one daily alarm with snooze; rings while the OS runs), Notes
   (multi-tap text entry), and rename / delete in Files.
+- **Optimisations and more apps** (2026-11-07, in QEMU; not yet on the
+  phone):
+  - Partial LCD updates: only the rows that changed are sent, and nothing
+    when nothing changed (idle Home: no transfers instead of one full
+    frame a second; a menu move about 45 rows instead of 160).
+  - Home is drawn 47 ms after start (it was about 1.4 s): the self-test
+    runs behind the UI instead of before it, and the 0.8 s boot pause is
+    gone.
+  - END and the headset button by the analog EIC's interrupt when it works
+    (checked at boot, see the card log's "end key:" line): no polling
+    while nothing is held and no headset is in. QEMU does not model it and
+    polls. Registers from the stock firmware: `docs/eic-interrupt.md`.
+  - Music (Sound → Music, or Center on a .wav or .m3u in Files): a WAV
+    player with a playlist, shuffle, playing on in the background; copy
+    and paste in Files.
+  - Size: LTO saved only 2.6 KB, so the build stays as it is (102 KB
+    image; 3.8 MB heap free).
+  - System has pages (Left/Right): overview, CPU, threads, storage,
+    power; load, clock, interrupts, card I/O, heap and display rows are
+    graphs over the last 30 s (`gfx_graph`).
+  - Text that ran into other text or out of its box: the DSP screen's
+    result, System's rows, Sound's rows; `ui_kv` lays out label/value
+    rows so the label gives way. `os/tests/ui-tour.py` shows every screen.
+  - The Calculator and Notes are .app modules (in Apps; copy
+    `build/os/modules/*.app` to `/b310e-os/apps/` on the card). Apps link
+    with `--pic-veneer`: the linker's ARM/Thumb stubs to libgcc loaded an
+    absolute address that was never relocated, and the first calculator
+    app jumped to 0x125d.
+- **USB network and the development shell** (2026-11-07, in QEMU only;
+  not yet on the phone): Tools → USB → Network makes the phone a USB
+  network adapter (RNDIS, no driver to install on Windows 10/11 or Linux)
+  with a small TCP/IP stack of our own, a DHCP server and a shell on
+  192.168.7.1 (telnet port 23, raw port 2323): threads, CPU, memory, the
+  live log, peek/poke, files, upload and download, and "run" for an app
+  built on the PC (live coding). See "USB network and the shell" below.
+- **Apps, not screens** (2026-11-07, in QEMU; not yet on the phone): Music,
+  Recorder, FM radio and Alarm are .app modules; the OS keeps the services
+  under them (the play queue, WAV playing and recording, the alarms and
+  their ringing screen), so music, recording and alarms go on whatever is
+  open. App API 2.2 reaches the hardware and the services through
+  wrappers: threads and sync, the clock, torch, vibrator (timed),
+  backlight, keypad light, charge state, raw analog-die registers, volume
+  by category, PCM playback and recording, WAV, the playback engine, the
+  play queue, album art, the FM radio, alarms, apps by name.
+- **Settings** by category, each a page whose rows open an option picker;
+  **volume by category** (music, apps, alarm, calls; 0 to 10, each saved,
+  heard at once) and **tactile feedback** (a short buzz a key, off to
+  strong) instead of one volume and Tools' vibrator test. The status bar
+  lost its SD.
+- **USB in the background** (Settings -> USB, "Mode": charge
+  only, storage or network): the plug starts it with no screen, unplugging
+  or a charger with no PC stops it; USB or NET in the status bar. Storage
+  sessions run at 208 MHz and log their rate (a Windows mount reads about
+  7 MB at some 350 KB/s: the next step is faster packets).
+- **Quick panel and notifications** (2026-11-07, in QEMU; not yet on the
+  phone): Center held on Home or the Menu opens the quick panel: the
+  notifications (newest first, up to three buttons each: Left/Right picks,
+  Center presses), then the volumes, tactile feedback, brightness and the
+  torch. Apps post their own (API 2.4, `os/notify.h`); an app with one up
+  stays loaded, so its buttons work with no screen of it open. Music posts
+  the track with |< Pause >| and its progress, FM radio the station with
+  Mute and Turn off, background USB a Stop. Their icons show in the status
+  bar. A short Center press on Home and the Menu acts when it is let go.
+- **The clock** (2026-11-07, in QEMU; not yet on the phone): the phone's
+  RTC read 2015-01-01 after some restarts: a reset (the watchdog's, power
+  off) clears it, the stock firmware then boots (no key held) and sets its
+  default date. Now:
+  - **network time**: on the USB network the phone asks the PC by SNTP
+    (UDP 123) as soon as it sees it, every 10 s until it answers, then
+    hourly; Settings -> Date & time -> Time zone (NTP is UTC) and From
+    network. The PC must answer NTP: on Windows the Windows Time service's
+    NTP server (off by default), or `python os/tools/b310e-shell.py time`
+    sets the phone's clock from the PC's through the shell (`date`);
+  - **the clock on the card** (`/b310e-os/clock.txt`, at power-off, before
+    a restart, every 10 minutes): a clock behind it at boot was cleared
+    and gets the saved time back (the time it was off is lost);
+  - the battery reads once at boot on the charger (it showed -1 until
+    unplugged).
+- **Restarts without a reset** (2026-11-07; B310E OS restart checked in
+  QEMU, the boot menu not yet on the phone): sdboot in NOR starts the boot
+  menu only with a key held at power-on, so a watchdog reset came back to
+  the stock firmware. Power -> Restart to menu now reads
+  `/fpbin/fpmain.bin`, Restart B310E OS `/progs/b310e-os.bin`, and the OS
+  stops its services, copies the image to 0x04000000 from IRAM with the
+  MMU and caches off and enters it (`arch_chain`), as sdboot and the menu
+  do. Opening Music the first time draws its screen before reading
+  /music, and the tactile buzz ends on time however long a key's work
+  takes (a thread of its own).
+- **USB storage mount** (2026-11-07, not yet measured on the phone): the
+  7.4 MB Windows reads before the drive shows is the whole FAT (16 GB at
+  8 KB clusters: 1.94 million entries); its FAT32 driver reads all of it at
+  mount. The reads now continue ahead: after a READ's status the next
+  16 KB is read while the host prepares its next command, and every 5 s
+  of reads the log says where the time went (`usb: msc ...`: reads, card,
+  USB and host milliseconds). On the phone: 94% sending at ~210 KB/s, the
+  card 6%, the read-ahead hitting 16 of 17 reads; one transfer of many
+  packets instead of one per packet was no faster (docs/usb.md, report 17:
+  the PC paces the packets). A playing track no longer stops as "taken"
+  (a race between the DMA interrupt's fill time and the engine's check,
+  about one QEMU run in ten).
+- **Fixes from the phone** (2026-11-07, in QEMU; not yet on the phone):
+  - The kernel's time could jump 165 s: the timer's countdown can reload
+    before its "period ended" bit shows, the time then read one period
+    behind, and the unsigned tick count made that 2^32 cycles ahead (a
+    playing track then looked "taken", test-codecs failed one run in
+    three). The timer now sees a reload by the count going up, and the
+    tick count never steps backwards (`arch/sc6530c/timer.c`,
+    `kernel/thread.c`).
+  - Album art showed only after leaving Now playing and coming back: the
+    screen asked for the cover ten times a second and each request
+    restarted the decode, so it never finished while the screen was open.
+    A request for the cover already asked for now does nothing, the
+    worker redraws the screen when it is done (`ui_refresh`, from any
+    thread), and covers are read 8 KB at a time on sector boundaries
+    (one multi-block card command instead of one per 512 bytes).
+  - Yes / No dialogs: any direction moves between the buttons, Center
+    picks the selected one (the soft keys still answer directly).
+  - The idle load see-sawed between 1.6% and 3.1% on System: a screen's
+    tick now falls on the clock's second, so they draw once together; a
+    load sample across a wake from deep idle no longer reads 100%.
+  - Apps have their own icons in the Apps list (API 2.3: `app_info_t`
+    gained `icon`, read from the file; `sdk/icons.h` has the OS's icons
+    as initializers).
+  - FM radio: Options -> Use speaker plays the radio on the speaker with
+    the headset (the antenna) still in; saved with the station.
+- **The USB network works with Windows** (on the phone, 2026-11-07): Windows
+  binds RNDIS but did not ask our DHCP server and kept a 169.254 address,
+  so the phone answers at 169.254.7.1 as well (`net_self` follows the
+  address the PC uses); ping 1 ms, telnet and the raw shell work, and
+  `tools/b310e-shell.py` tries both addresses.
+- **Album art** (2026-11-07, in QEMU; not yet on the phone): Now playing
+  shows the track's cover, 60 x 60, from the tags (ID3v2 APIC, FLAC
+  PICTURE, MP4 covr, the Vorbis/Opus METADATA_BLOCK_PICTURE comment) or
+  beside the file (cover, folder, front, album, AlbumArtSmall, AlbumArt
+  .jpg/.jpeg/.png). Our own decoders (`media/art.c`): baseline JPEG with a
+  reduced inverse DCT (a 1000 px cover decoded at 1/8, its DC terms only),
+  progressive JPEG from its DC scans, PNG with our own inflate; a low
+  thread does it, so the music and the UI never wait. `tests/test-art.py`
+  checks every source in a screenshot; on the PC, against PIL's own
+  downscale, the mean error is 3 to 10 levels in 255.
+- **Compressed audio** (2026-11-07, in QEMU; not yet on the phone): a
+  playback engine with a decoder thread (`media/`, `include/os/media.h`)
+  and Rockbox's decoders as codec modules on the card
+  (`/b310e-os/codecs/*.cdc`): MP3/MP2/MP1 (libmad), Ogg Vorbis (Tremor),
+  FLAC, Opus, AAC and HE-AAC in .m4a (libfaad), Apple Lossless, WavPack
+  and WAV (libpcm: PCM, float, ADPCMs). Music plays them all: playlists
+  of every playable file, a now-playing screen (title, artist, album from
+  ID3v1/v2, Vorbis comments, MP4 and APE tags; a position bar, elapsed and
+  total time), pause, seek, shuffle and repeat. `tests/test-codecs.py`
+  plays a tone in every format and checks each in QEMU's output
+  (frequency, order, level within 0.5 dB of the WAV one). The image grew
+  by 11 KB (119 KB); the codecs stay on the card.
+  CPU, in QEMU only (QEMU is not cycle-accurate; the phone is still to
+  measure): with `-icount` the decoder thread runs 16.0 M instructions a
+  second of audio for a 128 kbit/s 44.1 kHz stereo MP3 (noise and chords,
+  so the encoder uses all its bits). At an assumed 1.5 to 2 cycles an
+  instruction (ARM926EJ-S from cached PSRAM, no IRAM) that is 24 to 32
+  MHz, a quarter to a third of 104 MHz, so the governor should keep 104
+  MHz (it goes to 208 MHz above 70%); in QEMU it stayed at 104 MHz, no
+  underruns. The 3 s tones (M instructions a second of audio, same
+  method): WAV 5.2, FLAC 8.9 (88.2 kHz, resampled: 20), Vorbis 13.5,
+  MP3 15, MP2 14, ALAC 17, AAC 20, WavPack 21, Opus 26. On the phone the
+  card log has it for every track: `media: <file> done after N ms of
+  audio: decoder N ms CPU in N ms (N%), N underruns, N MHz`.
 
 | Part | What there is |
 |---|---|
@@ -49,11 +213,15 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 | Drivers | LCD (ST7735S, panel sleep), backlight and keypad light, vibrator, torch (GPIO7), keypad matrix and END, text console, SD card (multi-block, IRAM bounce, retries), battery voltage and charger, RTC calendar: date and time, set from the UI (`drivers/rtc.c`), SIM reader: activation, ATR, T=0 APDUs, both slots (`drivers/sim.c`) (`drivers/`) |
 | Audio | codec power, speaker or headphones by the jack, volume, PCM playback and mono recording on DMA through the VBC, phone mic, 4-pole headset mic, FM line-in; headset detection and its three buttons (KEY_HS_*); all on the ARM, no DSP (`drivers/audio.c`, `pcm.c`, `include/os/audio.h`) |
 | USB storage | the card as a USB mass storage device (1209:0001): our own small stack on the Rockbox port's controller driver, all PIO (DMA once wrote stale FIFO words into the card's root directory); Bulk-Only Transport, the SCSI commands Windows and Linux use, two 16 KB buffers; the OS lets go of the card meanwhile (`fs_suspend`) (`drivers/usb.c`, `usb_msc.c`, `apps/usb.c`) |
+| USB network | the other USB function (one at a time): an RNDIS network adapter (1209:0001 rev 2.00), MS OS 1.0 descriptors and class E0/01/03 so Windows and Linux bind their own drivers; IPv4, ARP, ICMP echo, UDP, a DHCP server, TCP (`drivers/usb_rndis.c`, `net/ip.c`, `net/tcp.c`); the development shell (`net/shell.c`, `tools/b310e-shell.py`) |
 | FM radio | RTC6211N on I2C 1, tune, seek, RSSI, stereo, mute, the stock bank tables read from the phone's own NOR when their CRC matches (`drivers/fm.c`) |
 | Storage | FatFs R0.15a on the card: long names, UTF-8, thread-safe; a card log in `/b310e-os/log.txt` (`fs/`) |
 | UI | screen stack with status, title and soft-key bars; card lists with icons, switches and details, floating dialogs, text view, a multi-tap text editor (`ui/textedit.c`), key repeat, screen timeout: dim, then LEDs off and panel asleep; drawing with alpha blending, anti-aliased text (Montserrat 9/10/12/24 px) and rounded shapes (`ui/`) |
-| Apps | built in: Home (clock, date), Menu, Apps, Files (rename, delete), Sound (tone, WAV player, mic recorder), FM radio (with recording), Tools (torch, vibrator, SIM cards, USB storage, Calculator, Alarm, Notes), System, Settings (brightness, screen timeout, CPU speed, Date & time), Power (`apps/`) |
-| Loadable apps | `.app` files from `/b310e-os/apps/`, relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); first app: Stopwatch (`modules/stopwatch/`) |
+| Apps | built in: Home (clock, date), Menu (Apps, Files, Tools, System, Settings, Power), Files (rename, delete, copy and paste; music and .m3u open the Music app), Tools (torch, SIM cards, USB: storage or network, DSP boot), System (pages with graphs), Settings (categories: Display, Sound & touch, Power, Date & time, USB, Storage, About; option pickers), Power (`apps/`) |
+| Playback engine | a decoder thread below the UI (priority 11) runs a codec module per format and fills a 64K-frame PCM ring (1.49 s at 44.1 kHz) that the audio DMA interrupt plays; play, stop, pause, seek, position, duration, tags; format by extension, or by the first bytes; rates without a codec clock (88.2, 64 kHz ...) resampled linearly to 44.1 or 48 kHz; 16-bit stereo out, no DSP (`media/`, `include/os/media.h`) |
+| Album art | the cover from the tags or the folder, decoded small in a low thread: baseline and progressive JPEG (reduced IDCT), PNG (own inflate); 60 x 60 on Now playing (`media/art.c`, `include/os/art.h`) |
+| Codec modules | Rockbox's decoders and metadata parsers built unchanged against a shim (`media/rockbox/`) into `.cdc` files with the app layout (`include/os/codec.h`, `media/codecs/`): mpa (MP3/MP2/MP1, libmad), vorbis (Tremor), flac, opus, aac (libfaad, LC and HE), alac, wavpack, wav (libpcm); all fixed point, ARM mode with Rockbox's ARM assembly |
+| Loadable apps | `.app` files from `/b310e-os/apps/`, relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); opened from Apps or by name with an argument (`app_launch`, `app_arg`), kept loaded while a thread of theirs runs; apps: Music, Recorder, FM radio, Alarm, Calculator, Notes, Stopwatch (`modules/`). API 2.4: the hardware and every service through wrappers (see below), an icon of their own, notifications |
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
 | Faults | undefined instruction and aborts show the registers on screen |
 
@@ -65,13 +233,94 @@ moves (Up/Down repeat when held, Left/Right page), END goes home, END
 held for 2 s powers off, 0 held for 1 s switches the torch (with a short
 buzz). The first key after the screen went dark only wakes it. A 4-pole
 headset's buttons arrive as KEY_HS_CENTER, KEY_HS_PLUS, KEY_HS_MINUS
-(Sound and FM radio: start/stop or mute, volume).
+(Music, Recorder and FM radio: start/stop or mute, volume).
 
 **On the card** the OS writes only into `/b310e-os/`: `log.txt` (rotated
-to `log-old.txt` past 256 KB), `settings.txt` and `selftest.bin`
-(32 KB, rewritten at every boot). It loads apps from `/b310e-os/apps/`;
+to `log-old.txt` past 256 KB), `settings.txt`, `alarms.txt`, the album
+art cache in `cache/art/` and `selftest.bin` (32 KB, rewritten at every
+boot). It loads apps from `/b310e-os/apps/` and codec modules from
+`/b310e-os/codecs/`;
 recordings go to `/b310e-os/rec/RECnnnn.WAV` (16 kHz mono from the mic,
 32 kHz from the radio).
+
+## USB network and the shell
+
+Tools → USB → **Network**, then plug the phone into a PC. The screen
+shows the state ("Online" once the PC has enabled the adapter), the
+addresses and the frames moved; Back, END or unplugging stops it (and
+closes an app the shell started). The card stays mounted.
+
+**Addresses:** the phone is 192.168.7.1; its DHCP server gives the PC
+192.168.7.2/24, with no router and no DNS, so the PC's own internet is
+left alone.
+
+**Windows 10 and 11:** nothing to install. The adapter appears as
+"Remote NDIS Compatible Device" (Device Manager → Network adapters; the
+network is "Unidentified", which is fine). Then
+`telnet 192.168.7.1` (Windows' telnet client is an optional feature:
+`dism /online /Enable-Feature /FeatureName:TelnetClient`), PuTTY (Telnet,
+192.168.7.1, port 23) or `python os\tools\b310e-shell.py`. Windows
+remembers per VID/PID/revision whether a device has MS OS descriptors;
+should the adapter ever bind wrongly after a descriptor change, delete
+`HKLM\SYSTEM\CurrentControlSet\Control\usbflags\120900010200` and the
+device in Device Manager, then plug in again.
+
+**Linux:** `rndis_host` binds it (an `usb0` or `enx...` interface);
+NetworkManager runs DHCP by itself. Without NetworkManager:
+`sudo dhclient usb0` (or `sudo ip addr add 192.168.7.2/24 dev usb0; sudo
+ip link set usb0 up`). Then `telnet 192.168.7.1`, `nc 192.168.7.1 2323`
+or `python3 os/tools/b310e-shell.py`.
+
+**Ports:** 23 is for telnet clients (the phone echoes and edits the line:
+Backspace, Ctrl-C, Ctrl-D); 2323 is plain bytes for `nc` and scripts and
+the only one that carries binary transfers. Three sessions at a time.
+
+| Command | What it does |
+|---|---|
+| `help`, `info` | the commands; build, uptime, CPU clock and load, battery, card, network counters |
+| `ps`, `top` | every thread: priority (`^` raised by inheritance), state, CPU share over half a second, stack used of its size; `top` repeats until a key |
+| `mem` | the memory map (image, heap, frame, MMU table) and the heap: free, largest block, pieces |
+| `log [N]`, `log -f` | the last N lines of the card log (kept in RAM, 8 KB), or follow it live until a key |
+| `peek ADDR [N] [b\|h\|w] [-f]`, `poke ADDR VAL [b\|h\|w] [-f]` | read or write memory and registers (below) |
+| `adi ADDR [VAL]` | an analog-die register through the ADI mailbox |
+| `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `mv`, `df`, `crc` | files on the card (absolute or from the current folder) |
+| `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565 (raw port; the helper does these) |
+| `run APP`, `close` | close the app that is open, load and start APP (a path, or a name in `/b310e-os/apps/`); close it |
+| `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
+| `reboot` | restart to the boot menu |
+| `echo`, `exit` | |
+
+**peek and poke** are allowed without `-f` on: the PSRAM (read and
+write), IRAM 0x40000000-0x4000ffff, the NOR (read only) and the register
+blocks the OS keeps clocked: DMA 0x20100000, AHB control 0x20500000,
+interrupt controller 0x80000000, timers 0x81000000, ADI master
+0x82000000, GPIO 0x8a000000-0x8a002fff, APB control 0x8b000000 (4 KB
+each), and USB 0x20300000 while USB runs. A data abort (an address the
+MMU does not map, such as 0xfff00000) is caught and reported
+(`arch/sc6530c/probe.S` and the abort vector in `cpu.S`). A block whose
+clock is off does not abort but stalls the bus, which no handler can
+catch: the phone hangs until the battery is pulled. That is why anything
+else needs `-f`.
+
+**The helper** (`os/tools/b310e-shell.py`, standard library only; the
+address is `--host` or `B310E_HOST`):
+
+```
+python os/tools/b310e-shell.py                      interactive
+python os/tools/b310e-shell.py cmd ps               one command
+python os/tools/b310e-shell.py put notes.txt /notes.txt
+python os/tools/b310e-shell.py get /b310e-os/log.txt
+python os/tools/b310e-shell.py run build/os/modules/stopwatch.app --follow
+python os/tools/b310e-shell.py shot screen.png
+python os/tools/b310e-shell.py log
+```
+
+**Live coding:** edit an app in `os/modules/<name>/`, `make -C os`, then
+`b310e-shell.py run build/os/modules/<name>.app --follow`: the app is
+uploaded to `/b310e-os/apps/`, the open app closed, the new one started
+on the phone, and its `klog` lines appear on the PC.
+
+How it is built: `docs/usb.md`, "B310E OS: the USB network".
 
 ## Writing an app
 
@@ -106,6 +355,40 @@ with `tick_ms` set gets `tick()` that often (the stopwatch uses 100 ms).
 Close your files before your last screen goes; memory from `malloc` is
 freed for you.
 
+## Codec modules
+
+One folder in `media/codecs/` per module: a `module.c` that names the
+module, its extensions, its formats and the metadata parser, and a
+`codec.mk` that lists the Rockbox sources (relative to `lib/rbcodec` in
+`build/rockbox`, the pinned Rockbox clone of the rockbox target; nothing
+in it is changed):
+
+```c
+#include "glue.h"
+
+static const int formats[] = { AFMT_FLAC, 0 };
+
+CODEC_MODULE("flac", "flac", "FLAC (libffmpegFLAC)", 4 * 1024, formats,
+             get_flac_metadata);
+```
+
+`make` builds each into `build/os/codecs/<folder>.cdc` (`os.sh` stages
+them in `sdcard/b310e-os/codecs/`); without `build/rockbox` it skips them
+with a warning. The engine lists the card's modules by their extensions
+(read from the files without loading them), so a new module needs no OS
+build.
+
+| Module | Formats | Rockbox sources | Image + bss | Arena |
+|---|---|---|---|---|
+| mpa | .mp3 .mp2 .mp1 | mpa.c, libmad (ARM assembly), mp3 + ID3 parser | 86 + 39 KB | 4 KB |
+| vorbis | .ogg .oga | vorbis.c, libtremor, TLSF | 111 + 2 KB | 512 KB |
+| opus | .opus (.ogg) | opus.c, libopus (ARMv5E assembly), TLSF | 133 + 28 KB | 256 KB |
+| flac | .flac | flac.c, libffmpegFLAC (ARM assembly) | 16 + 214 KB | 4 KB |
+| aac | .m4a .m4b .mp4 | aac.c, libfaad (SBR, PS), libm4a | 118 + 82 KB | 512 KB |
+| alac | .m4a .m4b .mp4 | alac.c, libalac, libm4a | 24 + 34 KB | 512 KB |
+| wavpack | .wv | wavpack.c, libwavpack (ARM assembly) | 22 + 20 KB | 4 KB |
+| wav | .wav | wav.c, libpcm | 20 + 44 KB | 4 KB |
+
 ## Build
 
 ```
@@ -137,7 +420,25 @@ python os/tests/test-sim.py
 python os/tests/test-rtc.py --build build/os
 python os/tests/test-tickless.py
 python os/tests/test-apps.py
+python os/tests/test-net.py
 ```
+
+```
+python os/tests/test-codecs.py [--icount SHIFT]
+python os/tests/test-art.py
+```
+
+`test-codecs.py` makes a 3 s tone at -6 dBFS in every format a module
+was built for (ffmpeg: libmp3lame, mp2, flac at 44.1 and 88.2 kHz,
+libvorbis, libopus, aac, alac, wavpack, PCM; each at its own frequency,
+tagged), plus a 40 s 128 kbit/s stereo MP3 of noise and chords, and
+plays the folder in Music: each track by itself after the last, then on
+the long MP3 the decoder's CPU share, pause (the position stands),
+Right held (seeks), Right tapped (the next track: the first again). In
+QEMU's WAV output every tone must be there, at its frequency, in order,
+within 1.5 dB of the WAV one; the tags must reach the log. With
+`--icount` QEMU counts instructions (one per 2^SHIFT ns), and the test
+reports the decoder's instructions per second of audio.
 
 `test-audio.py` plugs in a 4-pole headset, checks its centre button,
 plays the 1 kHz test tone (measured in QEMU's WAV output), records the
@@ -149,10 +450,19 @@ that only SELECT MF reached the card and nothing identifying was logged.
 RTC registers back. `test-tickless.py` counts the interrupts a second on
 the idle Home screen and checks the kernel's time against the RTC model,
 then turns Deep idle off and checks that the tick is back. `test-apps.py`
-works the calculator, sets the alarm to 00:01 and snoozes it when it
-rings, and types a note by multi-tap; the tests read the card's files
+adds an alarm for 00:01 every day in the Alarm app and snoozes it when
+the OS rings it, works the calculator, types a note by multi-tap, plays
+two tracks in Music (the second by itself; the WAV codec module is on its
+card), pauses, keeps playing once the app is closed, opens a track from
+Files in Music, and copies and pastes the playing file in Files; the tests read the card's files
 through its FAT (`card_file()` in `test-boot.py`), since the log is
-fragmented once other files are written.
+fragmented once other files are written. `test-net.py` is the PC on the
+USB network: it enumerates (MS OS descriptors included), runs RNDIS,
+DHCP, ARP and ping, then a TCP stack of its own against the shell (both
+ports, every command group, a 96 KB upload and download, an app uploaded
+and run, `log -f` while a second session starts it, a lost segment
+retransmitted, the helper script's own calls), unplugs and checks the
+files in the card image.
 
 ## Layout
 
@@ -162,12 +472,17 @@ kernel/         threads and scheduler, sync objects, heap
 drivers/        LCD, backlight, keypad, console, SD/SDIO, battery, fonts
 fs/             FatFs glue (disk, locks, config), card log
 loader/         app loader, the API table apps get
-ui/             drawing, screen stack, widgets, fonts (OFL), icons
+net/            the USB network's IPv4/TCP stack and the development shell
+media/          playback engine, play queue, album art, codec module
+                loader; rockbox/: the shim headers; codecs/: one folder
+                per codec module, glue, runtime
+ui/             drawing, screen stack, widgets, fonts (OFL), icons, volume, alarms
 apps/           built-in screens: home, menu, apps, files, system, settings, power,
-                sound, radio, tools, calculator, alarm, notes
+                tools, clock (date and time), usb, sim, dspboot, wavio
 sdk/            for loadable apps: app.h, app.ld, start.c, mkapp.py
 modules/        loadable apps, one folder each
-tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py
+tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py,
+                b310e-shell.py (the PC side of the shell)
 lib/            string functions, printf
 include/os/     interfaces
 link/os.ld      memory map
@@ -184,6 +499,12 @@ main.c          start-up; selftest.c: the boot self-test
   frame on the thread's stack (`cpu.S`).
 - The LCD transfer is started, not waited for: the LCDC's done flag does
   not report reliably, and polling it cost half the CPU.
+- Partial LCD updates (`drivers/lcd.c`): `lcd_update()` compares the
+  back buffer with the frame last sent (the LCDC's source still holds
+  it), and sends the band of changed rows through the panel's row window
+  (RASET) and the LCDC's LCM crop (`lcm_start`, `lcm_size`), as the stock
+  firmware does; the QEMU model follows the crop. A band of most of the
+  screen goes whole; the spacing between transfers scales with the rows.
 - QEMU on Windows loses about 0.25 ms per timer period (its periodic
   ptimer restarts each period from the late host callback), so with the
   1 ms tick time in QEMU runs some 26% slow; tickless, with about 50
@@ -303,3 +624,45 @@ main.c          start-up; selftest.c: the boot self-test
   once it is back.
 - Audio, SD transfers and the awake panel hold the CPU clock at 104 MHz
   or more (the AHB feeds their timing); SIM sessions do too.
+- The playback engine (`media/engine.c`): decoding never runs in the
+  DMA interrupt. The interrupt only copies frames out of the ring and,
+  when the decoder waits for room and there is enough, posts its
+  semaphore; so the decoder works one codec frame at a time as the audio
+  drains (decoding the ring full in bursts made the governor jump between
+  104 and 208 MHz). Playback starts with 0.3 s buffered; an empty ring
+  plays silence and counts an underrun. Pause stops the DMA and keeps the
+  ring. Audio holds the clock at 104 MHz or more (`audio_power`); the
+  governor goes to 208 MHz only when the load needs it.
+- Codec API (`include/os/codec.h`): Rockbox's `struct codec_api` with
+  the same member names (the decoders build unchanged), without the
+  multi-core, profiling and recording parts, plus file calls for the
+  metadata parsers. File data comes through a 64 KB window of the file
+  (grown when a codec asks for more), read in the decoder thread.
+  `pcmbuf_insert` takes what `configure` said (16-bit, or 32-bit with N
+  fraction bits; interleaved, two planes or mono) and rounds and clips it
+  to 16-bit stereo: that is the whole "DSP".
+- A codec sets its sample depth once, at `CODEC_LOAD`, not per track
+  (Rockbox's DSP keeps it): resetting it at each track made every track
+  after the first of a module play garbage (int32 samples read as int16).
+- Modules are .app-format files with their own magic (`mkapp.py --magic
+  --info`), linked by `media/codecs/codec.ld` with `--pic-veneer` (the
+  interworking stubs to libgcc's ARM code would otherwise hold absolute
+  addresses no relocation fixes). The loader keeps one module; the next
+  track of the same format reuses it, an idle one is freed after 30 s.
+  For an extension several modules claim (.m4a: AAC and ALAC; .ogg:
+  Vorbis and Opus) each one's parser is asked in turn (the file's first
+  bytes pick the likely one first); a module refuses a format it does
+  not decode.
+- The shim (`media/rockbox/`) stands in for Rockbox's config, platform,
+  codecs.h, rbunicode (ISO-8859-1 and UTF-16 to UTF-8) and a few C
+  library headers; `media/codecs/rt.c` is the module's C runtime (string
+  calls, `strtol`, `snprintf` through the engine, file calls),
+  `setjmp.S` Tremor's escape when its arena is full. No module calls
+  floating point (checked: no `__aeabi_f*`/`__aeabi_d*` in any).
+- Music (`modules/music/music.c`, a loadable app) talks to the play
+  queue (`media/queue.c`) and the engine only through the app API, so the
+  queue goes on playing once the app is closed; the music volume is
+  Settings' (`volume_use(VOL_MUSIC)`). Left/Right: a tap skips (decided 0.6 s
+  after the press, when no key repeat came: the UI does not pass key
+  releases to screens), a hold seeks and plays from the new place when
+  the repeats stop.

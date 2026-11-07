@@ -44,9 +44,7 @@ static void start(void)
 
 static void row(int y, const char *label, const char *value, uint16_t c)
 {
-    gfx_text(UI_PAD + 6, y, label, C_DIM, FONT_SMALL, 1, 0);
-    gfx_text(LCD_WIDTH - UI_PAD - 6 - gfx_text_width(value, FONT_SMALL, 1), y, value, c,
-             FONT_SMALL, 1, 0);
+    ui_kv(UI_PAD + 6, y, LCD_WIDTH - 2 * UI_PAD - 12, label, value, c);
 }
 
 static void draw(screen_t *s)
@@ -63,7 +61,9 @@ static void draw(screen_t *s)
         snprintf(buf, sizeof(buf), "-");
     else
         snprintf(buf, sizeof(buf), "%s", ok ? "booted" : dsp_strerror(dspboot_status.result));
-    row(y + 6, "Result", buf, ok ? C_OK : dspboot_status.runs ? C_BAD : C_TEXT);
+    /* the result alone on its line: an error's text is long */
+    gfx_text_centered(y + 6, buf, ok ? C_OK : dspboot_status.runs ? C_BAD : C_TEXT,
+                      FONT_SMALL, 1);
     row(y + 20, "Stage", stages[stage < 7 ? stage : 0], C_TEXT);
     snprintf(buf, sizeof(buf), "%lu", (unsigned long)dsp_info.blocks);
     row(y + 34, "Blocks", buf, C_TEXT);
@@ -73,7 +73,7 @@ static void draw(screen_t *s)
     row(y + 62, "Ready word", buf, C_TEXT);
     snprintf(buf, sizeof(buf), "%lu ms", (unsigned long)dsp_info.boot_ms);
     row(y + 76, "Time", buf, C_TEXT);
-    gfx_text_centered(UI_BOTTOM - 12, "the DSP is reset after", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(UI_BOTTOM - 12, "Run: boot it again", C_DIM, FONT_SMALL, 1);
 }
 
 static void enter(screen_t *s)

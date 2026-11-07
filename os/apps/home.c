@@ -7,6 +7,7 @@
 #include "os/rtc.h"
 #include "os/status.h"
 #include "os/ui.h"
+#include "os/notify.h"
 
 /* ---- home ------------------------------------------------------------------ */
 
@@ -75,8 +76,12 @@ static screen_t home = {
     .draw = home_draw, .key = home_key,
 };
 
+static screen_t menu;                   /* below */
+
 screen_t *app_home(void)
 {
+    ui_panel_host(&home);
+    ui_panel_host(&menu);
     return &home;
 }
 
@@ -94,8 +99,6 @@ static const struct {
 } entries[] = {
     { "Apps", app_apps, &icon_apps },
     { "Files", files_root, &icon_folder },
-    { "Sound", app_sound, &icon_music },
-    { "FM radio", app_radio, &icon_radio },
     { "Tools", app_tools, &icon_tools },
     { "System", app_system, &icon_chart },
     { "Settings", app_settings, &icon_gear },

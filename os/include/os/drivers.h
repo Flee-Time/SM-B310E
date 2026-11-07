@@ -60,6 +60,7 @@ typedef struct {
 
 void keypad_init(void);
 int keypad_get(key_event_t *ev, uint32_t timeout_ms);
+void keypad_inject(uint8_t code, bool down);    /* code 0: a wake-up only */
 const char *keypad_name(uint8_t code);
 /* Stop / restart the matrix scan around SDIO DMA (a held key during it
  * hangs the phone); resume first collects edges that came meanwhile. */

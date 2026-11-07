@@ -9,7 +9,13 @@
 #include "os/lib.h"
 #include "os/rtc.h"
 #include "os/status.h"
+#include "os/alarm.h"
+#include "os/audio.h"
+#include "os/media.h"
+#include "os/notify.h"
+#include "apps/wavio.h"
 #include "os/ui.h"
+#include "os/usb.h"
 
 #define MAX_DEPTH      10
 #define REPEAT_DELAY   450
@@ -17,22 +23,39 @@
 #define END_HOLD_MS    2000
 #define TORCH_HOLD_MS  1000            /* hold 0: torch on/off (as in Rockbox) */
 #define BUZZ_MS        80
+#define TACTILE_MS     30                /* a key's feedback buzz */
+#define MUSIC_MS       50                /* the music player's refill */
 #define DIM_PERCENT    8
 #define DARK_AFTER_MS  10000            /* after dimming */
 #define SETTINGS_FILE  OS_DIR "/settings.txt"
 
-ui_settings_t ui_settings = { 60, 30, 0, 1, 0, 7 * 60 };
+ui_settings_t ui_settings = {
+    60, 30, 0, 1, 0, 7 * 60,
+    { 7, 6, 9, 8, 1 },               /* music, apps, alarm, calls; tactile light */
+    1, 0,
+    0, 1,                            /* UTC until set; the clock from the network */
+};
 
 static screen_t *stack[MAX_DEPTH];
 static int depth;
 static bool dirty;
-static uint32_t last_input, end_down, next_repeat, next_second, next_tick;
+static uint32_t last_input, end_down, next_repeat, next_second, next_tick, next_music;
 static bool collect;                    /* an app's screen left the stack */
-static uint32_t zero_down, buzz_until;
+static uint32_t zero_down;
+static uint32_t center_down;            /* Center held on a panel host */
+static screen_t *panel_hosts[4];
+static int n_hosts;
+
+#define PANEL_HOLD_MS  600
 
 /* Run a screen callback with its app as the current one (for ownership of
  * what it pushes and allocates). */
-#define AS_OWNER(s, call) do {                                                      app_t *saved_ = app_current;                                                app_current = (s)->app;                                                     call;                                                                       app_current = saved_;                                                   } while (0)
+#define AS_OWNER(s, call) do {                     \
+        app_t *saved_ = app_current;                 \
+        app_current = (s)->app;                      \
+        call;                                        \
+        app_current = saved_;                        \
+    } while (0)
 
 static uint32_t tick_period(const screen_t *s)
 {
@@ -45,9 +68,34 @@ static int charging;                    /* CHARGE_* */
 
 /* ---- settings ------------------------------------------------------------ */
 
+/* The settings file: one "name=value" line each, every name in this table.
+ * A name the file lacks keeps its default; one the table lacks is ignored,
+ * so files written by older and newer builds both load. */
+static const struct {
+    const char *name;
+    int *v;
+    int min, max;
+} setting_table[] = {
+    { "brightness", &ui_settings.brightness, 5, 100 },
+    { "screen_timeout", &ui_settings.screen_timeout_s, 0, 3600 },
+    { "cpu_max", &ui_settings.cpu_max, 0, 1 },
+    { "deep_idle", &ui_settings.deep_idle, 0, 1 },
+    { "alarm_on", &ui_settings.alarm_on, 0, 1 },
+    { "alarm_min", &ui_settings.alarm_min, 0, 24 * 60 - 1 },
+    { "vol_music", &ui_settings.vol[VOL_MUSIC], 0, VOL_LEVELS },
+    { "vol_apps", &ui_settings.vol[VOL_APP], 0, VOL_LEVELS },
+    { "vol_alarm", &ui_settings.vol[VOL_ALARM], 0, VOL_LEVELS },
+    { "vol_calls", &ui_settings.vol[VOL_CALL], 0, VOL_LEVELS },
+    { "tactile", &ui_settings.vol[VOL_TACTILE], 0, 3 },
+    { "keylight", &ui_settings.keylight, 0, 1 },
+    { "usb_default", &ui_settings.usb_default, 0, 2 },
+    { "time_zone", &ui_settings.tz_min, -720, 840 },
+    { "net_time", &ui_settings.net_time, 0, 1 },
+};
+
 static void settings_load(void)
 {
-    char buf[256], *p;
+    char buf[512], *p;
     FIL f;
     UINT n = 0;
 
@@ -70,33 +118,23 @@ static void settings_load(void)
         *eq++ = 0;
         while (*eq >= '0' && *eq <= '9')
             v = v * 10 + (*eq++ - '0');
-        if (!strcmp(line, "brightness") && v >= 5 && v <= 100)
-            ui_settings.brightness = v;
-        else if (!strcmp(line, "screen_timeout"))
-            ui_settings.screen_timeout_s = v;
-        else if (!strcmp(line, "cpu_max"))
-            ui_settings.cpu_max = v != 0;
-        else if (!strcmp(line, "deep_idle"))
-            ui_settings.deep_idle = v != 0;
-        else if (!strcmp(line, "alarm_on"))
-            ui_settings.alarm_on = v != 0;
-        else if (!strcmp(line, "alarm_min") && v < 24 * 60)
-            ui_settings.alarm_min = v;
+        for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++)
+            if (!strcmp(line, setting_table[i].name) && v >= setting_table[i].min &&
+                v <= setting_table[i].max)
+                *setting_table[i].v = v;
     }
 }
 
 void ui_settings_save(void)
 {
-    char buf[160];
+    char buf[512];
     FIL f;
     UINT n;
-    int len = snprintf(buf, sizeof(buf),
-                       "brightness=%d\nscreen_timeout=%d\ncpu_max=%d\ndeep_idle=%d\n"
-                       "alarm_on=%d\nalarm_min=%d\n",
-                       ui_settings.brightness, ui_settings.screen_timeout_s,
-                       ui_settings.cpu_max, ui_settings.deep_idle,
-                       ui_settings.alarm_on, ui_settings.alarm_min);
+    int len = 0;
 
+    for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++)
+        len += snprintf(buf + len, sizeof(buf) - (size_t)len, "%s=%d\n",
+                        setting_table[i].name, *setting_table[i].v);
     if (f_open(&f, SETTINGS_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
         f_write(&f, buf, (UINT)len, &n);
         f_close(&f);
@@ -165,6 +203,36 @@ void ui_redraw(void)
     dirty = true;
 }
 
+/* From any thread (a decoder, a network thread): draw again now, not at
+ * the screen's next tick. The empty key event only wakes the UI loop; it
+ * is not input (the screen stays dark, the timeout is not reset). */
+void ui_collect_apps(void)
+{
+    collect = true;
+}
+
+/* Center held on s opens the quick panel; a short press reaches s when
+ * Center is let go (so the hold can be told apart). */
+void ui_panel_host(screen_t *s)
+{
+    if (n_hosts < (int)(sizeof(panel_hosts) / sizeof(panel_hosts[0])))
+        panel_hosts[n_hosts++] = s;
+}
+
+static bool on_host(void)
+{
+    for (int i = 0; i < n_hosts; i++)
+        if (stack[depth - 1] == panel_hosts[i])
+            return true;
+    return false;
+}
+
+void ui_refresh(void)
+{
+    dirty = true;
+    keypad_inject(0, false);
+}
+
 int ui_depth(void)
 {
     return depth;
@@ -201,13 +269,26 @@ static void draw_status(void)
         snprintf(buf, sizeof(buf), "--");
     x -= gfx_text_width(buf, FONT_SMALL, 1) + 3;
     gfx_text(x, y, buf, C_TEXT, FONT_SMALL, 1, 0);
-    if (fs_info()->mounted) {
-        x -= gfx_text_width("SD", FONT_SMALL, 1) + 6;
-        gfx_text(x, y, "SD", C_DIM, FONT_SMALL, 1, 0);
+    {                                   /* USB in the background */
+        const char *u = usb_auto_label();
+
+        if (u) {
+            x -= gfx_text_width(u, FONT_SMALL, 1) + 6;
+            gfx_text(x, y, u, C_ACCENT, FONT_SMALL, 1, 0);
+        }
     }
     if (torch_get()) {                  /* a lit square */
         x -= 8;
         gfx_fill(x, (UI_STATUS_H - 4) / 2, 4, 4, C_WARN);
+    }
+    {                                   /* the notifications' icons after the time */
+        int ix = UI_PAD + 2 + gfx_text_width("00:00", FONT_SMALL, 1) + 5;
+        notify_t *n;
+
+        for (int i = 0; (n = notify_get(i)) && ix + ICON_SIZE < x - 2; i++) {
+            gfx_icon(ix, 0, n->icon ? n->icon : &icon_alarm, C_DIM);
+            ix += ICON_SIZE + 1;
+        }
     }
 }
 
@@ -264,15 +345,115 @@ void ui_power_off(void)
 {
     splash("Powering off");
     klog("power off");
+    rtc_save();
     fs_sync();
     thread_sleep(300);
     arch_power_off();
+}
+
+/* ---- calls from other threads ---------------------------------------------- */
+
+static void (*volatile call_fn)(void *);
+static void *volatile call_arg;
+static volatile bool call_taken;
+static sem_t call_done;
+static mutex_t call_lock;
+
+bool ui_call(void (*fn)(void *arg), void *arg, uint32_t timeout_ms)
+{
+    uint32_t s;
+    bool ok = true;
+
+    mutex_lock(&call_lock, WAIT_FOREVER);
+    s = arch_irq_save();
+    call_arg = arg;
+    call_taken = false;
+    call_fn = fn;
+    arch_irq_restore(s);
+    keypad_inject(0, false);            /* wake the loop */
+    if (sem_wait(&call_done, timeout_ms) != WAIT_OK) {
+        s = arch_irq_save();
+        if (!call_taken)
+            call_fn = NULL;             /* withdrawn: it will not run */
+        arch_irq_restore(s);
+        if (call_taken)
+            sem_wait(&call_done, WAIT_FOREVER);     /* it is running */
+        else
+            ok = false;
+    }
+    mutex_unlock(&call_lock);
+    return ok;
+}
+
+static void serve_call(void)
+{
+    void (*fn)(void *);
+    void *arg;
+    uint32_t s = arch_irq_save();
+
+    fn = call_fn;
+    arg = call_arg;
+    call_fn = NULL;
+    if (fn)
+        call_taken = true;
+    arch_irq_restore(s);
+    if (fn) {
+        fn(arg);
+        sem_post(&call_done);
+    }
+}
+
+const char *ui_chain(const char *path, const char *what)
+{
+    FIL f;
+    UINT n = 0;
+    uint32_t size;
+    uint8_t *image;
+
+    if (f_open(&f, path, FA_READ) != FR_OK)
+        return "The file is not on the card.";
+    size = (uint32_t)f_size(&f);
+    if (size < 1024 || size > 2u * 1024 * 1024) {
+        f_close(&f);
+        return "The file is not an image.";
+    }
+    image = kmalloc(size + 4);
+    if (!image) {
+        f_close(&f);
+        return "Not enough memory.";
+    }
+    if (f_read(&f, image, size, &n) != FR_OK || n != size) {
+        f_close(&f);
+        kfree(image);
+        return "Could not read it.";
+    }
+    f_close(&f);
+    if (!arch_chain_fits(image, size)) {
+        kfree(image);
+        return "It does not fit.";
+    }
+    splash(what);
+    klog("restart: %s (%lu bytes), no reset", path, (unsigned long)size);
+    /* everything that runs on its own: the music, the radio, a recording,
+     * USB, the vibrator; then the card's log */
+    media_queue_clear();
+    media_stop();
+    wav_stop();
+    fm_off();
+    if (usb_running())
+        usb_stop();
+    vibrator_set(0);
+    rtc_save();
+    fs_sync();
+    thread_sleep(200);
+    arch_chain(image, size);
 }
 
 void ui_reboot(void)
 {
     splash("Restarting");
     klog("reboot to the boot menu");
+    rtc_save();
     fs_sync();
     thread_sleep(300);
     backlight_set(0);
@@ -316,7 +497,7 @@ static void set_light(int level)
         light = level;
         redraw();                       /* the frame the panel wakes to */
         lcd_wake();
-        keylight_set(true);
+        keylight_set(ui_settings.keylight);
     }
     light = level;
     if (level == 1)
@@ -331,6 +512,62 @@ static void wake(void)
         set_light(0);
         dirty = true;
     }
+}
+
+/* the vibrator at level (1..7) for ms; the UI loop ends it */
+/* The vibrator's end is kept by a thread of its own above the UI: when the
+ * UI loop ended it, a key whose handler took long (an app loading, half a
+ * second) kept the 30 ms tactile buzz going all that time, as if stuck. */
+static thread_t *buzz_thread;
+static sem_t buzz_sem;
+static mutex_t buzz_lock;
+static uint32_t buzz_end;
+static bool buzz_on;
+
+static void buzz_main(void *arg)
+{
+    for (;;) {
+        sem_wait(&buzz_sem, WAIT_FOREVER);
+        for (;;) {
+            int32_t left;
+
+            mutex_lock(&buzz_lock, WAIT_FOREVER);
+            left = (int32_t)(buzz_end - kernel_ticks());
+            if (left <= 0 && buzz_on) {
+                vibrator_set(0);
+                buzz_on = false;
+            }
+            mutex_unlock(&buzz_lock);
+            if (left <= 0)
+                break;
+            thread_sleep((uint32_t)left);
+        }
+    }
+}
+
+void ui_buzz(int level, uint32_t ms)
+{
+    if (level <= 0 || !ms)
+        return;
+    if (!buzz_thread) {
+        sem_init(&buzz_sem, 0);
+        mutex_init(&buzz_lock);
+        buzz_thread = thread_create("buzz", PRIO_NORMAL + 3, 768, buzz_main, NULL);
+        if (!buzz_thread)
+            return;
+    }
+    mutex_lock(&buzz_lock, WAIT_FOREVER);
+    vibrator_set(level > 7 ? 7 : level);
+    buzz_on = true;
+    buzz_end = kernel_ticks() + (ms > 5000 ? 5000 : ms);
+    mutex_unlock(&buzz_lock);
+    sem_post(&buzz_sem);
+}
+
+/* sound that goes on whatever screen is open */
+static bool background_audio(void)
+{
+    return media_queue_active() || wav_playing() || wav_recording();
 }
 
 void ui_wake(void)
@@ -354,8 +591,25 @@ static void on_key(const key_event_t *ev, uint32_t now)
         swallow_key = 0;
         return;
     }
+    if (ev->down && ui_settings.vol[VOL_TACTILE]) {
+        /* tactile feedback: a short buzz a press, at the chosen strength */
+        static const uint8_t strength[4] = { 0, 2, 4, 7 };
+
+        ui_buzz(strength[ui_settings.vol[VOL_TACTILE] & 3], TACTILE_MS);
+    }
     if (ev->code == KEY_0)
         zero_down = ev->down ? now : 0;
+    if (ev->code == KEY_CENTER && (center_down || on_host())) {
+        if (ev->down) {
+            center_down = now ? now : 1;
+        } else if (center_down) {       /* let go before the hold: a press */
+            key_event_t press = { KEY_CENTER, 1, now };
+
+            center_down = 0;
+            dispatch(&press);
+        }
+        return;
+    }
     if (ev->code == KEY_END) {
         if (ev->down) {
             end_down = now;
@@ -400,6 +654,8 @@ static void every_second(uint32_t now)
 
     rtc_time(&h, &m, &sec);
     alarm_check(h, m);
+    usb_auto_tick();
+    notify_tick();
     if (n % 30 == 0) {                  /* the ADC is slow: twice a minute */
         charging = charge_state();
         bat_mv = battery_mv();
@@ -408,6 +664,8 @@ static void every_second(uint32_t now)
     if (n && n % 600 == 0)              /* the drain log: every 10 minutes
                                          * (not at boot: its load is boot work) */
         drain_log(now);
+    if (n && n % 600 == 0)
+        rtc_save();
     n++;
     os_status.ticks = now;
     os_status.idle_permille = kernel_idle_permille();
@@ -422,18 +680,39 @@ static void every_second(uint32_t now)
     dirty = true;                       /* the clock */
 }
 
+/* The next tick after now, on the clock's phase: a screen ticking every
+ * 500 ms then redraws together with the clock's second, not 500 ms apart
+ * from it (two draws a second instead of three; the load does not see-saw). */
+static uint32_t tick_after(uint32_t now, uint32_t period)
+{
+    int32_t d = (int32_t)(next_second - now);
+    uint32_t t;
+
+    if (d <= 0 || !period)
+        return now + period;
+    t = next_second - (uint32_t)d / period * period;
+    if ((int32_t)(t - now) <= 0)
+        t += period;
+    return t;
+}
+
 void ui_run(screen_t *home)
 {
     key_event_t ev;
 
     settings_load();
+    rtc_restore();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
     kernel_set_tickless(ui_settings.deep_idle);
     ui_apply_brightness();
-    keylight_set(true);
+    keylight_set(ui_settings.keylight);
     last_input = kernel_ticks();
     next_second = last_input;
+    sem_init(&call_done, 0);
+    mutex_init(&call_lock);
     ui_push(home);
+    redraw();
+    klog("boot: home drawn at %lu ms", (unsigned long)kernel_ticks());
 
     for (;;) {
         uint32_t now = kernel_ticks(), wait = 1000;
@@ -446,14 +725,23 @@ void ui_run(screen_t *home)
             wait = (int32_t)(next_tick - now) > 0 ? next_tick - now : 0;
         if ((end_down || zero_down) && wait > 100)
             wait = 100;
-        if (buzz_until && wait > BUZZ_MS)
-            wait = BUZZ_MS;
+        if (center_down && wait > 50)
+            wait = 50;
+        if (background_audio() && wait > MUSIC_MS)
+            wait = MUSIC_MS;
         if (dirty && light < 2)       /* dark: drawn on wake, do not spin */
             wait = 0;
 
-        if (keypad_get(&ev, wait) == WAIT_OK)
+        if (keypad_get(&ev, wait) == WAIT_OK && ev.code)
             on_key(&ev, kernel_ticks());
+        if (call_fn)
+            serve_call();
         now = kernel_ticks();
+        if (background_audio() && (int32_t)(now - next_music) >= 0) {
+            next_music = now + MUSIC_MS;    /* on any screen: the play queue, */
+            media_queue_tick();             /* and WAV files playing or recording */
+            wav_pump();
+        }
 
         if (held_key && (int32_t)(now - next_repeat) >= 0) {
             key_event_t rep = { held_key, 1, now };
@@ -462,17 +750,17 @@ void ui_run(screen_t *home)
         }
         if (end_down && now - end_down >= END_HOLD_MS)
             ui_power_off();
+        if (center_down && now - center_down >= PANEL_HOLD_MS) {
+            center_down = 0;            /* held: the quick panel, not a press */
+            ui_buzz(4, 40);
+            ui_push(ui_panel());
+        }
         if (zero_down && now - zero_down >= TORCH_HOLD_MS) {
             zero_down = 0;              /* one toggle per press */
             torch_set(!torch_get());
             klog("torch %s", torch_get() ? "on" : "off");
-            vibrator_set(4);
-            buzz_until = now + BUZZ_MS;
+            ui_buzz(4, BUZZ_MS);
             dirty = true;
-        }
-        if (buzz_until && (int32_t)(now - buzz_until) >= 0) {
-            buzz_until = 0;
-            vibrator_set(0);
         }
         if ((int32_t)(now - next_second) >= 0) {
             next_second = now + 1000;
@@ -481,7 +769,7 @@ void ui_run(screen_t *home)
         if ((int32_t)(now - next_tick) >= 0) {
             screen_t *s = stack[depth - 1];
 
-            next_tick = now + tick_period(s);
+            next_tick = tick_after(now, tick_period(s));
             if (s->tick) {
                 AS_OWNER(s, s->tick(s));
                 dirty = true;

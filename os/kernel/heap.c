@@ -96,3 +96,20 @@ size_t heap_free_bytes(void)
 {
     return free_bytes;
 }
+
+/* The free list: total, the largest block (what one kmalloc can get, less
+ * its header) and how many pieces (for the network shell's "mem"). */
+void heap_stats(size_t *free, size_t *largest, unsigned *blocks)
+{
+    uint32_t irq = arch_irq_save();
+    size_t big = 0;
+    unsigned n = 0;
+
+    for (block_t *b = free_list; b; b = b->next, n++)
+        if (b->size > big)
+            big = b->size;
+    arch_irq_restore(irq);
+    *free = free_bytes;
+    *largest = big > HDR ? big - HDR : 0;
+    *blocks = n;
+}
