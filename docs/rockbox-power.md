@@ -71,6 +71,19 @@ fields, Select sets. `ports/rockbox/tests/test-rtc.py` presets the RTC
 model, raises the hour in that screen and checks the counters. Retention
 after battery removal is not claimed.
 
+## Start-up: the boot menu's cache
+
+The SD boot menu enters Rockbox (and the B310E OS) with the MMU and the
+D-cache on: control register 0x0005327f, logged by the OS on the phone
+(2026-11-07). `crt0.S` assumed both off. Zeroing `.bss` with the cache on
+leaves the zeros in lines the menu had cached, and the identity-MMU set-up
+then invalidates the D-cache, so those words keep the menu's data. In the
+OS this held its screen stack, key timers and app list at garbage (a data
+abort, then a torch, a buzz and a power-off at every boot). `crt0.S` now
+writes the cache back (test, clean and invalidate) and switches the MMU and
+caches off before anything else when it finds them on; entered with them
+off, nothing changes. QEMU always enters with them off.
+
 ## Shutdown and USB charging
 
 The old `power_off()` armed a watchdog reboot and then spun forever. Its

@@ -112,6 +112,31 @@ start:
 
     /* enter supervisor mode, disable IRQ and FIQ */
     msr     cpsr, #0xd3
+
+    /* The SD boot menu enters with the MMU and D-cache ON (control
+     * register 0x0005327f, logged by the B310E OS on the phone,
+     * 2026-11-07), not off as the identity-MMU comment below assumes.
+     * Zeroing .bss through that cache and then invalidating it (below)
+     * leaves words holding the menu's data; in the B310E OS that broke
+     * its screen stack and key timers. Write the cache back and switch
+     * the MMU and caches off first; with them off this does nothing. */
+    mrc     p15, 0, r0, c1, c0, 0
+    and     r1, r0, #5
+    cmp     r1, #5
+    bne     1f
+2:  mrc     p15, 0, APSR_nzcv, c7, c14, 3   /* test, clean and invalidate */
+    bne     2b
+    mov     r1, #0
+    mcr     p15, 0, r1, c7, c10, 4      /* drain the write buffer */
+    bic     r0, r0, #0x1000             /* I */
+    bic     r0, r0, #0x0004             /* C */
+    bic     r0, r0, #0x0001             /* M (the menu's map is identity) */
+    mcr     p15, 0, r0, c1, c0, 0
+    nop
+    nop
+    mcr     p15, 0, r1, c7, c5, 0       /* invalidate the I-cache */
+    mcr     p15, 0, r1, c8, c7, 0       /* and the TLBs */
+1:
     /* Establish a stack before the first boot-marker call. A loader may
      * enter with SP=0; b310e_boot_mark saves registers on this stack. */
     ldr     sp, =stackend
