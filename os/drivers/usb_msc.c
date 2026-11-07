@@ -12,12 +12,21 @@
  * Rockbox port's double buffering, which reached 710 KB/s on the phone).
  * A chunk reaches the card only once all of it has arrived.
  *
- * Data the host expects but does not get ends with a short packet or a
- * halted endpoint (BOT 6.7), so the host always reads the CSW next.
+ * A command that sends less than the host expects ends its data stage
+ * with a short or zero-length packet; data the host sends that a failed
+ * command does not take is read and dropped; then the CSW follows. That
+ * is what the Rockbox port does (send_command_failed_result), which
+ * mounts on Windows on the phone. Halting the bulk endpoints instead (BOT
+ * 6.7) was untested on the hardware: the first phone run enumerated, had
+ * 2 of 5 commands fail, was reset and never appeared in Explorer
+ * (2026-11-07). Endpoints are halted only for an invalid CBW.
+ *
+ * The last commands are kept for the card log (usb_msc_trace_log).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/drivers.h"
+#include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
 #include "os/usb.h"
@@ -56,6 +65,14 @@ static uint32_t csw[4];
 static uint32_t reply[16];
 static volatile struct { uint8_t key, asc, ascq; } sense;
 static bool ejected;
+
+#define TRACE_N 24
+static struct {
+    uint8_t op, st, key, asc, page;
+    bool in;
+    uint32_t len;
+} trace[TRACE_N];
+static unsigned trace_n;            /* commands traced, all time */
 
 bool usb_msc_init(void)
 {
@@ -328,6 +345,43 @@ static int execute(cmd_t *c)
     return fail(SK_ILLEGAL_REQUEST, ASC_INVALID_OPCODE);
 }
 
+/* Take and drop the data a failed command did not read; the CSW still
+ * reports it as not processed (the residue). */
+static bool drain_out(cmd_t *c)
+{
+    uint32_t left = c->residue;
+
+    while (left) {
+        uint32_t n = left < CHUNK_BYTES ? left : CHUNK_BYTES;
+        int r;
+
+        if (usb_bulk_start_out(c->gen, buf[0], (int)n) < 0 ||
+            (r = usb_bulk_wait_out()) < 0)
+            return false;
+        left -= (uint32_t)r < left ? (uint32_t)r : left;
+        if ((uint32_t)r < n)            /* a short packet: the host is done */
+            break;
+    }
+    return true;
+}
+
+/* The commands of the session, oldest first, to the card log. */
+void usb_msc_trace_log(void)
+{
+    unsigned first = trace_n > TRACE_N ? trace_n - TRACE_N : 0;
+
+    for (unsigned k = first; k < trace_n; k++) {
+        unsigned i = k % TRACE_N;
+
+        klog("usb: cmd %02x page %02x %s %lu -> %s", trace[i].op, trace[i].page,
+             trace[i].in ? "in" : "out", (unsigned long)trace[i].len,
+             trace[i].st == ST_GOOD ? "ok" : trace[i].st == ST_FAIL ? "failed" : "phase error");
+        if (trace[i].st != ST_GOOD)
+            klog("usb:   sense %02x/%02x", trace[i].key, trace[i].asc);
+    }
+    trace_n = 0;
+}
+
 void usb_msc_run(void)
 {
     const uint8_t *b = (const uint8_t *)cbw;
@@ -369,10 +423,26 @@ void usb_msc_run(void)
             continue;
         if (st != ST_GOOD)
             usb_stat.failed++;
-        /* data the host still expects (or still sends): halt the pipe; the
-         * host clears it and reads the CSW (BOT 6.7.2 / 6.7.3) */
-        if (c.residue && !c.data_ended)
-            usb_bulk_halt(c.host_in);
+        {
+            unsigned i = trace_n++ % TRACE_N;
+
+            trace[i].op = c.cb[0];
+            trace[i].page = c.cb[2];
+            trace[i].st = (uint8_t)st;
+            trace[i].key = st == ST_GOOD ? 0 : sense.key;
+            trace[i].asc = st == ST_GOOD ? 0 : sense.asc;
+            trace[i].in = c.host_in;
+            trace[i].len = c.host_len;
+        }
+        /* end the data stage the host still expects */
+        if (c.residue && !c.data_ended) {
+            if (c.host_in) {
+                if (usb_bulk_start_in(gen, NULL, 0) < 0 || usb_bulk_wait_in() < 0)
+                    continue;
+            } else if (!drain_out(&c)) {
+                continue;
+            }
+        }
         csw[0] = CSW_SIG;
         csw[1] = c.tag;
         csw[2] = c.residue;

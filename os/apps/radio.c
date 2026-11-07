@@ -24,25 +24,34 @@ static bool stereo;
 static void draw(screen_t *s)
 {
     char buf[32];
-    int f = fm_frequency(), vol = audio_get_volume();
+    int f = fm_frequency(), vol = audio_get_volume(), x = UI_PAD, w = LCD_WIDTH - 2 * UI_PAD;
 
     snprintf(buf, sizeof(buf), "%d.%d", f / 1000, f % 1000 / 100);
-    gfx_text_centered(UI_TOP + 10, buf, fm_is_on() ? C_TEXT : C_DIM, FONT_LARGE, 3);
-    gfx_text_centered(UI_TOP + 60, "MHz", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(UI_TOP + 10, buf, fm_is_on() ? C_TEXT : C_DIM, FONT_HUGE, 1);
+    gfx_text_centered(UI_TOP + 34, "MHz", C_DIM, FONT_SMALL, 1);
+
+    gfx_round(x, UI_TOP + 48, w, 36, UI_RADIUS, C_CARD);
+    snprintf(buf, sizeof(buf), "signal %d", rssi < 0 ? 0 : rssi);
+    gfx_text(x + 5, UI_TOP + 53, buf, C_TEXT, FONT_SMALL, 1, 0);
     if (fm_is_on()) {
-        snprintf(buf, sizeof(buf), "signal %d%s%s", rssi, stereo ? "  stereo" : "",
-                 muted ? "  muted" : "");
-        gfx_text_centered(UI_TOP + 74, buf, C_TEXT, FONT_SMALL, 1);
-        gfx_fill(14, UI_TOP + 86, rssi > 0 ? rssi * (LCD_WIDTH - 28) / 80 : 0, 3, C_OK);
+        const char *tag = muted ? "muted" : stereo ? "stereo" : "mono";
+
+        gfx_text(x + w - 5 - gfx_text_width(tag, FONT_SMALL, 1), UI_TOP + 53, tag,
+                 muted ? C_WARN : C_ACCENT, FONT_SMALL, 1, 0);
     }
-    snprintf(buf, sizeof(buf), "volume %d dB, %s", vol / 10,
-             audio_headphones() ? "headphones" : "no antenna!");
-    gfx_text_centered(UI_TOP + 94, buf, audio_headphones() ? C_DIM : C_WARN, FONT_SMALL, 1);
+    gfx_bar(x + 5, UI_TOP + 64, w - 10, 3, rssi > 0 ? rssi : 0, 80, C_OK);
+    snprintf(buf, sizeof(buf), "volume %d dB", vol / 10);
+    gfx_text(x + 5, UI_TOP + 72, buf, C_DIM, FONT_SMALL, 1, 0);
+    if (!audio_headphones())
+        gfx_text(x + w - 5 - gfx_text_width("no antenna", FONT_SMALL, 1), UI_TOP + 72,
+                 "no antenna", C_WARN, FONT_SMALL, 1, 0);
+
     if (wav_recording()) {
         snprintf(buf, sizeof(buf), "REC %lu s", (unsigned long)wav_seconds());
-        gfx_text_centered(UI_TOP + 104, buf, C_BAD, FONT_SMALL, 1);
+        gfx_fill((LCD_WIDTH - gfx_text_width(buf, FONT_BODY, 1)) / 2 - 8, UI_TOP + 97, 5, 5, C_BAD);
+        gfx_text_centered(UI_TOP + 95, buf, C_BAD, FONT_BODY, 1);
     } else if (state) {
-        gfx_text_centered(UI_TOP + 104, state, C_DIM, FONT_SMALL, 1);
+        gfx_text_centered(UI_TOP + 95, state, C_DIM, FONT_SMALL, 1);
     }
 }
 

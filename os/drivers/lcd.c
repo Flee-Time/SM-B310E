@@ -337,6 +337,7 @@ uint16_t lcd_back[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(32)));
 
 static bool asleep;
 static uint32_t last_kick;
+volatile uint32_t lcd_kicks;            /* transfers started (diagnostics) */
 static bool kicked;
 
 void lcd_update(void)
@@ -359,6 +360,7 @@ void lcd_update(void)
     dcache_clean_range((void *)FRAME_ADDR, sizeof(lcd_back));
     lc->irq.clr |= 1;
     lc->ctrl |= 8;
+    lcd_kicks++;
     last_kick = kernel_ticks();
     kicked = true;
 }

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """The RTC calendar (drivers/rtc.c) and the "Date & time" screen (apps/clock.c) in QEMU.
 
-Until the screen has a menu entry, the test links its own copy of the OS
-with app_clock kept (-Wl,-u,app_clock; the build's objects, the Makefile's
-link command) and, in the running guest, points the System entry of the
-main menu at app_clock. Then:
+The test links its own copy of the OS from the build's objects (the
+Makefile's link command, app_clock kept with -Wl,-u) and opens the screen
+through Menu -> Settings -> Date & time. Then:
   - the RTC model is preset to 2026-03-15 10:20:30 (the stock day count:
     days since 1980-01-01) and the screen must show it;
   - typing 07 11 2026 14 05 09, Up on the seconds, Left, Down on the
@@ -32,7 +31,7 @@ REPO = Path(__file__).resolve().parents[2]
 BOOT = runpy.run_path(str(Path(__file__).with_name('test-boot.py')), run_name='test_boot')
 QT, capture = BOOT['QT'], BOOT['capture']
 status, string, wait_for, free_port = (BOOT[n] for n in ('status', 'string', 'wait_for', 'free_port'))
-MAGIC, ST_ALL = BOOT['MAGIC'], BOOT['ST_ALL']
+MAGIC, ST_ALL, MENU = BOOT['MAGIC'], BOOT['ST_ALL'], BOOT['MENU']
 
 RTC = 0x82001600
 EPOCH = datetime.date(1980, 1, 1)
@@ -96,7 +95,6 @@ def main():
     sym = symbols(elf)
     base = sym['os_status'][0]
     state = sym['clock_state'][0]
-    app_clock, app_system = sym['app_clock'][0] | 1, sym['app_system'][0] & ~1
 
     card = out / 'card.img'
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
@@ -162,16 +160,6 @@ def main():
             wait_for(qt, base, lambda s: s['selftest_done'] == ST_ALL, 60, 'self-test incomplete')
             wait_for(qt, base, lambda s: s['ui_depth'] == 1, 10, 'no UI')
 
-            # The menu's System entry opens the clock screen instead.
-            slot = None
-            for table in sym.get('entries', []):
-                for i in range(16):
-                    if qt.read(table + 8 * i + 4) & ~1 == app_system:
-                        slot = (table + 8 * i + 4, i)
-                        break
-            assert slot, 'no menu entry for app_system'
-            qt.write(slot[0], app_clock)
-            result['menu_index'] = slot[1]
 
             # A clock as the stock firmware leaves it: 2026-03-15 10:20:30.
             preset = days(2026, 3, 15)
@@ -180,8 +168,11 @@ def main():
             qt.write(RTC + 0x38, 0xf00)                # the model's acknowledgements
             assert rtc()[3] == preset, rtc()
 
-            to('ret', 'Menu')
-            for _ in range(slot[1]):
+            to('ret', 'Menu')                        # Menu -> Settings -> Date & time
+            for _ in range(MENU.index('Settings')):
+                key('down')
+            to('ret', 'Settings')
+            for _ in range(3):
                 key('down')
             to('ret', TITLE)
             time.sleep(0.6)
@@ -200,7 +191,7 @@ def main():
             result['typed'] = f
             assert f == [7, 11, 2026, 14, 4, 10], f
             shot('clock-typed')
-            to('f1', 'Menu')                         # Save
+            to('f1', 'Settings')                     # Save
             r = rtc()
             result['rtc_after_save'] = r
             assert r[3] == days(2026, 11, 7) == 17112 and r[2] == 14 and r[1] == 4, r
@@ -213,7 +204,7 @@ def main():
             assert f[:5] == [7, 11, 2026, 14, 4], f
             for d in '31022028':
                 key(d, 0.15)
-            to('f1', 'Menu')
+            to('f1', 'Settings')
             r = rtc()
             result['rtc_leap'] = r
             assert r[3] == days(2028, 2, 29) and r[2] == 14 and r[1] == 4, r
@@ -226,7 +217,7 @@ def main():
             shot('clock-leap')
             key('up')                                # 29.02. -> 01.02.
             assert fields()[0] == 1, fields()
-            to('f2', 'Menu')                         # Cancel
+            to('f2', 'Settings')                     # Cancel
             assert rtc()[3] == days(2028, 2, 29), rtc()
             result['cancel_kept'] = True
             time.sleep(2.5)                          # the log thread writes

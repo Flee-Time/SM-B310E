@@ -57,4 +57,9 @@ bool usb_cable(void);
 /* The "USB storage" screen (apps/usb.c). */
 struct screen *app_usb(void);
 
+/* The last mass storage commands of the session (opcode, page, direction,
+ * length, result, sense) to the card log; the USB screen calls it once
+ * the card is back. */
+void usb_msc_trace_log(void);
+
 #endif

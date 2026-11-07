@@ -25,12 +25,16 @@ void lcd_sleep(void);           /* display off, panel sleep, LCDC clock off */
 void lcd_wake(void);            /* back on, then pushes the frame */
 bool lcd_asleep(void);
 uint32_t lcd_transfer_ms(void);     /* the spacing between transfers */
+extern volatile uint32_t lcd_kicks; /* transfers started */
 uint32_t lcd_measure(void);         /* one transfer by the done flag, us */
 
 /* ---- backlight, keypad light ------------------------------------------- */
 void backlight_set(int percent);
 void keylight_set(bool on);
 void vibrator_set(int level);       /* 0 off, 1..7 */
+
+/* ---- system DMA (drivers/dma.c) ------------------------------------------ */
+void dma_quiesce(void);             /* every channel off, every request unbound */
 
 /* ---- GPIO, torch (drivers/gpio.c) --------------------------------------- */
 void gpio_clock_on(void);

@@ -56,6 +56,8 @@ static void usb_leave(screen_t *s)
              (unsigned long)usb_stat.sd_errors, (unsigned long)usb_stat.setups,
              (unsigned long)usb_stat.bus_resets, (unsigned long)usb_stat.irqs,
              usb_stat.polled ? ", polled" : "");
+    if (st.started)
+        usb_msc_trace_log();
     klog("usb: card %s", usb_app_resume_result == 0 ? "mounted again"
                                                     : "not mounted again");
 }

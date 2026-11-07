@@ -43,11 +43,36 @@ _vectors:
     .global _start
     .type   _start, %function
 _start:
+    mrc     p15, 0, r12, c1, c0, 0      /* the control register we were given */
     msr     cpsr_c, #0xd3       /* SVC, IRQ and FIQ masked */
     mov     r0, #0x80000000
     mvn     r1, #0
     str     r1, [r0, #0x0c]     /* INTC: mask every line */
-    ldr     sp, =__svc_stack_top
+
+    /* Entered with the MMU and D-cache on, the cache holds the truth:
+     * write it back and switch both off before zeroing .bss. Otherwise
+     * stores that hit lines the loader left cached stay in the cache and
+     * mmu_setup's invalidate drops them, and those .bss words keep the
+     * loader's data (on the phone 2026-11-07: the UI's screen stack and
+     * the app list, a crash leaving the Stopwatch and at every boot). */
+    and     r0, r12, #5
+    cmp     r0, #5
+    bne     2f
+3:  mrc     p15, 0, APSR_nzcv, c7, c14, 3   /* test, clean and invalidate */
+    bne     3b
+    mov     r0, #0
+    mcr     p15, 0, r0, c7, c10, 4      /* drain the write buffer */
+    mrc     p15, 0, r0, c1, c0, 0
+    bic     r0, r0, #0x1000             /* I */
+    bic     r0, r0, #0x0004             /* C */
+    bic     r0, r0, #0x0001             /* M (the loader's map is identity) */
+    mcr     p15, 0, r0, c1, c0, 0
+    nop
+    nop
+    mov     r0, #0
+    mcr     p15, 0, r0, c7, c5, 0       /* invalidate the I-cache */
+    mcr     p15, 0, r0, c8, c7, 0       /* and the TLBs */
+2:  ldr     sp, =__svc_stack_top
 
     ldr     r0, =__bss_start    /* zero .bss (stacks, the L2 table) */
     ldr     r1, =__bss_end
@@ -55,6 +80,8 @@ _start:
 1:  cmp     r0, r1
     strlo   r2, [r0], #4
     blo     1b
+    ldr     r0, =boot_control   /* for the boot log */
+    str     r12, [r0]
 
     msr     cpsr_c, #0xd2       /* IRQ */
     ldr     sp, =__irq_stack_top
@@ -71,8 +98,8 @@ _start:
 2:  b       2b
 
 /* Identity MMU with cached PSRAM and the high-vector page; then MMU, the
- * D-cache and the I-cache on. The boot menu leaves the caches off, so the
- * invalidates below lose nothing. */
+ * D-cache and the I-cache on. _start has written back and switched off a
+ * cache the loader left on, so the invalidates below lose nothing. */
     .type   mmu_setup, %function
 mmu_setup:
     ldr     r0, =__l2_vectors   /* va 0xffff0000 -> pa _vectors */
@@ -311,3 +338,9 @@ udelay:
     bne     1b
     bx      lr
     .ltorg
+
+    .bss
+    .global boot_control
+    .align  2
+boot_control:                   /* the CP15 control register at entry */
+    .space  4

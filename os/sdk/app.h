@@ -80,6 +80,13 @@ void *memset(void *dst, int c, size_t n);
 #define f_mkdir           (os->f_mkdir)
 #define f_unlink          (os->f_unlink)
 #define f_rename          (os->f_rename)
+#define gfx_text_height   (os->gfx_text_height)
+#define gfx_round         (os->gfx_round)
+#define gfx_round_alpha   (os->gfx_round_alpha)
+#define gfx_shade         (os->gfx_shade)
+#define gfx_icon          (os->gfx_icon)
+#define gfx_bar           (os->gfx_bar)
+#define gfx_switch        (os->gfx_switch)
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 

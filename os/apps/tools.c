@@ -17,7 +17,6 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     switch (i) {
     case T_TORCH:
         snprintf(text, (size_t)tn, "Torch");
-        snprintf(detail, (size_t)dn, "%s", torch_get() ? "on" : "off");
         break;
     case T_VIBRATE:
         snprintf(text, (size_t)tn, "Vibrate");
@@ -32,10 +31,22 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     }
 }
 
+static const icon_t *tool_icon(void *ctx, int i)
+{
+    static const icon_t *const icons[] = { &icon_torch, &icon_vibrate, &icon_sim, &icon_usb };
+
+    return icons[i];
+}
+
+static int tool_toggle(void *ctx, int i)
+{
+    return i == T_TORCH ? torch_get() : -1;
+}
+
 static void draw(screen_t *s)
 {
     list_draw(&list);
-    gfx_text(2, UI_BOTTOM - 10, "hold 0 anywhere: torch", C_DIM, FONT_SMALL, 1, 0);
+    gfx_text_centered(UI_BOTTOM - 12, "hold 0 anywhere: torch", C_DIM, FONT_SMALL, 1);
 }
 
 static void tick(screen_t *s)
@@ -83,5 +94,7 @@ screen_t *app_tools(void)
 {
     list.count = T_COUNT;
     list.item = item;
+    list.icon = tool_icon;
+    list.toggle = tool_toggle;
     return &screen;
 }

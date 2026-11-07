@@ -46,7 +46,16 @@ static void set_item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     }
 }
 
-static list_t set_list = { .count = 5, .item = set_item };
+static const icon_t *set_icon(void *ctx, int i)
+{
+    static const icon_t *const icons[] = {
+        &icon_sun, &icon_screen, &icon_cpu, &icon_clock, &icon_info,
+    };
+
+    return icons[i];
+}
+
+static list_t set_list = { .count = 5, .item = set_item, .icon = set_icon };
 
 static void set_draw(screen_t *s)
 {
@@ -89,7 +98,7 @@ static void set_key(screen_t *s, const key_event_t *ev)
 }
 
 static screen_t settings = {
-    .title = "Settings", .left = "Change", .center = "OK", .right = "Back",
+    .title = "Settings", .left = "Edit", .center = "OK", .right = "Back",
     .draw = set_draw, .key = set_key,
 };
 
@@ -105,7 +114,12 @@ static void power_item(void *ctx, int i, char *text, int tn, char *detail, int d
     snprintf(text, (size_t)tn, "%s", i == 0 ? "Power off" : "Restart to menu");
 }
 
-static list_t power_list = { .count = 2, .item = power_item };
+static const icon_t *power_icon(void *ctx, int i)
+{
+    return i == 0 ? &icon_power : &icon_restart;
+}
+
+static list_t power_list = { .count = 2, .item = power_item, .icon = power_icon };
 
 static void power_draw(screen_t *s)
 {

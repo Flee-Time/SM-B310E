@@ -2,7 +2,7 @@
  * mic gain, the output in use and the headset.
  *
  * Keys: Up/Down choose, Center starts or stops, Left/Right change the
- * volume (the mic gain on its row); headset buttons: + and - volume,
+ * value on the Volume and Mic gain rows; headset buttons: + and - volume,
  * centre starts or stops the selected row.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -16,7 +16,7 @@
 
 #define MAX_FILES 32
 
-enum { ROW_TONE, ROW_PLAY, ROW_LAST, ROW_REC, ROW_GAIN, ROWS };
+enum { ROW_TONE, ROW_PLAY, ROW_LAST, ROW_REC, ROW_GAIN, ROW_VOL, ROW_OUT, ROWS };
 
 static list_t rows;
 static char files[MAX_FILES][48];
@@ -45,7 +45,39 @@ static void row_text(void *ctx, int i, char *text, int tn, char *detail, int dn)
         snprintf(text, (size_t)tn, "Mic gain");
         snprintf(detail, (size_t)dn, "%d", audio_get_mic_gain());
         break;
+    case ROW_VOL: {
+        int vol = audio_get_volume();
+
+        snprintf(text, (size_t)tn, "Volume");
+        if (vol <= -1000)
+            snprintf(detail, (size_t)dn, "mute");
+        else
+            snprintf(detail, (size_t)dn, "%s%d dB", vol < 0 && vol > -10 ? "-" : "", vol / 10);
+        break;
     }
+    case ROW_OUT: {
+        audio_headset_info_t hs;
+
+        audio_headset_info(&hs);
+        snprintf(text, (size_t)tn, "%s", audio_speaker() ? "Speaker" : "Headphones");
+        snprintf(detail, (size_t)dn, "%s", !hs.inserted ? "" : hs.buttons ? "4-pole" : "3-pole");
+        break;
+    }
+    }
+    if (i == ROW_TONE || i == ROW_PLAY || i == ROW_LAST) {
+        if (wav_playing() && ((i == ROW_TONE) == !strcmp(wav_name(), "1000 Hz tone")))
+            snprintf(detail, (size_t)dn, "%lu s", (unsigned long)wav_seconds());
+    }
+}
+
+static const icon_t *row_icon(void *ctx, int i)
+{
+    static const icon_t *const icons[ROWS] = {
+        &icon_music, &icon_play, &icon_play, &icon_record, &icon_mic, &icon_sun,
+        &icon_vibrate,
+    };
+
+    return icons[i];
 }
 
 /* ---- file chooser ------------------------------------------------------- */
@@ -105,6 +137,11 @@ static screen_t picker = {
     .draw = pick_draw, .key = pick_key,
 };
 
+static const icon_t *pick_icon(void *ctx, int i)
+{
+    return &icon_music;
+}
+
 static void open_picker(void)
 {
     n_files = 0;
@@ -113,6 +150,7 @@ static void open_picker(void)
     pick.count = n_files;
     pick.sel = pick.top = 0;
     pick.item = pick_text;
+    pick.icon = pick_icon;
     ui_push(&picker);
 }
 
@@ -120,28 +158,22 @@ static void open_picker(void)
 
 static void draw(screen_t *s)
 {
-    char buf[40];
-    audio_headset_info_t hs;
-    int y = UI_TOP + ROWS * UI_ROW_H + 4, vol = audio_get_volume();
     unsigned pk = audio_peak();
 
     list_draw(&rows);
-    audio_headset_info(&hs);
-    snprintf(buf, sizeof(buf), "%s, volume %s%d dB", audio_speaker() ? "speaker" : "headphones",
-             vol < 0 && vol > -10 ? "-" : "", vol / 10);
-    gfx_text(2, y, buf, C_TEXT, FONT_SMALL, 1, LCD_WIDTH - 4);
-    snprintf(buf, sizeof(buf), "headset: %s%s", !hs.inserted ? "none" :
-             hs.buttons ? "4-pole" : "3-pole",
-             hs.held == AUDIO_HS_CENTER ? " [C]" : hs.held == AUDIO_HS_PLUS ? " [+]" :
-             hs.held == AUDIO_HS_MINUS ? " [-]" : "");
-    gfx_text(2, y + 10, buf, C_DIM, FONT_SMALL, 1, LCD_WIDTH - 4);
+    if (wav_playing() || wav_recording()) {     /* a level meter by the title */
+        int w = 40, x = LCD_WIDTH - UI_PAD - w;
+
+        gfx_bar(x, UI_STATUS_H + (UI_TITLE_H - 4) / 2, w, 4, (int)pk, 32768,
+                pk > 30000 ? C_BAD : wav_recording() ? C_BAD : C_OK);
+    }
+}
+
+static void show_error(void)
+{
     if (error)
-        gfx_text(2, y + 20, error, C_BAD, FONT_SMALL, 1, LCD_WIDTH - 4);
-    else if (wav_playing() || wav_recording())
-        gfx_text(2, y + 20, wav_name(), C_DIM, FONT_SMALL, 1, LCD_WIDTH - 4);
-    if (wav_playing() || wav_recording())           /* level meter */
-        gfx_fill(2, y + 30, (int)(pk * (LCD_WIDTH - 4) / 32768), 3,
-                 pk > 30000 ? C_BAD : C_OK);
+        ui_message("Sound", error);
+    error = NULL;
 }
 
 static void toggle(int row)
@@ -188,6 +220,7 @@ static void key(screen_t *s, const key_event_t *ev)
     case KEY_LSOFT:
     case KEY_HS_CENTER:
         toggle(rows.sel);
+        show_error();
         break;
     case KEY_LEFT:
     case KEY_RIGHT:
@@ -195,6 +228,8 @@ static void key(screen_t *s, const key_event_t *ev)
             audio_set_mic_gain(audio_get_mic_gain() + (ev->code == KEY_RIGHT ? 1 : -1));
             break;
         }
+        if (rows.sel != ROW_VOL)
+            break;
         /* fall through */
     case KEY_HS_PLUS:
     case KEY_HS_MINUS:
@@ -230,6 +265,7 @@ screen_t *app_sound(void)
 {
     rows.count = ROWS;
     rows.item = row_text;
+    rows.icon = row_icon;
     error = NULL;
     return &screen;
 }

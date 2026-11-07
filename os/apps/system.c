@@ -10,7 +10,7 @@
 #include "os/ui.h"
 
 #define MAX_THREADS 24
-#define LINE_H      9
+#define LINE_H      11
 
 static struct {
     thread_t *t;
@@ -49,81 +49,100 @@ static void sample(void)
     last_total = total;
 }
 
-static int line(int y, int idx, const char *text, uint16_t c)
+/* One row: a dim label at the left, its value at the right. */
+static int row(int y, int idx, const char *label, const char *value, uint16_t c)
 {
-    int row = idx - first;
+    int r = idx - first, yy = y + r * LINE_H;
 
-    if (row >= 0 && y + row * LINE_H < UI_BOTTOM - LINE_H + 1)
-        gfx_text(2, y + row * LINE_H, text, c, FONT_SMALL, 1, LCD_WIDTH - 4);
+    if (r >= 0 && yy <= UI_BOTTOM - LINE_H) {
+        int vw = gfx_text_width(value, FONT_SMALL, 1);
+
+        gfx_text(UI_PAD + 2, yy, label, C_DIM, FONT_SMALL, 1, 0);
+        gfx_text(LCD_WIDTH - UI_PAD - 2 - vw, yy, value, c, FONT_SMALL, 1, 0);
+    }
+    return idx + 1;
+}
+
+static int heading(int y, int idx, const char *text)
+{
+    int r = idx - first, yy = y + r * LINE_H;
+
+    if (r >= 0 && yy <= UI_BOTTOM - LINE_H) {
+        gfx_fill(UI_PAD, yy + 3, LCD_WIDTH - 2 * UI_PAD, 1, C_CARD_HI);
+        gfx_fill(UI_PAD + 2, yy, gfx_text_width(text, FONT_SMALL, 1) + 6, 8, C_BG);
+        gfx_text(UI_PAD + 5, yy, text, C_ACCENT, FONT_SMALL, 1, 0);
+    }
     return idx + 1;
 }
 
 static void draw(screen_t *s)
 {
-    char buf[40];
+    char v[32];
     const fs_info_t *fi = fs_info();
     sd_stats_t st;
     uint32_t t = kernel_ticks(), idle = kernel_idle_permille();
     uint32_t load = idle < 1000 ? 1000 - idle : 0;
-    int mv = (int)os_status.battery_mv, y = UI_TOP + 3, i = 0;
+    int mv = (int)os_status.battery_mv, y = UI_TOP + 4, i = 0;
 
-    snprintf(buf, sizeof(buf), "up %luh %02lum %02lus", (unsigned long)(t / 3600000),
+    snprintf(v, sizeof(v), "%luh %02lum %02lus", (unsigned long)(t / 3600000),
              (unsigned long)(t / 60000 % 60), (unsigned long)(t / 1000 % 60));
-    i = line(y, i, buf, C_TEXT);
-    snprintf(buf, sizeof(buf), "CPU %dMHz load %lu.%lu%%", clock_mhz(),
+    i = row(y, i, "Uptime", v, C_TEXT);
+    snprintf(v, sizeof(v), "%d MHz, %lu.%lu%%", clock_mhz(),
              (unsigned long)(load / 10), (unsigned long)(load % 10));
-    i = line(y, i, buf, load > 800 ? C_WARN : C_TEXT);
-    snprintf(buf, sizeof(buf), "irq %lu/s, stray %lu", (unsigned long)irqs_per_s,
-             (unsigned long)irq_stray_count);
-    i = line(y, i, buf, irq_stray_count ? C_WARN : C_DIM);
+    i = row(y, i, "CPU", v, load > 800 ? C_WARN : C_TEXT);
+    snprintf(v, sizeof(v), "%lu/s%s", (unsigned long)irqs_per_s,
+             irq_stray_count ? ", stray!" : "");
+    i = row(y, i, "Interrupts", v, irq_stray_count ? C_WARN : C_TEXT);
     {                                   /* the two busiest lines */
-        int a = -1, b = -1;
+        int a = -1, bb = -1;
 
         for (int l = 0; l < 32; l++) {
             if (!line_per_s[l])
                 continue;
             if (a < 0 || line_per_s[l] > line_per_s[a]) {
-                b = a;
+                bb = a;
                 a = l;
-            } else if (b < 0 || line_per_s[l] > line_per_s[b]) {
-                b = l;
+            } else if (bb < 0 || line_per_s[l] > line_per_s[bb]) {
+                bb = l;
             }
         }
-        if (a >= 0 && b >= 0)
-            snprintf(buf, sizeof(buf), " #%d %lu/s, #%d %lu/s", a, (unsigned long)line_per_s[a],
-                     b, (unsigned long)line_per_s[b]);
+        if (a >= 0 && bb >= 0)
+            snprintf(v, sizeof(v), "#%d %lu, #%d %lu", a, (unsigned long)line_per_s[a],
+                     bb, (unsigned long)line_per_s[bb]);
         else if (a >= 0)
-            snprintf(buf, sizeof(buf), " #%d %lu/s", a, (unsigned long)line_per_s[a]);
+            snprintf(v, sizeof(v), "#%d %lu", a, (unsigned long)line_per_s[a]);
         else
-            buf[0] = 0;
-        i = line(y, i, buf, C_DIM);
+            snprintf(v, sizeof(v), "-");
+        i = row(y, i, "Busiest", v, C_DIM);
     }
-    snprintf(buf, sizeof(buf), "heap %lu KB free", (unsigned long)(heap_free_bytes() / 1024));
-    i = line(y, i, buf, C_TEXT);
+    snprintf(v, sizeof(v), "%lu KB free", (unsigned long)(heap_free_bytes() / 1024));
+    i = row(y, i, "Memory", v, C_TEXT);
     if (fi->mounted && fi->free_known)
-        snprintf(buf, sizeof(buf), "card %lu MB, %lu free", (unsigned long)(fi->sectors / 2048),
+        snprintf(v, sizeof(v), "%lu MB, %lu free", (unsigned long)(fi->sectors / 2048),
                  (unsigned long)(fi->free_kib / 1024));
     else if (fi->mounted)
-        snprintf(buf, sizeof(buf), "card %lu MB, counting", (unsigned long)(fi->sectors / 2048));
+        snprintf(v, sizeof(v), "%lu MB", (unsigned long)(fi->sectors / 2048));
     else
-        snprintf(buf, sizeof(buf), "card: none (%d)", fi->sd_code);
-    i = line(y, i, buf, C_TEXT);
+        snprintf(v, sizeof(v), "none (%d)", fi->sd_code);
+    i = row(y, i, "Card", v, C_TEXT);
     sd_get_stats(&st);
-    snprintf(buf, sizeof(buf), "sd r%lu w%lu e%lu/%lu", (unsigned long)st.blocks_read,
+    snprintf(v, sizeof(v), "r%lu w%lu e%lu/%lu", (unsigned long)st.blocks_read,
              (unsigned long)st.blocks_written, (unsigned long)st.retries,
              (unsigned long)st.failures);
-    i = line(y, i, buf, st.failures ? C_BAD : C_DIM);
+    i = row(y, i, "SD blocks", v, st.failures ? C_BAD : C_DIM);
     if (mv > 0)
-        snprintf(buf, sizeof(buf), "battery %d.%02d V %d%%%s", mv / 1000, mv % 1000 / 10,
-                 battery_percent(mv), charger_present() ? " chg" : "");
+        snprintf(v, sizeof(v), "%d.%02d V, %d%%%s", mv / 1000, mv % 1000 / 10,
+                 battery_percent(mv), charger_present() ? ", chg" : "");
     else
-        snprintf(buf, sizeof(buf), "battery --%s", charger_present() ? " chg" : "");
-    i = line(y, i, buf, C_TEXT);
-    i = line(y, i, "thread      pri  cpu", C_ACCENT);
+        snprintf(v, sizeof(v), "--%s", charger_present() ? ", chg" : "");
+    i = row(y, i, "Battery", v, C_TEXT);
+    i = heading(y, i, "Threads");
     for (int n = 0; n < MAX_THREADS && seen[n].t; n++) {
-        snprintf(buf, sizeof(buf), "%-11.11s %3u %3u.%u", seen[n].t->name,
-                 seen[n].t->prio, seen[n].permille / 10, seen[n].permille % 10);
-        i = line(y, i, buf, C_TEXT);
+        char label[24];
+
+        snprintf(label, sizeof(label), "%s (%u)", seen[n].t->name, seen[n].t->prio);
+        snprintf(v, sizeof(v), "%u.%u%%", seen[n].permille / 10, seen[n].permille % 10);
+        i = row(y, i, label, v, C_TEXT);
     }
 }
 

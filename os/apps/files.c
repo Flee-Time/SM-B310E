@@ -40,9 +40,16 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     browser_t *b = ctx;
     entry_t *e = &b->entries[i];
 
-    snprintf(text, (size_t)tn, "%s%s", e->name, e->dir ? "/" : "");
+    snprintf(text, (size_t)tn, "%s", e->name);
     if (!e->dir)
         size_text(e->size, detail, dn);
+}
+
+static const icon_t *entry_icon(void *ctx, int i)
+{
+    browser_t *b = ctx;
+
+    return b->entries[i].dir ? &icon_folder : &icon_file;
 }
 
 /* two passes: folders, then files, in directory order */
@@ -211,6 +218,7 @@ screen_t *app_files(const char *path)
     b->s.data = b;
     b->s.free_on_pop = true;
     b->list.item = item;
+    b->list.icon = entry_icon;
     b->list.ctx = b;
     return &b->s;
 }

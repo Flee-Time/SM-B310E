@@ -110,58 +110,59 @@ static void protocols_text(char *buf, size_t n, uint32_t proto, uint32_t mask)
         snprintf(buf, n, "T=%lu", (unsigned long)proto);
 }
 
+/* One card a slot: the SIM icon, the slot and its state, then the card's
+ * voltage, protocol, ATR length and the SELECT MF answer. */
 static void draw(screen_t *s)
 {
     char buf[32], pt[12];
-    int y = UI_TOP + 4;
+    int y = UI_TOP + 3, x = UI_PAD, w = LCD_WIDTH - 2 * UI_PAD;
 
     for (int i = 0; i < SIM_SLOTS; i++) {
         volatile sim_slot_report_t *r = &sim_app_status.slot[i];
-        uint16_t c = C_TEXT;
+        const char *state;
+        uint16_t c = C_DIM;
+        char title[8];
 
-        if (r->state == SLOT_READING || (r->state == SLOT_IDLE && sim_app_status.busy)) {
-            snprintf(buf, sizeof(buf), "SIM %d: reading...", i + 1);
-            c = C_DIM;
-        } else if (r->state == SLOT_IDLE) {
-            snprintf(buf, sizeof(buf), "SIM %d: -", i + 1);
-            c = C_DIM;
-        } else if (r->result == SIM_OK) {
-            snprintf(buf, sizeof(buf), "SIM %d: card", i + 1);
-            c = C_OK;
-        } else if (r->result == SIM_ENOCARD) {
-            snprintf(buf, sizeof(buf), "SIM %d: no card", i + 1);
-            c = C_DIM;
-        } else {
-            snprintf(buf, sizeof(buf), "SIM %d: %s", i + 1, sim_strerror(r->result));
-            c = C_BAD;
-        }
-        gfx_text(2, y, buf, c, FONT_SMALL, 1, LCD_WIDTH - 4);
-        y += LINE_H + 2;
+        if (r->state == SLOT_READING || (r->state == SLOT_IDLE && sim_app_status.busy))
+            state = "reading...";
+        else if (r->state == SLOT_IDLE)
+            state = "-";
+        else if (r->result == SIM_OK)
+            state = "card", c = C_OK;
+        else if (r->result == SIM_ENOCARD)
+            state = "no card";
+        else
+            state = sim_strerror(r->result), c = C_BAD;
+
+        gfx_round(x, y, w, 52, UI_RADIUS, C_CARD);
+        gfx_icon(x + 4, y + 4, &icon_sim, r->result == SIM_OK && r->state == SLOT_DONE ?
+                 C_ACCENT : C_DIM);
+        snprintf(title, sizeof(title), "SIM %d", i + 1);
+        gfx_text(x + 21, y + 5, title, C_TEXT, FONT_BODY, 1, 0);
+        gfx_text(x + w - 5 - gfx_text_width(state, FONT_SMALL, 1), y + 6, state, c,
+                 FONT_SMALL, 1, 0);
         if (r->state == SLOT_DONE && r->result == SIM_OK) {
             protocols_text(pt, sizeof(pt), r->proto, r->protocols);
-            snprintf(buf, sizeof(buf), " %s V %s ATR %lu%s%s",
+            snprintf(buf, sizeof(buf), "%s V, %s, ATR %lu%s%s",
                      r->mv >= 3000 ? "3" : "1.8", pt, (unsigned long)r->atr_len,
                      r->flags & F_INVERSE ? " inv" : "",
                      r->flags & (F_TCK_BAD | F_SHORT) ? " !" : "");
-            gfx_text(2, y, buf, C_TEXT, FONT_SMALL, 1, LCD_WIDTH - 4);
-            y += LINE_H;
+            gfx_text(x + 6, y + 22, buf, C_TEXT, FONT_SMALL, 1, w - 12);
             if (r->sw > 0) {
                 bool ok = r->sw == 0x9000 || (r->sw >> 8) == 0x9f;
 
-                snprintf(buf, sizeof(buf), " MF 3F00: %04lX %s",
-                         (unsigned long)r->sw, ok ? "ok" : "");
-                gfx_text(2, y, buf, ok ? C_OK : C_WARN, FONT_SMALL, 1, LCD_WIDTH - 4);
+                snprintf(buf, sizeof(buf), "MF 3F00: %04lX %s", (unsigned long)r->sw,
+                         ok ? "ok" : "");
+                gfx_text(x + 6, y + 35, buf, ok ? C_OK : C_WARN, FONT_SMALL, 1, w - 12);
             } else {
-                snprintf(buf, sizeof(buf), " MF 3F00: %s", sim_strerror(r->sw));
-                gfx_text(2, y, buf, C_BAD, FONT_SMALL, 1, LCD_WIDTH - 4);
+                snprintf(buf, sizeof(buf), "MF 3F00: %s", sim_strerror(r->sw));
+                gfx_text(x + 6, y + 35, buf, C_BAD, FONT_SMALL, 1, w - 12);
             }
-            y += LINE_H;
         } else if (r->state == SLOT_DONE && r->atr_len) {
-            snprintf(buf, sizeof(buf), " ATR %lu bytes", (unsigned long)r->atr_len);
-            gfx_text(2, y, buf, C_DIM, FONT_SMALL, 1, LCD_WIDTH - 4);
-            y += LINE_H;
+            snprintf(buf, sizeof(buf), "ATR %lu bytes", (unsigned long)r->atr_len);
+            gfx_text(x + 6, y + 22, buf, C_DIM, FONT_SMALL, 1, w - 12);
         }
-        y += 8;
+        y += 56;
     }
 }
 

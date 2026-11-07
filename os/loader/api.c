@@ -1,4 +1,4 @@
-/* B310E OS — the API table apps get (os/app.h). Version 1.0: append new
+/* B310E OS — the API table apps get (os/app.h). Version 2.0: append new
  * members at the end and raise OS_API_MINOR; anything else is a new major.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -38,4 +38,8 @@ const os_api_t os_api = {
     .f_opendir = f_opendir, .f_closedir = f_closedir, .f_readdir = f_readdir,
     .f_stat = f_stat, .f_mkdir = f_mkdir, .f_unlink = f_unlink,
     .f_rename = f_rename,
+
+    .gfx_text_height = gfx_text_height, .gfx_round = gfx_round,
+    .gfx_round_alpha = gfx_round_alpha, .gfx_shade = gfx_shade,
+    .gfx_icon = gfx_icon, .gfx_bar = gfx_bar, .gfx_switch = gfx_switch,
 };

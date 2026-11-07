@@ -166,63 +166,77 @@ int ui_depth(void)
 static void draw_status(void)
 {
     char buf[16];
-    int pct;
+    int pct, sh = gfx_text_height(FONT_SMALL, 1), y = (UI_STATUS_H - sh) / 2;
+    int x = LCD_WIDTH - UI_PAD - 17;
     rtc_datetime_t t;
 
     gfx_fill(0, 0, LCD_WIDTH, UI_STATUS_H, C_BAR);
     rtc_get(&t);
     snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.min);
-    gfx_text(3, 2, buf, C_TEXT, FONT_SMALL, 1, 0);
-    if (fs_info()->mounted)
-        gfx_text(LCD_WIDTH / 2 - 6, 2, "SD", C_DIM, FONT_SMALL, 1, 0);
-    if (torch_get())
-        gfx_text(LCD_WIDTH / 2 + 10, 2, "*", C_WARN, FONT_SMALL, 1, 0);
+    gfx_text(UI_PAD + 2, y, buf, C_TEXT, FONT_SMALL, 1, 0);
 
+    /* battery: a rounded outline, its level, the cap */
     pct = battery_percent(bat_mv);
+    gfx_rect(x, 2, 15, 7, C_DIM);
+    gfx_fill(x + 15, 4, 2, 3, C_DIM);
+    if (pct > 0 || charging)
+        gfx_fill(x + 2, 4, charging ? 11 : (pct * 11 + 99) / 100, 3,
+                 charging ? C_OK : pct <= 15 ? C_BAD : C_TEXT);
     if (charging)
         snprintf(buf, sizeof(buf), "chg");
     else if (pct >= 0)
         snprintf(buf, sizeof(buf), "%d%%", pct);
     else
         snprintf(buf, sizeof(buf), "--");
-    /* battery outline with a fill bar, the text left of it */
-    gfx_rect(LCD_WIDTH - 17, 2, 14, 8, C_TEXT);
-    gfx_fill(LCD_WIDTH - 3, 4, 2, 4, C_TEXT);
-    if (pct > 0 || charging)
-        gfx_fill(LCD_WIDTH - 15, 4, charging ? 10 : (pct * 10 + 99) / 100, 4,
-                 charging ? C_OK : pct <= 15 ? C_BAD : C_TEXT);
-    gfx_text(LCD_WIDTH - 20 - gfx_text_width(buf, FONT_SMALL, 1), 2, buf,
-             C_TEXT, FONT_SMALL, 1, 0);
+    x -= gfx_text_width(buf, FONT_SMALL, 1) + 3;
+    gfx_text(x, y, buf, C_TEXT, FONT_SMALL, 1, 0);
+    if (fs_info()->mounted) {
+        x -= gfx_text_width("SD", FONT_SMALL, 1) + 6;
+        gfx_text(x, y, "SD", C_DIM, FONT_SMALL, 1, 0);
+    }
+    if (torch_get()) {                  /* a lit square */
+        x -= 8;
+        gfx_fill(x, (UI_STATUS_H - 4) / 2, 4, 4, C_WARN);
+    }
 }
 
-static void draw_bars(screen_t *s)
+static void draw_bars(screen_t *s, const char *title)
 {
+    int bh = gfx_text_height(FONT_BODY, 1), y = UI_BOTTOM + (UI_SOFT_H - bh) / 2;
+
     gfx_fill(0, UI_STATUS_H, LCD_WIDTH, UI_TITLE_H, C_TITLE);
-    gfx_text(4, UI_STATUS_H, s->title ? s->title : "", C_TEXT, FONT_LARGE, 1,
-             LCD_WIDTH - 8);
-    gfx_hline(0, UI_TOP - 1, LCD_WIDTH, C_ACCENT);
+    gfx_text(UI_PAD + 2, UI_STATUS_H + (UI_TITLE_H - gfx_text_height(FONT_LARGE, 1)) / 2,
+             title ? title : "", C_TEXT, FONT_LARGE, 1, LCD_WIDTH - 2 * UI_PAD - 4);
 
     gfx_fill(0, UI_BOTTOM, LCD_WIDTH, UI_SOFT_H, C_BAR);
     if (s->left)
-        gfx_text(3, UI_BOTTOM, s->left, C_TEXT, FONT_LARGE, 1, 56);
-    if (s->center)
-        gfx_text_centered(UI_BOTTOM, s->center, C_ACCENT, FONT_LARGE, 1);
+        gfx_text(UI_PAD + 2, y, s->left, C_TEXT, FONT_BODY, 1, 44);
+    if (s->center) {                    /* the main action, in a pill */
+        int w = gfx_text_width(s->center, FONT_BODY, 1) + 14;
+
+        gfx_round((LCD_WIDTH - w) / 2, UI_BOTTOM + 2, w, UI_SOFT_H - 4,
+                  UI_RADIUS, C_ACCENT);
+        gfx_text_centered(y, s->center, C_SEL_TEXT, FONT_BODY, 1);
+    }
     if (s->right)
-        gfx_text(LCD_WIDTH - 3 - gfx_text_width(s->right, FONT_LARGE, 1),
-                 UI_BOTTOM, s->right, C_TEXT, FONT_LARGE, 1, 56);
+        gfx_text(LCD_WIDTH - UI_PAD - 2 - gfx_text_width(s->right, FONT_BODY, 1), y,
+                 s->right, C_TEXT, FONT_BODY, 1, 44);
 }
 
 static void redraw(void)
 {
-    screen_t *s = stack[depth - 1];
+    screen_t *s = stack[depth - 1], *under = depth > 1 ? stack[depth - 2] : NULL;
+    bool overlay = s->overlay && under;
 
     if (light == 2)                     /* asleep: drawn again on wake */
         return;
     dirty = false;
     gfx_fill(0, UI_TOP, LCD_WIDTH, UI_CONTENT_H, C_BG);
+    if (overlay && under->draw)         /* a dialog over the screen under it */
+        AS_OWNER(under, under->draw(under));
     if (s->draw)
         AS_OWNER(s, s->draw(s));
-    draw_bars(s);
+    draw_bars(s, overlay ? under->title : s->title);
     draw_status();
     lcd_update();
 }
@@ -349,6 +363,7 @@ static void every_second(uint32_t now)
 {
     static unsigned n;
     uint32_t timeout = (uint32_t)ui_settings.screen_timeout_s * 1000u;
+
 
     if (n++ % 30 == 0) {                /* the ADC is slow: twice a minute */
         charging = charger_present();

@@ -30,6 +30,11 @@ static void main_thread(void *arg)
     {
         uint32_t us = lcd_measure();
 
+        extern uint32_t boot_control;
+
+        klog("boot: entered with control register %08lx (MMU %s, D-cache %s)",
+             (unsigned long)boot_control, boot_control & 1 ? "on" : "off",
+             boot_control & 4 ? "on" : "off");
         klog("lcd: transfer spacing %lu ms; done flag after %lu us%s",
              (unsigned long)lcd_transfer_ms(), (unsigned long)us,
              us ? "" : " (none)");
@@ -45,6 +50,8 @@ static void main_thread(void *arg)
 void kmain(void)
 {
     watchdog_stop();
+    dma_quiesce();                      /* channels left by the firmware before
+                                         * us wrote into our memory */
     clock_init();
     torch_set(false);                   /* the pin set up once, as Rockbox does
                                          * in power_init: the first toggle was

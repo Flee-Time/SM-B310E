@@ -33,7 +33,10 @@
 #include "ff.h"
 #include "os/ui.h"
 
-#define OS_API_MAJOR 1
+/* 2.0 (2026-11-07): the new UI. screen_t gained overlay, list_t icon and
+ * toggle, so 1.x apps are refused; the table gained the drawing calls
+ * after f_rename. */
+#define OS_API_MAJOR 2
 #define OS_API_MINOR 0
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
@@ -124,6 +127,15 @@ struct os_api {
     FRESULT (*f_mkdir)(const TCHAR *path);
     FRESULT (*f_unlink)(const TCHAR *path);
     FRESULT (*f_rename)(const TCHAR *old_name, const TCHAR *new_name);
+
+    /* the UI's look (2.0) */
+    int (*gfx_text_height)(int font, int scale);
+    void (*gfx_round)(int x, int y, int w, int h, int r, uint16_t c);
+    void (*gfx_round_alpha)(int x, int y, int w, int h, int r, uint16_t c, int alpha);
+    void (*gfx_shade)(int x, int y, int w, int h, uint16_t c, int alpha);
+    void (*gfx_icon)(int x, int y, const icon_t *icon, uint16_t c);
+    void (*gfx_bar)(int x, int y, int w, int h, int value, int max, uint16_t c);
+    void (*gfx_switch)(int x, int y, bool on);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */

@@ -11,7 +11,9 @@ apps/usb.c (QTest points the home screen's tick at usb_test_hook), then:
     MODE SENSE(6) and (10), REQUEST SENSE after failures;
   - unsupported commands with data in, data out and none, an unsupported
     mode page, a read past the end: each fails with the right sense and,
-    where data was expected, a halted pipe the host clears;
+    where data was expected, a zero-length packet (in) or taken data (out)
+    before the CSW, without a halt (the Rockbox port's way; halts after
+    failed commands lost the device on the phone);
   - reads compared with the card image, timed; writes read back, timed;
   - eject and load (START STOP UNIT), mass storage reset, an invalid CBW
     with reset recovery, a host bus reset of the configured device;
@@ -283,24 +285,25 @@ def main():
             st, _, mode10, _ = msc.command(b'\x5a\0\x3f' + b'\0' * 4 + b'\x00\x08\0', data_in=8)
             assert st == 0 and len(mode10) == 8 and mode10[1] == 6, mode10.hex()
 
-            # failures: the right sense, a halted pipe where data was expected
+            # failures: the right sense; the data stage ends with a zero-length
+            # packet (in) or the data is taken (out), no halt, as Rockbox does
             checks = {}
             st, residue, _, stalled = msc.command(b'\x1a\0\x08\0\xc0\0', data_in=192)
             checks['mode_page_8'] = (st, residue, stalled, msc.sense())
-            assert checks['mode_page_8'] == (1, 192, 'in', (5, 0x24, 0)), checks
+            assert checks['mode_page_8'] == (1, 192, None, (5, 0x24, 0)), checks
             st, residue, _, stalled = msc.command(b'\x4a\x01\0\0\x10\0\0\0\x08\0', data_in=8)
             checks['unsupported_in'] = (st, residue, stalled, msc.sense())
-            assert checks['unsupported_in'] == (1, 8, 'in', (5, 0x20, 0)), checks
+            assert checks['unsupported_in'] == (1, 8, None, (5, 0x20, 0)), checks
             st, residue, _, stalled = msc.command(b'\x01' + b'\0' * 5)
             checks['unsupported_none'] = (st, residue, stalled, msc.sense())
             assert checks['unsupported_none'] == (1, 0, None, (5, 0x20, 0)), checks
             st, residue, _, stalled = msc.command(b'\x55\x10' + b'\0' * 5 + b'\x00\x18\0', data_out=bytes(24))
             checks['unsupported_out'] = (st, residue, stalled, msc.sense())
-            assert checks['unsupported_out'] == (1, 24, 'out', (5, 0x20, 0)), checks
+            assert checks['unsupported_out'] == (1, 24, None, (5, 0x20, 0)), checks
             st, residue, _, stalled = msc.command(struct.pack('>BBIBHB', 0x28, 0, last + 1, 0, 1, 0),
                                                   data_in=BLOCK)
             checks['read_past_end'] = (st, residue, stalled, msc.sense())
-            assert checks['read_past_end'] == (1, BLOCK, 'in', (5, 0x21, 0)), checks
+            assert checks['read_past_end'] == (1, BLOCK, None, (5, 0x21, 0)), checks
             assert msc.command(b'\x1e\0\0\0\x01\0')[0] == 0       # PREVENT
             assert msc.command(b'\x35' + b'\0' * 9)[0] == 0       # SYNCHRONIZE CACHE
             assert msc.sense() == (0, 0, 0)

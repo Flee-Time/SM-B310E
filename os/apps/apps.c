@@ -99,8 +99,14 @@ static screen_t screen = {
     .enter = enter, .leave = leave, .draw = draw, .key = key,
 };
 
+static const icon_t *app_icon(void *ctx, int i)
+{
+    return &icon_apps;
+}
+
 screen_t *app_apps(void)
 {
     list.item = item;
+    list.icon = app_icon;
     return &screen;
 }
