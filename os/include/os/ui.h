@@ -112,11 +112,10 @@ int ui_depth(void);
 void ui_run(screen_t *home) __attribute__((noreturn));   /* the UI thread */
 void ui_power_off(void) __attribute__((noreturn));
 void ui_reboot(void) __attribute__((noreturn));
-/* Start another image from the card in place of this OS (no reset: the
- * boot menu needs a key held at power-on). Returns only on an error. */
+/* Start another image from the card in place of this OS, without a reset
+ * (the clock keeps running). Returns only on an error. */
 const char *ui_chain(const char *path, const char *what);
-#define BOOT_MENU_PATH "/fpbin/fpmain.bin"
-#define OS_IMAGE_PATH  "/progs/b310e-os.bin"
+#define OS_IMAGE_PATH  "/payloads/b310e-os.bin"
 /* From another thread: run fn(arg) in the UI thread and wait for it.
  * false when the UI did not take it within timeout_ms (then it never
  * runs). arg must stay valid until it returns. */

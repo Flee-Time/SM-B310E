@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the B310E OS (os/) and stage it as sdcard/progs/b310e-os.bin, its
+# Build the B310E OS (os/) and stage it as sdcard/payloads/b310e-os.bin, its
 # loadable apps as sdcard/b310e-os/apps/*.app, its codec modules as
 # sdcard/b310e-os/codecs/*.cdc.
 # FatFs R0.15a (ChaN, 1-clause BSD) is fetched once into build/fatfs and
@@ -28,10 +28,10 @@ fi
 
 make -C "$REPO_DIR/os" BUILD="$BUILD_DIR" FATFS="$FATFS_DIR/source" \
     PYTHON="${B310E_PYTHON:-python3}" -j"${B310E_BUILD_JOBS:-8}"
-mkdir -p "$REPO_DIR/sdcard/progs" "$REPO_DIR/sdcard/b310e-os/apps"
-cp -f "$BUILD_DIR/b310e-os.bin" "$REPO_DIR/sdcard/progs/b310e-os.bin"
+mkdir -p "$REPO_DIR/sdcard/payloads" "$REPO_DIR/sdcard/b310e-os/apps"
+cp -f "$BUILD_DIR/b310e-os.bin" "$REPO_DIR/sdcard/payloads/b310e-os.bin"
 cp -f "$BUILD_DIR"/modules/*.app "$REPO_DIR/sdcard/b310e-os/apps/"
-ls -l "$REPO_DIR/sdcard/progs/b310e-os.bin" "$REPO_DIR"/sdcard/b310e-os/apps/*.app
+ls -l "$REPO_DIR/sdcard/payloads/b310e-os.bin" "$REPO_DIR"/sdcard/b310e-os/apps/*.app
 # codec modules: built from the Rockbox tree (build/rockbox, fetched by the
 # rockbox target) when it is there
 if ls "$BUILD_DIR"/codecs/*.cdc >/dev/null 2>&1; then

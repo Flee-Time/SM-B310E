@@ -78,8 +78,8 @@ therefore required for the first build; later invocations reuse the checkout.
 
 ```powershell
 .\build.ps1 doctor               # show detected tools
-.\build.ps1 os                   # B310E OS: sdcard/progs/b310e-os.bin
-.\build.ps1 fpmain               # JSON boot menu, staged into sdcard/fpbin
+.\build.ps1 os                   # B310E OS: sdcard/payloads/b310e-os.bin
+.\build.ps1 boot                 # NOR boot loader: build/boot/b310e-boot.bin (docs/sdboot.md)
 .\build.ps1 games                # all supported game ports from pinned sources
 .\build.ps1 rockbox              # player binary and matching .rockbox runtime
 .\build.ps1 sdcard               # complete card: OS + menu + games + Rockbox
@@ -113,8 +113,9 @@ For Make aliases use `make os`, `make rockbox`, etc. Set `PYTHON` if necessary:
 ## Outputs, downloads and local data
 
 - `build/os/`: B310E OS objects, ELF, map and image.
+- `build/boot/`: the NOR boot loader (`b310e-boot.bin`) and its QEMU test output.
 - `build/bin/`: the Rockbox package.
-- `build/fpmain/`, `build/games/`: build outputs.
+- `build/games/`: build outputs.
 - `build/fpdoom/`, `build/rockbox/`, `build/qemu/`: upstream source/build caches.
 - `build/logs/`: complete logs, one per target.
 - `build/qemu-desktop/`, `build/qemu-desktop.zip`: portable Windows GUI package.
@@ -132,9 +133,7 @@ use the same canonical scripts on Windows and Linux.
 `clean` retains `sdcard/` and downloaded upstream caches. Add `--downloads`
 to also remove the three upstream caches inside this checkout's `build/`;
 external `--qemu-source` trees are retained. Rockbox packaging updates runtime
-files without deleting your saved configuration, playlists or music. Menu
-builds stage the tracked default `ports/fpmain/config.json`, so retain any
-custom menu configuration separately before rebuilding the menu.
+files without deleting your saved configuration, playlists or music.
 
 All 16 game binaries now compile from pinned source with the B310E save/audio
 overlay. `ports/games/fetch.py` fetches the additional cores, then

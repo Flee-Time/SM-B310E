@@ -65,6 +65,44 @@ void arch_reboot(void)
         arch_wait_for_irq();
 }
 
+/* The boot loader's handshake (boot/boot.h): the reset-mode byte, APB
+ * 0x8b000228 bits 15:8, survives the watchdog reset; the loader takes a
+ * value 0xb0-0xb3 and clears it. BOOT_REQ_PATH also leaves the program's
+ * path in a block at the top of PSRAM (in our MMU table, dead by then),
+ * cleaned from the D-cache so it reaches PSRAM before the reset. */
+#define LOADER_HEADER 0x003fc000u       /* NOR: the loader's header */
+#define HWRST         0x8b000228u
+#define REQ_BLOCK     0x043fff00u
+#define REQ_MAGIC     0x51523342u       /* "B3RQ" */
+#define REQ_PATH_LEN  56
+
+bool arch_boot_loader(void)
+{
+    const volatile uint32_t *h = (const volatile uint32_t *)LOADER_HEADER;
+
+    return h[2] == 0x30313342u && h[3] == 0x544f4f42u;      /* "B310BOOT" */
+}
+
+void arch_boot_request(unsigned req, const char *path)
+{
+    if (req == BOOT_REQ_PATH && path) {
+        volatile uint32_t *b = (volatile uint32_t *)REQ_BLOCK;
+        uint32_t words[REQ_PATH_LEN / 4] = { 0 }, sum = REQ_MAGIC;
+
+        if (*path == '/')
+            path++;
+        strncpy((char *)words, path, REQ_PATH_LEN - 1);
+        for (int i = 0; i < REQ_PATH_LEN / 4; i++) {
+            b[1 + i] = words[i];
+            sum += words[i];
+        }
+        b[1 + REQ_PATH_LEN / 4] = ~sum;
+        b[0] = REQ_MAGIC;
+        dcache_clean_range((const void *)REQ_BLOCK, 4 * (2 + REQ_PATH_LEN / 4));
+    }
+    REG32(HWRST) = (REG32(HWRST) & ~0xff00u) | (req & 0xffu) << 8;
+}
+
 /* Cut the supplies (stock 0x1a448: SET1 = 0x1f, then SET0 = 0x3fff; the
  * last store removes the CPU and RAM supplies). The LEDs and vibrator
  * live in the analog die, which runs from the battery and keeps its

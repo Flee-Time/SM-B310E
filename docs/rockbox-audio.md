@@ -208,7 +208,7 @@ $env:B310E_HOST_CC='/c/msys64/mingw64/bin'
   --output emulator/qemu/logs/rockbox-audio-final
 ```
 
-The build stages `sdcard/progs/rockbox.bin` and the `.rockbox` runtime tree
+The build stages `sdcard/payloads/rockbox.bin` and the `.rockbox` runtime tree
 (software codecs, languages, themes and fonts). Use the existing loader to
 launch the raw image. The real ARM test links unchanged upstream `pcm.c`,
 `pcm_sw_volume.c`, `pcm_sampr.c` and the generic `audio_path.c` speaker/jack
@@ -268,13 +268,13 @@ $python = 'C:/msys64/mingw64/bin/python.exe'
 $qemu = 'D:/floppy/.tools/qemu-b310e-src/build/qemu-system-arm.exe'
 & $python ports/rockbox/tests/make-sd-image.py --force
 & $python emulator/qemu/scripts/capture-rockbox.py `
-  --qemu $qemu --rockbox sdcard/progs/rockbox.bin `
+  --qemu $qemu --rockbox sdcard/payloads/rockbox.bin `
   --sdcard sdcard/emulator-sd.img `
   --output emulator/qemu/logs/rockbox-player --seconds 24 `
   --key 6:down --key 8:ret --verify-test-tone
 ```
 
-The image contains `.rockbox`, `progs/rockbox.bin` and `/test.wav`, a
+The image contains `.rockbox`, `payloads/rockbox.bin` and `/test.wav`, a
 30-second signed-16-bit stereo track at 44.1 kHz. Left is 440 Hz, right
 is 660 Hz, with peak4096 and short fades. Its configuration selects the
 file browser and 0 dB software volume. `--force` replaces the generated
@@ -294,7 +294,7 @@ Card writes persist in that image. Omitting the backend models an absent card.
 
 ## Phone validation and DSP boundary
 
-Copy the newly built `sdcard/progs/rockbox.bin` and `.rockbox` tree to the
+Copy the newly built `sdcard/payloads/rockbox.bin` and `.rockbox` tree to the
 phone's existing card layout and launch it through the existing loader.
 Use a short track to check elapsed time, speaker output and headphones.
 The phone now reports an advancing timer and audible sound through both

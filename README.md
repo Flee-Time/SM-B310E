@@ -26,11 +26,13 @@ code (Unlicense).
 
 - **B310E OS, milestone 1** (verified on hardware): our own preemptive
   kernel (32 priorities, priority-inheritance mutexes, semaphores, queues),
-  LCD, keypad, console and watchdog reboot; boots from the SD menu as
-  `progs/b310e-os.bin`. See [os/README.md](os/README.md).
-- **Boots from an SD card**: a clean fpdoom `sdboot3.bin` NOR loader reads a
-  ported fpdoom boot menu (`fpmain.bin`) that lists `progs/` and `games/`
-  and launches them — B310E OS, Rockbox, and the fpdoom game ports.
+  LCD, keypad, console and watchdog reboot; boots from the boot menu as
+  `payloads/b310e-os.bin`. See [os/README.md](os/README.md).
+- **Our own NOR boot loader** (`boot/`, see [docs/sdboot.md](docs/sdboot.md)):
+  at power-on a menu in the B310E OS look lists the card's `payloads/`
+  (B310E OS, Rockbox) and the stock firmware; programs can ask it for the
+  menu or a payload across a watchdog reset. It replaced fpdoom's sdboot
+  and fpmain menu (2026-11-07).
 - **Ports on the SD card**: fpdoom + chocolate-doom/heretic/hexen, gnuboy,
   retris, infones, fpsw, fpduke3d, snes9x — and a working **Rockbox port**
   for the SC6530C.
@@ -62,7 +64,8 @@ code (Unlicense).
 
 ```
 os/           B310E OS: arch, kernel, drivers, lib, tests (GPLv2+)
-ports/        fpmain JSON boot menu and Rockbox target overlays/tests
+boot/         the NOR boot loader and its menu (GPLv2+)
+ports/        game-port tooling and Rockbox target overlays/tests
 emulator/     QEMU machine models and emulator capture/regression tools
 scripts/      shared build dispatcher and canonical target implementations
 tools/        flashing/debug tools, DSP analysis and stock-firmware research
@@ -80,7 +83,8 @@ Start with [the build guide](docs/build.md) for dependencies and tool detection.
 
 ```powershell
 .\build.ps1 doctor
-.\build.ps1 os          # B310E OS -> sdcard/progs/b310e-os.bin
+.\build.ps1 os          # B310E OS -> sdcard/payloads/b310e-os.bin
+.\build.ps1 boot        # NOR boot loader -> build/boot/b310e-boot.bin
 .\build.ps1 sdcard      # OS + JSON menu + games + Rockbox runtime
 .\build.ps1 sd-image    # FAT32 emulator image with stereo test audio
 .\build.ps1 qemu        # pinned GTK/SDL desktop emulator and Windows package
@@ -88,7 +92,7 @@ Start with [the build guide](docs/build.md) for dependencies and tool detection.
 ```
 
 On Linux use `bash build.sh <target>`. Individual targets include `os`,
-`fpmain`, `games` and `rockbox`. All generated
+`boot`, `games` and `rockbox`. All generated
 build files stay under `build/`; the scripts stage phone files in `sdcard/`.
 Bring your own game data files (WADs/ROMs/GRPs); the generated game README
 explains where they go. Normal builds need no private DSP dump.
@@ -98,14 +102,16 @@ explains where they go. Normal builds need no private DSP dump.
 - **QEMU:** `python os/tests/test-boot.py` boots B310E OS and checks its
   kernel self-test, keys and reboot; Rockbox has its own tests in
   `ports/rockbox/tests/`.
-- **Phone:** copy `sdcard/progs/` to the card and pick the program in the
-  SD boot menu. Nothing writes NOR.
+- **QEMU, boot loader:** `python boot/tests/test-boot.py` (needs your own
+  NOR dump; it stays local).
+- **Phone:** copy `sdcard/payloads/` to the card and pick the payload in the
+  boot menu. Installing the loader writes NOR: [docs/sdboot.md](docs/sdboot.md).
 
 ## Documentation
 
 - [build guide](docs/build.md) — toolchain install + build from scratch
-- [flashing guide](docs/flashing.md) — hardware boot test (RAM load) + sdboot3.bin NOR install
-- [docs/sdboot.md](docs/sdboot.md) — SD-card boot chain (sdboot → boot menu → progs)
+- [flashing guide](docs/flashing.md) — download mode and the RAM-load test
+- [docs/sdboot.md](docs/sdboot.md) — the NOR boot loader: design, install, restore
 - [docs/stockram.md](docs/stockram.md) — booting the *stock* Samsung firmware from RAM
 - [docs/b310e-qemu.md](docs/b310e-qemu.md) — the SC6530C QEMU machine
 - [docs/emulator-audio.md](docs/emulator-audio.md) — current stock boot/audio evidence and repeatable checks

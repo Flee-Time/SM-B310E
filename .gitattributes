@@ -5,4 +5,3 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.ps1 text eol=lf
-ports/fpmain/entry-json.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab

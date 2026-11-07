@@ -2,8 +2,9 @@
 
 > **2026-11-06:** the RAM-loaded test OS (`os.bin`, built from `firmware/`)
 > that steps 2 to 5 load was removed. B310E OS (`os/`) boots from the SD
-> menu instead (`progs/b310e-os.bin`). Step 1 (download mode) and step 6
-> (the `sdboot3.bin` SD loader) still apply. The old source is in git history
+> menu instead (`payloads/b310e-os.bin`). Step 1 (download mode) still
+> applies. Step 6 (fpdoom's `sdboot3.bin`) is replaced by our own loader,
+> [sdboot.md](sdboot.md), installed 2026-11-07. The old source is in git history
 > (commit e2c0e83 and earlier).
 
 

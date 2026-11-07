@@ -42,7 +42,7 @@ def main():
         if path.is_file():
             FAT["add_file"](root, Path(".rockbox") / path.relative_to(args.runtime),
                             path.read_bytes())
-    FAT["add_file"](root, "progs/rockbox.bin", args.rockbox.read_bytes())
+    FAT["add_file"](root, "payloads/rockbox.bin", args.rockbox.read_bytes())
     FAT["add_file"](root, ".rockbox/config.cfg",
                     b"start in screen: files\nstart directory: /\n"
                     b"backlight timeout: on\nidle poweroff: 0\n")

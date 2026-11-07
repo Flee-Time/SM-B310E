@@ -454,21 +454,30 @@ static const icon_t *power_icon(void *ctx, int i)
 
 static list_t power_list = { .count = 3, .item = power_item, .icon = power_icon };
 
-static void chain(const char *path, const char *what)
-{
-    const char *err = ui_chain(path, what);
 
-    ui_message("Restart", err);         /* only on an error */
-}
-
+/* The boot loader in NOR (boot/) shows its menu after a reset with this
+ * request; the reset clears the clock, which clock.txt and SNTP bring
+ * back. */
 static void to_menu(void)
 {
-    chain(BOOT_MENU_PATH, "Boot menu");
+    if (!arch_boot_loader()) {
+        ui_message("Restart", "The boot loader is not in NOR.");
+        return;
+    }
+    arch_boot_request(BOOT_REQ_MENU, NULL);
+    ui_reboot();
 }
 
+/* No reset (the clock stays); the loader's request when that fails. */
 static void to_os(void)
 {
-    chain(OS_IMAGE_PATH, "Restarting");
+    const char *err = ui_chain(OS_IMAGE_PATH, "Restarting");
+
+    if (arch_boot_loader()) {
+        arch_boot_request(BOOT_REQ_OS, NULL);
+        ui_reboot();
+    }
+    ui_message("Restart", err);
 }
 
 static void power_draw(screen_t *s)

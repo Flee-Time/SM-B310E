@@ -30,6 +30,14 @@ struct Sc6530SfcState {
 
     MemoryRegion iomem;
     MemoryRegion *nor_mr; /* QOM link to the machine's NOR region */
+    /* 0x200: the flash size the memory windows decode, in MiB (stock
+     * NOR 0x10354 writes 1, 2, 4, 8, 0x10 ... by the flash's size; 8 on
+     * the B310E). On the phone the boot-time window reads wrong from
+     * 4 MiB up until it is set: the machine's "nor-hole" region (all
+     * ones over 4..8 MiB) stays enabled while the size is below 8. */
+    MemoryRegion *hole_mr;
+    uint32_t size_code;
+    uint32_t reset_size;                /* "size-code": 4 at a power-on */
 
     uint32_t cmd_cfg;
     uint32_t soft_req;
@@ -87,6 +95,7 @@ static uint64_t sc6530_sfc_read(void *opaque, hwaddr offset, unsigned size)
             return s->cmd_buf[idx];
         }
         break;
+    case 0x200: return s->size_code;
     case 0x70 ... 0x78:
         if ((offset - 0x70) % 4 == 0) {
             int idx = (offset - 0x70) / 4;
@@ -302,6 +311,13 @@ static void sc6530_sfc_write(void *opaque, hwaddr offset,
             s->type_buf[idx] = value;
         }
         break;
+    case 0x200:
+        s->size_code = value;
+        if (s->hole_mr) {
+            memory_region_set_enabled(s->hole_mr, s->size_code < 8);
+        }
+        qemu_log("sc6530_sfc: flash size %u MiB\n", (unsigned)value);
+        break;
     default:
         qemu_log_mask(LOG_GUEST_ERROR, "sc6530_sfc: write at bad offset 0x%x\n", (int)offset);
         break;
@@ -347,6 +363,10 @@ static void sc6530_sfc_reset(DeviceState *dev)
     }
     s->status1 = s->status2 = 0;
     s->reset_enabled = false;
+    s->size_code = s->reset_size;
+    if (s->hole_mr) {
+        memory_region_set_enabled(s->hole_mr, s->size_code < 8);
+    }
 }
 
 static void sc6530_sfc_init(Object *obj)
@@ -364,6 +384,9 @@ static const Property sc6530_sfc_properties[] = {
     DEFINE_PROP_UINT32("jedec-id", Sc6530SfcState, jedec_id, 0xc86017),
     DEFINE_PROP_LINK("nor", Sc6530SfcState, nor_mr,
                      TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_LINK("nor-hole", Sc6530SfcState, hole_mr,
+                     TYPE_MEMORY_REGION, MemoryRegion *),
+    DEFINE_PROP_UINT32("size-code", Sc6530SfcState, reset_size, 8),
 };
 
 static const VMStateDescription sc6530_sfc_vmsd = {

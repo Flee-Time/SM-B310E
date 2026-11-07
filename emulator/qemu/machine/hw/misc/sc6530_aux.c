@@ -1629,12 +1629,25 @@ static const MemoryRegionOps sc6530_aux_catchall_ops = {
 /* SysBus device                                                          */
 /* ---------------------------------------------------------------------- */
 
+/* APB 0x8b000228 bits 15:8, the reset-mode byte ("HWRST1"): a watchdog
+ * reset keeps it, only a power-on clears it. The stock firmware keeps its
+ * reset reason there (PBL NOR 0x2c00 writes 0x5a, 0x3c5c reads it; the
+ * main OS 0x1a5ac writes, 0x1a7f8 reads 0x8a), and the B310E boot loader
+ * its requests (boot/boot.h). On the phone the byte survived the watchdog
+ * reboot of 2026-08-23 (the stale 0x5a "needs END" fault). A QEMU reset
+ * stands for that watchdog reset; the first one (machine creation) finds
+ * zero, as a power-on would. */
+#define SC6530_AUX_HWRST     0x228
+#define SC6530_AUX_HWRST_KEPT 0xff00u
+
 static void sc6530_aux_reset(DeviceState *dev)
 {
     Sc6530AuxState *s = SC6530_AUX(dev);
+    uint32_t hwrst = s->apb_regs[SC6530_AUX_HWRST / 4] & SC6530_AUX_HWRST_KEPT;
 
     memset(s->ahb_regs, 0, sizeof(s->ahb_regs));
     memset(s->apb_regs, 0, sizeof(s->apb_regs));
+    s->apb_regs[SC6530_AUX_HWRST / 4] = hwrst;
     memset(s->smc_regs, 0, sizeof(s->smc_regs));
     memset(s->gpio_regs, 0, sizeof(s->gpio_regs));
     memset(s->eic_regs, 0, sizeof(s->eic_regs));

@@ -33,7 +33,7 @@ def check(args, name, settings, expected):
     for path in sorted(args.runtime.rglob("*")):
         if path.is_file():
             FAT["add_file"](root, Path(".rockbox") / path.relative_to(args.runtime), path.read_bytes())
-    FAT["add_file"](root, "progs/rockbox.bin", args.rockbox.read_bytes())
+    FAT["add_file"](root, "payloads/rockbox.bin", args.rockbox.read_bytes())
     FAT["add_file"](root, "test.wav", FAT["test_audio"](10))
     FAT["add_file"](root, ".rockbox/config.cfg", (
         "volume: 0\nspeaker mode: off\nstart in screen: files\n"

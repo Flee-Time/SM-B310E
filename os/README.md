@@ -121,8 +121,9 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 - **Restarts without a reset** (2026-11-07; B310E OS restart checked in
   QEMU, the boot menu not yet on the phone): sdboot in NOR starts the boot
   menu only with a key held at power-on, so a watchdog reset came back to
-  the stock firmware. Power -> Restart to menu now reads
-  `/fpbin/fpmain.bin`, Restart B310E OS `/progs/b310e-os.bin`, and the OS
+  the stock firmware. Restart B310E OS reads `/payloads/b310e-os.bin`
+  (until 2026-11-07 also Restart to menu, `/fpbin/fpmain.bin`; now our NOR
+  loader takes a request across the watchdog reset, docs/sdboot.md), and the OS
   stops its services, copies the image to 0x04000000 from IRAM with the
   MMU and caches off and enters it (`arch_chain`), as sdboot and the menu
   do. Opening Music the first time draws its screen before reading

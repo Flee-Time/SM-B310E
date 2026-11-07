@@ -31,9 +31,6 @@ tools/pack_reloc/pack_reloc
 # pack_reloc host tool - Windows binary
 tools/pack_reloc/pack_reloc.exe
 # ported menu + game outputs
-ports/fpmain/*.bin
-ports/fpmain/games-out/
-ports/fpmain/.games-stamp
 # libc_server test-loop runtime dir (doom1.wad, locally provisioned)
 tools/libc_server/workdir/
 

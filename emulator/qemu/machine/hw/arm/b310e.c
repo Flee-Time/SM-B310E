@@ -286,6 +286,7 @@ struct B310EMachineState {
     /* NOR XIP backing: zero-filled until -drive if=none,id=nor is loaded */
     uint8_t *nor;
     MemoryRegion nor_iomem;       /* 8 MiB @ 0x0, write-logging ops */
+    MemoryRegion nor_hole;        /* all ones @ 0x400000 until the SFC size is 8 */
 
     MemoryRegion psram_alias;     /* 4 MiB @ 0x04000000 (always on) */
     MemoryRegion iram;            /* 256 KiB @ 0x40000000 */
@@ -327,6 +328,25 @@ static void b310e_nor_write(void *opaque, hwaddr offset,
              " pc=0x%08" PRIx32 " (XIP read-only: logged, not stored)\n",
              (uint64_t)offset, size, value, b310e_guest_pc());
 }
+
+static uint64_t b310e_nor_hole_read(void *opaque, hwaddr offset, unsigned size)
+{
+    return ~0ULL;
+}
+
+static void b310e_nor_hole_write(void *opaque, hwaddr offset,
+                                 uint64_t value, unsigned size)
+{
+    b310e_nor_write(opaque, offset + B310E_NOR_SIZE / 2, value, size);
+}
+
+static const MemoryRegionOps b310e_nor_hole_ops = {
+    .read  = b310e_nor_hole_read,
+    .write = b310e_nor_hole_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .impl = { .min_access_size = 1, .max_access_size = 4 },
+    .valid = { .min_access_size = 1, .max_access_size = 4 },
+};
 
 static const MemoryRegionOps b310e_nor_ops = {
     .read  = b310e_nor_read,
@@ -510,6 +530,17 @@ static void b310e_init(MachineState *machine)
     s->nor = memory_region_get_ram_ptr(&s->nor_iomem);
     memory_region_add_subregion_overlap(address_space_mem, B310E_NOR_BASE,
                                         &s->nor_iomem, B310E_REGION_PRIORITY);
+    /* At a power-on the SFC decodes 4 MiB: NOR reads from 0x400000 up
+     * come back wrong on the phone until the flash size register
+     * (0x20a00200) is set to 8, as the stock PBL does (NOR 0x10354) and
+     * the B310E boot loader does (its v1.1 font read as solid boxes,
+     * 2026-11-07). The SFC model enables this all-ones region over
+     * 4..8 MiB while the size is below 8. */
+    memory_region_init_io(&s->nor_hole, OBJECT(machine), &b310e_nor_hole_ops, s,
+                          "b310e.nor-hole", B310E_NOR_SIZE / 2);
+    memory_region_add_subregion_overlap(address_space_mem,
+                                        B310E_NOR_BASE + B310E_NOR_SIZE / 2,
+                                        &s->nor_hole, B310E_REGION_PRIORITY + 1);
 
     /* IRAM at 0x40000000 (vectors/stack live here on the real chip).
      * NOTE: the RAM-region owner must be NULL (not OBJECT(machine)) -
@@ -639,6 +670,11 @@ static void b310e_init(MachineState *machine)
     /* SC6530 Serial Flash Controller */
     DeviceState *sfc_dev = qdev_new(TYPE_SC6530_SFC);
     object_property_set_link(OBJECT(sfc_dev), "nor", OBJECT(&s->nor_iomem), &error_fatal);
+    object_property_set_link(OBJECT(sfc_dev), "nor-hole", OBJECT(&s->nor_hole), &error_fatal);
+    /* 4 MiB at a power-on (boot-mode=stock); the other modes stand for a
+     * chain the PBL already ran */
+    qdev_prop_set_uint32(sfc_dev, "size-code",
+                         strcmp(s->boot_mode, "stock") == 0 ? 4 : 8);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(sfc_dev), &error_fatal);
     sysbus_mmio_map_overlap(SYS_BUS_DEVICE(sfc_dev), 0, B310E_SFC_BASE, B310E_REGION_PRIORITY);
 

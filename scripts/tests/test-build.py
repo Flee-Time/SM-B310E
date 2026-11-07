@@ -61,7 +61,7 @@ class BuildTests(unittest.TestCase):
             root = Path(temp)
             paths = ['build/bin/os.bin', 'build/firmware/start.o', 'build/fpdoom/source.c',
                      'build/rockbox/source.c', 'build/qemu/source.c', 'sdcard/music/song.wav',
-                     'sdcard/.rockbox/config.cfg', 'sdcard/fpbin/config.json']
+                     'sdcard/.rockbox/config.cfg', 'sdcard/payloads/b310e-os.bin']
             for name in paths:
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)

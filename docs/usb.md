@@ -842,7 +842,7 @@ comment. Without `-global sc6530_usb.chardev=…` nothing is ever acknowledged,
 as with a cable and no host, so `os.bin`'s bounded USB waits behave as before.
 
 ```bash
-python emulator/qemu/scripts/test-usb.py --qemu build/qemu/build/qemu-system-arm.exe --rockbox sdcard/progs/rockbox.bin --sdcard card.img --output build/validation/usb
+python emulator/qemu/scripts/test-usb.py --qemu build/qemu/build/qemu-system-arm.exe --rockbox sdcard/payloads/rockbox.bin --sdcard card.img --output build/validation/usb
 ```
 
 The script boots Rockbox with VBUS present, then:
@@ -896,8 +896,8 @@ driver matches that interpretation, not the silicon.
 
 ### Hardware test
 
-1. Run `.\build.ps1 rockbox` and copy `sdcard/progs/rockbox.bin` to the
-   card's `progs/`.
+1. Run `.\build.ps1 rockbox` and copy `sdcard/payloads/rockbox.bin` to the
+   card's `payloads/`.
 2. Boot Rockbox from the card menu.
 3. Plug into a PC. Expected: the Rockbox USB screen and a new removable drive
    with the card's contents.
@@ -1088,7 +1088,7 @@ unplugging. Afterwards the files are checked in the card image.
 
 ### Hardware test (to do)
 
-1. Build, copy `build/os/b310e-os.bin` to the card's `progs/`, boot it.
+1. Build, copy `build/os/b310e-os.bin` to the card's `payloads/`, boot it.
 2. Tools → USB → Network, plug into a Windows PC. Expected: "Remote NDIS
    Compatible Device" under Network adapters, the phone's screen
    "Online" and "PC 192.168.7.2".

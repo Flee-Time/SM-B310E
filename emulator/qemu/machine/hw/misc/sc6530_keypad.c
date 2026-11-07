@@ -244,8 +244,11 @@ struct Sc6530KeypadState {
     uint32_t int_raw;
     uint32_t key_status;
 
-    /* Key currently held in each DOWN slot (0-3); -1 = slot free. */
+    /* Key currently held in each DOWN slot (0-3); -1 = slot free. A
+     * reset after the first (the watchdog) keeps them: a finger on a
+     * key stays there. */
     int held[4];
+    bool powered;
 
     /* EIC END key current level (1 = held). */
     bool end_held;
@@ -455,6 +458,23 @@ static void sc6530_keypad_write(void *opaque, hwaddr offset,
 
     switch (offset) {
     case SC6530_KPD_CTRL:
+        /* Enabling the scan finds the keys held already: each latches
+         * its press edge, as when the phone powers on with a key held
+         * (the boot loader's test, boot/hw.c early_key). */
+        if (!(s->ctrl & 1) && (value & 1)) {
+            for (int i = 0; i < 4; i++) {
+                if (s->held[i] >= 0) {
+                    uint32_t byte = ((uint32_t)(s->held[i] / 8) << 4) |
+                                    ((uint32_t)(s->held[i] % 8) & 7u);
+
+                    s->int_raw |= 1u << i;
+                    s->key_status &= ~(0xffu << (i * 8));
+                    s->key_status |= byte << (i * 8);
+                    qemu_log("sc6530_keypad: enable with a key held "
+                             "(slot %d, row byte 0x%02x)\n", i, byte);
+                }
+            }
+        }
         s->ctrl = value;
         break;
     case SC6530_KPD_INT_EN:
@@ -561,9 +581,10 @@ static void sc6530_keypad_reset(DeviceState *dev)
     s->int_raw = 0;
     qemu_set_irq(s->irq, 0);
     s->key_status = 0;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 4 && !s->powered; i++) {
         s->held[i] = -1;
     }
+    s->powered = true;
     s->end_held = false;
     if (s->hold_end_timer) {
         timer_del(s->hold_end_timer);

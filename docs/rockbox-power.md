@@ -197,7 +197,7 @@ not replace guest code or write guest RAM. Example:
 ```powershell
 python ports/rockbox/tests/test-idle-power.py `
   --qemu /path/to/qemu-system-arm.exe `
-  --rockbox sdcard/progs/rockbox.bin `
+  --rockbox sdcard/payloads/rockbox.bin `
   --elf build/rockbox/build-b310e/rockbox.elf `
   --toolchain /path/to/arm-toolchain/bin `
   --runtime sdcard/.rockbox `

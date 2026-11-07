@@ -9,7 +9,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ('os', 'fpmain', 'games', 'rockbox', 'qemu', 'sdcard', 'sd-image',
+TARGETS = ('os', 'boot', 'games', 'rockbox', 'qemu', 'sdcard', 'sd-image',
            'clean', 'doctor', 'stockram', 'stockram-diag')
 
 
@@ -114,8 +114,8 @@ class Builder:
         shutil.copy2(source, dest)
 
     def target(self, name):
-        if name in ('fpmain', 'games', 'rockbox', 'os'):
-            if not self.args.dry_run and (not self.arm or (not self.host and name != 'os')):
+        if name in ('games', 'rockbox', 'os', 'boot'):
+            if not self.args.dry_run and (not self.arm or (not self.host and name not in ('os', 'boot'))):
                 raise RuntimeError('ARM and host GCC are required; use --toolchain and --host-cc.')
             if name == 'rockbox' and self.arm and ' ' in str(self.arm):
                 raise RuntimeError('Rockbox requires a toolchain path without spaces; use --toolchain.')
@@ -130,18 +130,16 @@ class Builder:
                 self.shell('scripts/targets/qemu.sh', 'qemu', str(self.qemu_source), str(self.args.jobs),
                            'headless' if self.args.qemu_headless else 'desktop')
         elif name == 'sdcard':
-            for target in ('os', 'fpmain', 'games', 'rockbox'):
+            for target in ('os', 'games', 'rockbox'):
                 self.target(target)
-            self.copy(ROOT / 'ports/fpmain/games-README.md', ROOT / 'sdcard/games/README.md')
             if not self.args.dry_run:
                 for folder in ('doom1', 'doom2', 'duke3d', 'sw', 'heretic', 'hexen', 'wolf3d', 'blood', 'retris', 'snes', 'gameboy', 'nes'):
                     (ROOT / 'sdcard/games' / folder).mkdir(parents=True, exist_ok=True)
         elif name == 'sd-image':
             self.run([sys.executable, ROOT / 'ports/rockbox/tests/make-sd-image.py',
                       '--fat32', '--runtime', ROOT / 'sdcard/.rockbox',
-                      '--rockbox', ROOT / 'sdcard/progs/rockbox.bin',
-                      '--fpmain', ROOT / 'sdcard/fpbin/fpmain.bin',
-                      '--config', ROOT / 'sdcard/fpbin/config.json',
+                      '--rockbox', ROOT / 'sdcard/payloads/rockbox.bin',
+                      '--add', 'payloads/b310e-os.bin=' + str(ROOT / 'sdcard/payloads/b310e-os.bin'),
                       '--output', self.args.image, *(['--force'] if self.args.force else [])], 'sd-image')
         elif name in ('stockram', 'stockram-diag'):
             script = 'pack-stockram.sh' if name == 'stockram' else 'diag-pack.sh'
@@ -152,7 +150,7 @@ class Builder:
             if build_root.is_symlink() or build_root.resolve() != ROOT.resolve() / 'build':
                 raise RuntimeError(f'Refusing to clean redirected build root: {build_root}')
             # bin, firmware and host held the old test OS's output
-            folders = ['os', 'bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
+            folders = ['os', 'boot', 'bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
             if self.args.downloads:
                 folders += ['fpdoom', 'rockbox', 'qemu']
             for folder in folders:

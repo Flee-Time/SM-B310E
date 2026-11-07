@@ -78,7 +78,7 @@ def main():
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
-                    '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     '--add', f'b310e-os/apps/alarm.app={(args.build / "modules/alarm.app").resolve()}',
                     '--add', f'b310e-os/apps/calc.app={(args.build / "modules/calc.app").resolve()}',
                     '--add', f'b310e-os/apps/notes.app={(args.build / "modules/notes.app").resolve()}',

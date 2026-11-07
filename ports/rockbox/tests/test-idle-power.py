@@ -145,7 +145,7 @@ def main():
     for path in sorted(args.runtime.rglob("*")):
         if path.is_file():
             FAT["add_file"](root, Path(".rockbox") / path.relative_to(args.runtime), path.read_bytes())
-    FAT["add_file"](root, "progs/rockbox.bin", args.rockbox.read_bytes())
+    FAT["add_file"](root, "payloads/rockbox.bin", args.rockbox.read_bytes())
     FAT["add_file"](root, "test.wav", FAT["test_audio"](60))
     if args.controls:
         FAT["add_file"](root, "z-second.wav", FAT["test_audio"](60))
@@ -274,7 +274,7 @@ def main():
                 timeout_addr = int(re.search(r"^([0-9a-f]+) [A-Za-z] poweroff_timeout$", nm, re.M)[1], 16)
                 assert qt.read(timeout_addr) == 1, "private config did not set one-minute idle timeout"
             idle("idle-screen-off", False)
-            key("down")  # progs/ -> test.wav; config allows this wake key's action
+            key("down")  # payloads/ -> test.wav; config allows this wake key's action
             wait_for(awake, "keypad wake")
             snapshot("keypad-wake")
             key("ret")

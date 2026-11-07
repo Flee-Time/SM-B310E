@@ -10,11 +10,14 @@ not included in the repository or its releases.
 
 ## Card and controls
 
-Use a FAT32 card with `fpbin/`, `progs/`, `.rockbox/` and `games/` at the root.
-Build `fpmain` for the JSON launcher. Emulator ROMs are discovered in
-`games/snes`, `games/gameboy` and `games/nes`; native ports have explicit
-entries in `fpbin/config.json`. The [card data guide](../ports/fpmain/games-README.md)
-lists the expected resources.
+> **2026-11-07:** the fpdoom menu (fpmain) that launched these binaries
+> with their arguments was removed with fpdoom's sdboot; our boot loader
+> ([sdboot.md](sdboot.md)) runs raw payloads only. The ports still build,
+> but nothing on the phone starts them now.
+
+The binaries were launched by the fpdoom menu from `fpbin/`, with their
+resources in `games/` (WADs, ROMs, GRPs; `games/snes`, `games/gameboy` and
+`games/nes` for emulator ROMs).
 
 Hold **END + #** to increase volume or **END + \*** to decrease it, in 3 dB
 steps. All ports share the B310E codec, stereo DMA output and headphone

@@ -101,7 +101,7 @@ def main():
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
-                    '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     '--add', f'b310e-os/apps/radio.app={(mods / "radio.app").resolve()}',
                     '--add', f'b310e-os/apps/recorder.app={(mods / "recorder.app").resolve()}',
                     '--add', f'b310e-os/rec/TONE1K.WAV={out / "TONE1K.WAV"}',

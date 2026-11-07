@@ -156,7 +156,7 @@ def main():
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
-                    '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     *adds, '--output', str(card)], check=True, capture_output=True)
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',

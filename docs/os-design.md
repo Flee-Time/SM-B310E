@@ -3,7 +3,7 @@
 A new operating system for the SM-B310E (SC6530C: ARM926EJ-S at 208 MHz,
 4 MB PSRAM, 256 KB IRAM, TeakLite DSP), written from scratch in a fresh
 tree. It replaces neither Rockbox nor the stock firmware on the card: the
-boot menu launches it like any other program in `progs/`.
+boot menu launches it like any other payload in `payloads/`.
 
 `firmware/` (the old `os.bin`) was a hardware test image; it was removed
 on 2026-11-06 and stays in git history (e2c0e83). The new OS takes from it
@@ -31,7 +31,7 @@ only what the hardware proved; its structure starts over.
 |---|---|---|
 | RAM | 4 MB PSRAM, 256 KB IRAM | No demand paging; apps loaded on demand; budgets per layer (below) |
 | CPU | ARM926EJ-S, ARMv5TE, Thumb-1, MMU, 16 KB I/D caches | Thumb for size, ARM for hot paths; cache maintenance around DMA |
-| Boot | the SD boot menu (fpmain) copies a raw image and jumps to it in ARM state, CP15 V=1 (high vectors) | Same contract as Rockbox: identity MMU with the high-vector page mapped |
+| Boot | the boot loader's menu (boot/) copies a raw image and jumps to it in ARM state, CP15 V=1 (high vectors) | Same contract as Rockbox: identity MMU with the high-vector page mapped |
 | SDIO | DMA only into IRAM (DMA into PSRAM hangs) | 16 KB IRAM bounce buffer, as the Rockbox driver |
 | USB | bulk DMA corrupts data on this phone | PIO, one interrupt per packet (docs/usb.md) |
 | Landmines | pinmux `0x8c0002a4`; stock pinmap replay; IF0 `0x82001180` | Never written (docs list them) |
@@ -172,7 +172,7 @@ license either way.
 ## Build and test
 
 - `os/` at the repository root, built by `build.ps1 os` / `build.sh os`
-  with arm-none-eabi-gcc, output `sdcard/progs/b310e-os.bin`.
+  with arm-none-eabi-gcc, output `sdcard/payloads/b310e-os.bin`.
 - QEMU runs it like Rockbox (`boot-mode=rockbox` loads a raw image at the
   PSRAM base); every driver gets a QEMU test where the model allows. The
   DSP is not emulated, so layer-1 radio work is tested on the phone.

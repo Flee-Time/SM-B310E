@@ -209,14 +209,14 @@ def write_image(path, root, size_mib, fat32=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--runtime', type=Path, default=Path('sdcard/.rockbox'))
-    parser.add_argument('--rockbox', type=Path, default=Path('sdcard/progs/rockbox.bin'))
+    parser.add_argument('--rockbox', type=Path, default=Path('sdcard/payloads/rockbox.bin'))
     parser.add_argument('--output', type=Path, default=Path('sdcard/emulator-sd.img'))
     parser.add_argument('--size-mib', type=int, default=64)
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--force', action='store_true', help='replace an existing generated image')
-    parser.add_argument('--fat32', action='store_true', help='also compatible with the fpdoom SD boot menu')
-    parser.add_argument('--fpmain', type=Path, help='include this menu as fpbin/fpmain.bin; requires FAT32')
-    parser.add_argument('--config', type=Path, help='JSON menu configuration; required with --fpmain')
+    parser.add_argument('--fat32', action='store_true', help='FAT32, as phone cards are')
+    parser.add_argument('--payload-dir', default='payloads',
+                        help='the card folder for rockbox.bin (the boot menu lists it)')
     parser.add_argument('--add', action='append', default=[], metavar='DEST=SRC',
                         help='also store file SRC as DEST (a path on the card); repeatable')
     args = parser.parse_args()
@@ -224,20 +224,14 @@ def main():
         parser.error('build Rockbox first to stage the runtime and binary')
     if not 1 <= args.seconds <= 120:
         parser.error('--seconds must be 1..120')
-    if args.fpmain and (not args.fat32 or not args.config or
-                       not args.fpmain.is_file() or not args.config.is_file()):
-        parser.error('--fpmain requires --fat32 and an existing --config')
     if args.output.exists() and not args.force:
         parser.error('output exists; use --force to replace this generated image')
     root = directory()
     for path in sorted(args.runtime.rglob('*')):
         if path.is_file():
             add_file(root, Path('.rockbox') / path.relative_to(args.runtime), path.read_bytes())
-    add_file(root, 'progs/rockbox.bin', args.rockbox.read_bytes())
+    add_file(root, f'{args.payload_dir}/rockbox.bin', args.rockbox.read_bytes())
     add_file(root, 'test.wav', test_audio(args.seconds))
-    if args.fpmain:
-        add_file(root, 'fpbin/fpmain.bin', args.fpmain.read_bytes())
-        add_file(root, 'fpbin/config.json', args.config.read_bytes())
     for item in args.add:
         dest, sep, src = item.partition('=')
         if not sep or not dest or not Path(src).is_file():

@@ -550,6 +550,15 @@ static uint64_t sc6530_lcm_data_read(void *opaque, hwaddr offset, unsigned size)
         } else if (s->rdid_state == 4) {
             val = 0xf0;
             s->rdid_state = 0;
+        } else if (s->rdid_state >= 0xda && s->rdid_state <= 0xdc) {
+            /* RDID1/2/3: a dummy byte, then the id byte (the stock
+             * ST7735 driver, NOR 0x7c90a, reads each this way) */
+            s->rdid_state |= 0x100;
+        } else if (s->rdid_state >= 0x1da && s->rdid_state <= 0x1dc) {
+            static const uint8_t id[3] = { 0x5c, 0xa1, 0xf1 };
+
+            val = id[(s->rdid_state & 0xff) - 0xda];
+            s->rdid_state = 0;
         }
     }
     return val;
@@ -567,7 +576,8 @@ static void sc6530_lcm_data_write(void *opaque, hwaddr offset, uint64_t val, uns
         s->command = val & 255;
         s->parameter_count = 0;
         s->have_pixel_high = false;
-        s->rdid_state = s->command == 4 ? 1 : 0;
+        s->rdid_state = s->command == 4 ? 1 :
+                        s->command >= 0xda && s->command <= 0xdc ? s->command : 0;
         if (panel) {
             switch (s->command) {
             case 0x10: panel->panel_sleep = true; break;

@@ -88,6 +88,15 @@ void arch_reboot(void) __attribute__((noreturn));
 void arch_chain(const void *image, uint32_t len) __attribute__((noreturn));
 bool arch_chain_fits(const void *image, uint32_t len);   /* lies above the copy */
 void arch_power_off(void) __attribute__((noreturn));
+/* The B310E boot loader (boot/) in NOR, and a request it takes after the
+ * next reset (arch_reboot): BOOT_REQ_MENU, BOOT_REQ_OS, or BOOT_REQ_PATH
+ * with the card path of a payload (payloads/...). */
+#define BOOT_REQ_STOCK 0xb0
+#define BOOT_REQ_MENU  0xb1
+#define BOOT_REQ_OS    0xb2
+#define BOOT_REQ_PATH  0xb3
+bool arch_boot_loader(void);
+void arch_boot_request(unsigned req, const char *path);
 
 #endif /* __ASSEMBLER__ */
 #endif

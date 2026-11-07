@@ -201,9 +201,9 @@ def main():
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
-                    '--rockbox', str(REPO / 'sdcard/progs/rockbox.bin'),
+                    '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     '--add', f'b310e-os/apps/stopwatch.app={args.app.resolve()}',
-                    '--add', f'progs/b310e-os.bin={args.image.resolve()}',
+                    '--add', f'payloads/b310e-os.bin={args.image.resolve()}',
                     '--output', str(card)], check=True, capture_output=True)
     # No free count in FSINFO (as on the phone's card, whose first boot took
     # 15 s counting): the OS must count in the background, not at boot.

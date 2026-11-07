@@ -33,7 +33,7 @@ DAY = (PRESET - datetime.date(1980, 1, 1)).days
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--qemu", type=Path, default=REPO / "build/qemu/build/qemu-system-arm.exe")
-    parser.add_argument("--rockbox", type=Path, default=REPO / "sdcard/progs/rockbox.bin")
+    parser.add_argument("--rockbox", type=Path, default=REPO / "sdcard/payloads/rockbox.bin")
     parser.add_argument("--runtime", type=Path, default=REPO / "sdcard/.rockbox")
     parser.add_argument("--output", type=Path, default=REPO / "build/rockbox-tests/rtc")
     args = parser.parse_args()
@@ -45,7 +45,7 @@ def main():
         if path.is_file():
             FAT["add_file"](root, Path(".rockbox") / path.relative_to(args.runtime),
                             path.read_bytes())
-    FAT["add_file"](root, "progs/rockbox.bin", args.rockbox.read_bytes())
+    FAT["add_file"](root, "payloads/rockbox.bin", args.rockbox.read_bytes())
     FAT["add_file"](root, ".rockbox/config.cfg",
                     b"start in screen: menu\nbacklight timeout: on\nidle poweroff: 0\n")
     image = out / "sd.img"

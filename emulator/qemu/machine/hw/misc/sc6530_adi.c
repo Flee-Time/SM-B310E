@@ -420,6 +420,17 @@ static uint32_t sc6530_adi_ana_effective(const Sc6530AdiState *s,
         return sc6530_analog_pending(s);
     } else if (offset == 0x63c) {
         return s->ana_regs[0x634 / 4] & s->ana_regs[0x630 / 4];
+    } else if (offset == 0x320) {
+        /* The stock's reset status (boot_mode.c). On the phone bit 2 is
+         * set at a power-on and clear once the loader has switched the
+         * backlight on; the stock's LCD init (NOR 0x16388 via 0x1a2a0)
+         * initialises the panel only while it is set. MODELED GUESS (the
+         * NOR loader, v1.16): bit 2 = the backlight's 0x1100 enable in
+         * 0x82001220 is off. */
+        word &= ~(1u << 2);
+        if (!(s->ana_regs[0x220 / 4] & 0x100u)) {
+            word |= 1u << 2;
+        }
     } else if (offset == SC6530_ADI_EIC_DATA_OFF) {
         /* Physical EIC level is the ground truth (the debounce-mask is a
          * config the guest may not touch for the power-button channel). */

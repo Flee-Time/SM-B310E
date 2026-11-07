@@ -6,7 +6,7 @@ PORT_DIR="$REPO_DIR/ports/rockbox"
 CLONE_DIR="$REPO_DIR/build/rockbox"
 ROCKBOX_REVISION=ecdeb02dda6dbb94c1c3b01b8406203eda225f9f
 BUILD_DIR="$CLONE_DIR/build-b310e"
-SDCARD_PROGS="$REPO_DIR/sdcard/progs"
+SDCARD_PROGS="$REPO_DIR/sdcard/payloads"
 TOOLCHAIN="${B310E_TOOLCHAIN:-$(dirname "$(command -v arm-none-eabi-gcc)")}"
 HOST_CC="${B310E_HOST_CC:-$(dirname "$(command -v gcc)")}"
 JOBS="${B310E_BUILD_JOBS:-8}"
@@ -383,7 +383,7 @@ make -j"$JOBS" || fail "make"
 mkdir -p "$SDCARD_PROGS" || fail "cannot mkdir $SDCARD_PROGS"
 cp -f "$BUILD_DIR/rockbox.b310e" "$SDCARD_PROGS/rockbox.bin"
 # rockbox.elf stays in $BUILD_DIR (debug only) - the boot menu enumerates ALL
-# progs/* files and would show a bogus ROCKBOX.ELF entry that launches an ELF.
+# payloads/*.bin; an ELF there would be a bogus entry that launches an ELF.
 SIZE=$(stat -c %s "$BUILD_DIR/rockbox.b310e" 2>/dev/null || wc -c < "$BUILD_DIR/rockbox.b310e")
 echo "=== BUILD OK ==="
 echo "rockbox.bin size: $SIZE bytes ($((SIZE/1024)) KiB)"
@@ -394,7 +394,7 @@ ls -l "$SDCARD_PROGS/rockbox.bin" 2>/dev/null
 # .rockbox/{codecs,langs,fonts,themes,wps,eqs,codepages,rocks,...} plus the
 # .ignore files. `make zip` builds rockbox.zip = a .rockbox/ tree assembled by
 # tools/buildzip.pl from the build + the source tree. Extract it onto the card
-# root so sdcard/.rockbox/ appears next to sdcard/progs/.
+# root so sdcard/.rockbox/ appears next to sdcard/payloads/.
 # buildzip.pl prints cp errors from its wpsbuild step (icons/ dir, fonts/- glob)
 # - WPS-theme packaging noise that does NOT abort the zip; the produced
 # codecs/langs/fonts/themes are complete.
