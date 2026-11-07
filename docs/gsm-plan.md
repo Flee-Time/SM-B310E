@@ -107,8 +107,147 @@ All rings advance "in" by the producer and "out" by the consumer. The
 layer-1 thread's entry (FUN_0002e98e) turns on the share-memory clock,
 clears the area, starts the DSP (`dsp_operate.c`, `layer1_dsp_download.c`),
 installs the DSP interrupt handler and writes 0x8181 to 0x10000ffe.
-Next: the power-monitor frame instruction (`rxlevmon.c`), the result
-format, and the RF parameter download (`l1dsp_param_ptr`).
+
+### Milestone 4 findings: power measurement and parameter download (2026-11-07)
+
+Ghidra (headless, read-only) on `dump_firmware.bin`. Function names are
+the ones Ghidra gave. The OS side is `os/drivers/dsp.c`.
+
+**Ring discipline** (`sharedmem_proc.c`) [C]
+- Share words are written until they read back (FUN_00061040) and read
+  until two reads agree (FUN_00061066); both give up after 6 tries.
+- In every ring "in" is the slot written last, not the next free one.
+  - The writer moves to in+1, fills that slot, then stores the new in.
+  - The reader moves out+1 and reads that slot until out == in, then
+    stores out.
+  - So a ring is empty when in == out, and full when in+1 == out.
+- Frame instructions (FUN_0005ef76): the 6 extension bytes go to
+  +0xeea + slot×6 and the 22 bytes to slot×22, then in (+0x23c) moves.
+- Commands (FUN_0005f474): 8 slots of 10 bytes, in at +0x38c and out at
+  +0x38e. After the store the ARM rings the DSP by writing 1 to
+  0x8b000160 (MCU_IRQ_SET, FUN_00067fee).
+- 0x8b000160 takes plain writes (1 MCU_IRQ_SET, 4 DSP_IRQ_CLR, 8
+  DSP_FRQ_CLR), not read-modify-write.
+- "Ask more frames" (FUN_0005f208(3)): flags 0x8200 are ORed into word 0
+  of the instruction 3 slots before in. The stock asserts that at least
+  2 more frames are still queued.
+- The share-clock semaphore (FUN_0005f438 / FUN_0005f402) calls
+  FUN_0001a514, an empty function on this build. So no share-memory clock
+  is switched here [C].
+
+**Frame instruction format** (`frameinstrutil.c`) [C]
+- Skeleton (FUN_0004f5fc / FUN_0004f628): bytes 0–11 = 0, bytes 12–21 =
+  0xff, and the 6-byte extension = 0xff.
+- Word 0 bits 4:0: the type.
+- Frame number: word 1 bits 15:9 hold its high 7 bits, word 2 its low 16.
+  It counts modulo 0x297000, the hyperframe.
+- FUN_0005f6f0 reads the frame number of the instruction at out. That is
+  how the ARM learns where the DSP's frame clock is [C].
+- Type 0 (FUN_0004fb10) is the idle frame: the skeleton with a frame
+  number. The stock fills gaps with it.
+
+**Power-measurement instruction: type 11 (0x0b)** (FUN_0004f646) [C]
+- Called from the power-sweep paths of `gsmframegen.c` (FUN_00054a3c,
+  FUN_00054524) with meas_count = 6 (FUN_00034fec returns 0 on this
+  build, else 3). The assert allows 1–6 (MAX_RXLEV_NUM = 6).
+- Word 0 = 0x000b, and word 0 is masked to 0x1ff at the end.
+- Measurements 1–4 sit in words 6–9; measurements 5–6 sit in extension
+  words 0–1.
+- Extension word 2 and word 10 stay 0xffff.
+- Each measurement word holds the arfcn index in bits 9:0 (0x3ff means
+  empty) and a 6-bit value in bits 15:10.
+- The list comes from FUN_0005cefc / FUN_0005ce46 (`rxlevmon.c`).
+  - That list walks the BA table and takes channels whose state byte is
+    below 5.
+  - The 6-bit value is the channel's byte at table+4, or a global default
+    when that byte is 0. It is changed when a result comes back
+    saturated, so it is the AGC gain hint [L].
+  - The global default lives in RAM (0x0422f030) and is not known
+    statically [G].
+- The arfcn field is the stock's arfcn index, not the ARFCN.
+  `arfcn_index < RF_TOTAL_CHANS` with RF_TOTAL_CHANS = 0x3cb = 971 [C].
+- 971 is exactly 125 (P-GSM 0–124) + 49 (E-GSM 975–1023) + 374 (DCS
+  512–885) + 299 (PCS 512–810) + 124 (GSM 850 128–251) [L].
+- The order of those bands inside the index is a guess [G]. P-GSM
+  first, so index = ARFCN for 0–124, is the likely one.
+  `l1_arfcn_index()` uses that order.
+
+**POWERMONQ results** (+0x5c0, 30 × 8 bytes; in +0x6b0, out +0x6b2) [C]
+- FUN_0005ed64 reads them, called from FUN_0005aad0 / FUN_0005ab44 /
+  FUN_00045444. The consumers are FUN_0005c8ba (camped), FUN_0005c3e2
+  (power sweep) and FUN_000453ee (calibration).
+- Halfword 0: the arfcn index (FUN_0005b762 maps it to a BA slot).
+- Halfword 1: the level. Bits 11:4 are the rxlev, asserted ≤ 110, so the
+  unit is 1/16 [C]. The power sweep rounds it with (v + 8) >> 4 [C].
+  Whether 110 means −110 dBm (bigger = weaker) or the GSM RXLEV sense is
+  not settled [G].
+- Halfword 2: a signed value that only the calibration path sums
+  (FUN_000453ee) [C]. Its meaning is unknown [G].
+- Halfword 3: the status.
+  - 1: a valid measurement.
+  - 2 and 3: saturated; the gain hint is moved and the channel is
+    measured again ("SATURATE_HI" strings at 0xc7c60 / 0xc8748) [L].
+  - Which of 2 and 3 is high and which is low is a guess [G].
+
+**`l1dsp_param_ptr` is not the RF download** [C]
+- FUN_00074520 / FUN_00074658 (`layer1_dsp_download.c`) use it to pick
+  the DSP image segment.
+  - FUN_00074520 maps the chip variant to a "matchword".
+  - FUN_00074658 walks the image's 5-entry {match, halfwords} table at
+    image+0 (data from +0x28) and returns that segment's address and
+    size × 2.
+- On this phone segment 1 (match 1, 66861 halfwords) is the one loaded.
+  Segment 2 is a byte-identical copy [C].
+- The image itself (FUN_00074ad6) is NV item 4 when the fixed NV has one.
+  Otherwise it is the compiled-in LZMA blob at 0xcc874. This phone's
+  fixed NV has no item 4 [C].
+- The image decodes to 267484 bytes; earlier notes said 262144, which
+  came from a truncating tool [C].
+
+**Parameter records sent after boot** [C]
+- FUN_00074430 scans the program for 5a5a a5a5. The rest of segment 1
+  after it (1577 halfwords) is the "pOrgData" stream.
+- That stream is a list of records: {u16 length (bit 15 a flag), then
+  length halfwords, the first an address in DSP data memory [L]}.
+- SharedMemProc_StartTranferDataToDsp (FUN_00060bf4, FUN_00060650) sends
+  one record per step:
+  - It copies the body to share +0x6f6.
+  - It posts command {0, 0, length word, 0, 0} (FUN_0004b3a4 →
+    FUN_0005f474).
+  - It waits for L1 event 0xc, which the DSP interrupt raises.
+- At layer-1 start, FUN_0004f580 sends a list of 17 data types and
+  FUN_0004f5aa sends 15 more. The type list lives in RAM (0x0422e134), so
+  which types carry NV data is not resolved statically.
+
+**RF / calibration parameters: NV items 1 and 2** [C]
+- The fixed NV at 0x680000 holds item 2 (calibration, 0x1784 bytes at
+  0x687958) and item 1 (0x3f4 bytes at 0x6890e0).
+- NV getters: FUN_000225ee returns item 3, FUN_000225f6 item 2 and
+  FUN_000225fa item 4. FUN_00022a30(id) returns an item's length.
+- `downloadparam.c` reads its ADC_T (0x30 bytes) out of item 2
+  (FUN_0004eaa8).
+- The "download param" and "calibration param" version checks are at
+  0x2f928 / 0x2f8b8. No code references were found to them statically, so
+  how item 1 reaches the DSP (probably one of the data types above) is
+  still open [G].
+
+**Start-up order** (FUN_0002e98e, `layer1_main.c`) [C]
+1. Share clock on (a no-op), then clear 0xfc0 bytes.
+2. DSP interrupt set up (FUN_0003ab7e). Line 13 is registered as a FIQ
+   (`dsp_operate.c` "fiq_regist_status"). FUN_0003abe6 sets bit 13 in
+   0x80000008 (IRQ enable) and 0x80000028 (FIQ enable [L]).
+3. Download and boot (FUN_00074b96), then clear again.
+4. Clear again, then 0x8181 to 0x10000ffe. 0x10000fe0 is the
+   runtime pointer [0x0422e598].
+5. The data-type stream (FUN_0004f580).
+
+**Not yet seen on the phone**
+- No DSP result of any kind has been observed on hardware: the 2026-08
+  diagnostic only showed DSP activity (2 of 10 share words changed).
+- The OS driver boots the DSP as verified (QEMU: all 66 blocks through
+  the model).
+- The record stream, the frame-instruction rings and POWERMONQ are
+  written from this analysis and need a phone run.
 
 **Licensing:** never ship stock bytes. As the FM driver does with its init
 tables, read or patch them from the owner's own NOR or dump.
