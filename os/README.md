@@ -2,7 +2,9 @@
 
 Our own operating system for the SM-B310E (SC6530C). Design and plan:
 [docs/os-design.md](../docs/os-design.md). License: GPLv2 or later
-([LICENSE](LICENSE)); the rest of the repository stays MIT.
+([LICENSE](LICENSE)); the rest of the repository stays MIT. The UI font
+data (`ui/font_montserrat.c`, rendered from Montserrat) is under the SIL
+Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 
 ## Status
 
@@ -17,12 +19,15 @@ Our own operating system for the SM-B310E (SC6530C). Design and plan:
   detection and buttons, torch, vibrator, SIM reader, RTC calendar, USB
   mass storage; pass in QEMU. On the phone (2026-11-07): mic recording and
   playback, FM (NOR tables ok), SIM slot 0 and the torch work.
-- **To do (2026-11-08): USB storage on the phone.** Windows enumerates the
-  device but the drive never appears in Explorer. Log: 5 SCSI commands,
-  2 failed, 1 reset, 0 KB moved. Start from the failed commands (sense
-  and bulk halts, untested on hardware: does +bit 29 stall the bulk
-  endpoints and does clearing it reset the data toggle?) and compare with
-  the Rockbox usb_storage exchange that works on the phone.
+- **USB storage works on the phone** (2026-11-07): a Windows session
+  moved 7.7 MB in and 11.7 MB out over 1584 commands, no SD errors. It
+  first enumerated but never mounted: failed commands halted the bulk
+  endpoints; they now end like the Rockbox port's (a zero-length packet or
+  the data taken, then the CSW). The card log lists every command of a
+  session with its result and sense (`usb: cmd ...`).
+- **The UI** (2026-11-07): an LVGL-like look with less overhead, on the
+  phone: Montserrat anti-aliased text, small rounded cards, icons,
+  switches, bars, floating dialogs, a warm retro palette.
 - **CPU clock scaling** and the corrected CPU accounting: run on the
   phone 2026-11-07: 1.3% load at rest, 0.2% with the screen dark, the
   tick at 1000 interrupts a second, 3913 KB heap free.
@@ -37,7 +42,7 @@ Our own operating system for the SM-B310E (SC6530C). Design and plan:
 | USB storage | the card as a USB mass storage device (1209:0001): our own small stack on the Rockbox port's controller driver, all PIO (DMA once wrote stale FIFO words into the card's root directory); Bulk-Only Transport, the SCSI commands Windows and Linux use, two 16 KB buffers; the OS lets go of the card meanwhile (`fs_suspend`) (`drivers/usb.c`, `usb_msc.c`, `apps/usb.c`) |
 | FM radio | RTC6211N on I2C 1, tune, seek, RSSI, stereo, mute, the stock bank tables read from the phone's own NOR when their CRC matches (`drivers/fm.c`) |
 | Storage | FatFs R0.15a on the card: long names, UTF-8, thread-safe; a card log in `/b310e-os/log.txt` (`fs/`) |
-| UI | screen stack with status, title and soft-key bars, lists, dialogs, text view, key repeat, screen timeout: dim, then LEDs off and panel asleep (`ui/`) |
+| UI | screen stack with status, title and soft-key bars; card lists with icons, switches and details, floating dialogs, text view, key repeat, screen timeout: dim, then LEDs off and panel asleep; drawing with alpha blending, anti-aliased text (Montserrat 9/10/12/24 px) and rounded shapes (`ui/`) |
 | Apps | built in: Home (clock, date), Menu, Apps, Files, Sound (tone, WAV player, mic recorder), FM radio (with recording), Tools (torch, vibrator, SIM cards, USB storage), System, Settings (brightness, screen timeout, CPU speed, Date & time), Power (`apps/`) |
 | Loadable apps | `.app` files from `/b310e-os/apps/`, relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); first app: Stopwatch (`modules/stopwatch/`) |
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
@@ -84,7 +89,10 @@ APP("Hello", start, NULL);
 ```
 
 The OS names (`gfx_*`, `ui_*`, `list_*`, `f_*`, `snprintf`, `malloc`,
-`ticks`, `klog` ...) are macros for the API table (`sdk/app.h`). A screen
+`ticks`, `klog` ...) are macros for the API table (`sdk/app.h`), API 2.0
+since the new UI (`gfx_round`, `gfx_icon`, `gfx_bar`, `gfx_switch`,
+`gfx_shade`, `gfx_text_height` and the fonts FONT_SMALL, FONT_BODY,
+FONT_LARGE, FONT_HUGE; 1.x apps are refused, rebuild them). A screen
 with `tick_ms` set gets `tick()` that often (the stopwatch uses 100 ms).
 Close your files before your last screen goes; memory from `malloc` is
 freed for you.
@@ -137,10 +145,11 @@ kernel/         threads and scheduler, sync objects, heap
 drivers/        LCD, backlight, keypad, console, SD/SDIO, battery, fonts
 fs/             FatFs glue (disk, locks, config), card log
 loader/         app loader, the API table apps get
-ui/             drawing, screen stack, widgets
+ui/             drawing, screen stack, widgets, fonts (OFL), icons
 apps/           built-in screens: home, menu, apps, files, system, settings, power
 sdk/            for loadable apps: app.h, app.ld, start.c, mkapp.py
 modules/        loadable apps, one folder each
+tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py
 lib/            string functions, printf
 include/os/     interfaces
 link/os.ld      memory map
@@ -220,6 +229,32 @@ main.c          start-up; selftest.c: the boot self-test
   set in 0x82001904, which the OS never did: "charging" could not show.
   `charger_present()` sets it now (found while porting USB, which detects
   the cable through the same line).
+- `_start` reads the CP15 control register it is entered with. If the
+  loader left the MMU and D-cache on, it writes the cache back and
+  switches them off before zeroing `.bss`: otherwise stores to lines the
+  loader had cached stay in the cache, `mmu_setup`'s invalidate drops
+  them, and those variables keep the loader's data. Confirmed on the
+  phone (2026-11-07): the boot menu enters with control register
+  0x0005327f, MMU and D-cache on. Before the fix the UI's screen stack,
+  key timers and the app list held its data (small values, a frame-buffer
+  pointer): a data abort leaving the Stopwatch, then the torch, a buzz and
+  a power-off at every boot, and a first frame drawn only after a key
+  (the screen state read dark). The boot log records the entry state
+  (`boot: entered with control register ...`). Rockbox's crt0 makes the
+  same assumption.
+- The system DMA engine is quieted first thing at boot as well
+  (`drivers/dma.c`: all 32 channels off, all 64 request bindings
+  cleared), so nothing the loader set up can run once the audio code
+  enables its clock. `tests/test-dma.py` plants such channels first.
+- The UI: no object tree and no style system, unlike LVGL. Screens draw
+  what they show into the back buffer every frame with a few primitives
+  that blend (5-bit alpha in the 0x07e0f81f spread form): Montserrat
+  glyphs and 12 px icons as 4-bit alpha maps made at build time by
+  `tools/mkfont.py` and `tools/mkicons.py`, rounded rectangles with a
+  coverage table per radius. A full frame takes a millisecond or two. The
+  look: a warm dark palette (cream text, amber accent and selection, sage
+  and brick for good and bad), corners of 2 px, 18 px list rows.
+  `tests/ui-tour.py` takes a screenshot of every screen.
 - FM seeking tunes one channel per UI tick (about 16 a second) and any
   key stops it. It first swept the band inside one key handler: on the
   phone, Up while recording the radio blocked the UI, the recording and
