@@ -85,7 +85,7 @@ def main():
                     '--output', str(card)], check=True, capture_output=True)
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-           '-display', 'none', '-serial', 'none', '-monitor', 'none',
+           '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), '-serial', 'none', '-monitor', 'none',
            '-icount', f'shift={args.icount},sleep=on',
            '-drive', f'file={image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',

@@ -63,6 +63,8 @@ thread_t *thread_create(const char *name, int prio, size_t stack_size,
 void thread_sleep(uint32_t ms);
 void thread_yield(void);
 void thread_exit(void) __attribute__((noreturn));
+/* Called (interrupts off) when a thread with an owner (an app's) ends. */
+extern void (*thread_owned_exit)(void);
 thread_t *thread_self(void);
 int thread_count_owned(const void *owner);  /* threads of an app still running */
 void thread_set_priority(thread_t *t, int prio);

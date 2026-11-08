@@ -426,6 +426,8 @@ void thread_yield(void)
     arch_irq_restore(s);
 }
 
+void (*thread_owned_exit)(void);
+
 void thread_exit(void)
 {
     thread_t *t = kernel_current;
@@ -435,6 +437,8 @@ void thread_exit(void)
     t->state = T_DEAD;
     t->next = zombies;
     zombies = t;
+    if (t->owner && thread_owned_exit)
+        thread_owned_exit();            /* its app may be unloaded now */
     arch_yield();
     for (;;)
         ;

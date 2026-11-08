@@ -1050,10 +1050,14 @@ static void c_run(sess_t *s, int argc, char **argv)
     if (!need_card(s))
         return;
     n = strlen(name);
-    if (!strchr(name, '/'))
-        snprintf(s->path, sizeof(s->path), APP_DIR "/%s%s", name,
+    if (!strchr(name, '/')) {           /* by name or file, in APP_DIR or a
+                                         * folder of its own there */
+        snprintf(s->path2, sizeof(s->path2), "%s%s", name,
                  n > 4 && !strcmp(name + n - 4, ".app") ? "" : ".app");
-    else if (!resolve(s, name, s->path))
+        if (!app_find(name, s->path, sizeof(s->path)) &&
+            !app_find(s->path2, s->path, sizeof(s->path)))
+            snprintf(s->path, sizeof(s->path), APP_DIR "/%s", s->path2);
+    } else if (!resolve(s, name, s->path))
         return;
     if (!on_ui(s, ui_run_app, s->path))
         return;

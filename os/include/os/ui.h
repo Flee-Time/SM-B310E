@@ -104,6 +104,25 @@ struct screen {
 
 void ui_push(screen_t *s);
 void ui_pop(void);
+/* A screen in a mode of its own while it is on top (games; API 2.5),
+ * UI_MODE_* or-ed, 0 for the usual one; the UI thread only. It lasts until
+ * the screen is popped (set it again before pushing it anew).
+ *   UI_MODE_FULL      draw() paints the whole 128 x 160 LCD: no status,
+ *                     title or soft-key bars, nothing cleared before it
+ *   UI_MODE_RAW_KEYS  key() gets every press and every release, END and
+ *                     Center too, without repeats, tactile buzz or the
+ *                     held-key gestures (quick panel, torch); END held
+ *                     2 s still powers off
+ *   UI_MODE_AWAKE     no screen timeout */
+#define UI_MODE_FULL      1u
+#define UI_MODE_RAW_KEYS  2u
+#define UI_MODE_AWAKE     4u
+void ui_screen_mode(screen_t *s, unsigned flags);
+/* From a full-screen draw(): a whole frame sent where it lies, no copy: 32-byte
+ * aligned, and not written until another is sent. The one sent already, or
+ * NULL: the panel stays as it is. False if the screen is not on top and
+ * full-screen (nothing done: draw as usual). */
+bool ui_present(const uint16_t *px);
 void ui_home(void);                 /* back to the bottom screen */
 void ui_redraw(void);
 void ui_refresh(void);
@@ -118,7 +137,8 @@ const char *ui_chain(const char *path, const char *what);
 #define OS_IMAGE_PATH  "/payloads/b310e-os.bin"
 /* From another thread: run fn(arg) in the UI thread and wait for it.
  * false when the UI did not take it within timeout_ms (then it never
- * runs). arg must stay valid until it returns. */
+ * runs). arg must stay valid until it returns. fn runs as the caller's
+ * app (app_current), so what it pushes and allocates is that app's. */
 bool ui_call(void (*fn)(void *arg), void *arg, uint32_t timeout_ms);
 
 /* settings, kept in /b310e-os/settings.txt */

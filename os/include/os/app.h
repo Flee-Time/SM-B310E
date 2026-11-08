@@ -18,8 +18,11 @@
  * Apps run in the UI thread: start() returns the app's first screen and
  * every callback of the app's screens runs there. Screens the app pushes
  * and memory it gets from api->malloc belong to it; when the last of its
- * screens leaves the stack, stop() runs and the app and its memory are
- * freed. Files it leaves open are not closed for it.
+ * screens leaves the stack (and its threads have ended), stop() runs and
+ * the app and its memory are freed. Files it leaves open are not closed
+ * for it. A thread of the app's (api->thread_create) counts as the app
+ * too: its malloc, free, app_arg, threads and notifications are the
+ * app's, and so is what it runs through ui_call.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -56,12 +59,26 @@
  * from another thread), appended after alarm_days_text. */
 /* 2.4 (2026-11-07): notifications (os/notify.h: post, remove, count, get),
  * shown in the quick panel; an app with one posted stays loaded. */
+/* 2.5 (2026-11-07): ui_screen_mode (full-screen, raw-key, awake screens:
+ * games) and ui_call (an app's thread runs code in the UI thread), after
+ * notify_get; apps up to 2 MB (Doom). An app's thread that
+ * ends lets the app be unloaded at once. */
+/* 2.6 (2026-11-08): app_dir, after ui_call: the folder the app's .app is
+ * in. Apps may sit in a folder of their own in APP_DIR, with their data
+ * ("/b310e-os/apps/Doom/doom.app" and the WAD beside it). */
+/* 2.7 (2026-11-08): app_reload, after app_dir: load the app again, fresh,
+ * with an argument, once it has gone (an emulator: on to a ROM, back to
+ * its list). */
+/* 2.8 (2026-11-08): relocations may be unaligned (a pointer in a packed
+ * struct: Wolf4SDL's states); nothing new in the table. */
 #define OS_API_MAJOR 2
-#define OS_API_MINOR 4
+/* 2.9 (2026-11-08): ui_present, after app_reload: from a full-screen draw(),
+ * a whole frame sent where it lies, no copy. */
+#define OS_API_MINOR 9
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
-#define APP_MAX_SIZE (512u * 1024)      /* image + bss */
+#define APP_MAX_SIZE (2048u * 1024)     /* image + bss (512 KB before 2.5) */
 
 typedef struct {
     uint32_t magic;
@@ -306,6 +323,18 @@ struct os_api {
     void (*notify_remove)(notify_t *n);
     int (*notify_count)(void);
     notify_t *(*notify_get)(int i);
+
+    /* 2.5: screens of their own (games); run in the UI thread from another */
+    void (*ui_screen_mode)(screen_t *s, unsigned flags);
+    bool (*ui_call)(void (*fn)(void *arg), void *arg, uint32_t timeout_ms);
+
+    /* 2.6: the folder the app's .app is in (APP_DIR or a folder of its own) */
+    const char *(*app_dir)(void);
+
+    /* 2.7: load the app again, fresh, with arg, once it has gone */
+    bool (*app_reload)(const char *arg);
+    bool (*ui_present)(const uint16_t *px);
+
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */
@@ -317,6 +346,10 @@ extern const os_api_t os_api;
 const char *app_open(const char *path);
 /* An app by its name or file name, with an argument (app_arg() in it). */
 const char *app_launch(const char *name, const char *arg);
+/* Its path, in APP_DIR or in a folder of its own there; false if none. */
+bool app_find(const char *name, char *path, size_t size);
+const char *app_dir(void);
+bool app_reload(const char *arg);
 const char *app_arg(void);
 thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *), void *arg);
 /* Read only the header (for listings); 0, or -1 when it is not an app. */
@@ -326,10 +359,15 @@ const char *app_name(const app_t *a);
 bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out);
 /* Unload the apps that have no screen on the stack (the UI loop calls it). */
 void app_collect(screen_t *const *stack, int depth);
+bool app_reloading(void);               /* between app_reload and the fresh app */
 int app_count(void);
 
 /* The app whose code is running (the UI sets it around callbacks). */
 extern app_t *app_current;
+/* The app a call is for: an app thread's own (app_thread), else
+ * app_current. What the OS tags as an app's (memory, threads,
+ * notifications, screens, app_arg) goes by this. */
+app_t *app_self(void);
 void app_forget(app_t *a, void *p);     /* p was freed by the UI */
 
 screen_t *app_apps(void);               /* the Apps menu entry */

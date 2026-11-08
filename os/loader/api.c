@@ -202,4 +202,9 @@ const os_api_t os_api = {
     .notify_remove = notify_remove,
     .notify_count = notify_count,
     .notify_get = notify_get,
+    .ui_screen_mode = ui_screen_mode,
+    .ui_call = ui_call,
+    .app_dir = app_dir,
+    .app_reload = app_reload,
+    .ui_present = ui_present,
 };

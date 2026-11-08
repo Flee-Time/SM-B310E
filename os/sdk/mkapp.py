@@ -91,6 +91,7 @@ def main():
             image[s['addr']:s['addr'] + s['size']] = elf[s['offset']:s['offset'] + s['size']]
 
     relocs = set()
+    unaligned = 0
     for s in sections:
         if s['kind'] == SHT_RELA:
             fail(f'{s["name"]}: RELA relocations are not supported')
@@ -110,8 +111,10 @@ def main():
                 fail(f'{s["name"]}+{offset:#x}: relocation type {kind} is not supported')
             if symbols[sym][3] == SHN_ABS:
                 continue                # an absolute value, not an address
-            if offset & 3 or offset + 4 > image_size:
+            if offset + 4 > image_size:       # (unaligned: API 2.8)
                 fail(f'{s["name"]}+{offset:#x}: misplaced relocation')
+            if offset & 3:
+                unaligned += 1
             value, = struct.unpack_from('<I', image, offset)
             if value > bss_end:
                 fail(f'{s["name"]}+{offset:#x}: points outside the app ({value:#x})')
@@ -130,7 +133,10 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(header + bytes(image) + reloc_bytes)
     print(f'{args.output.name}: "{name.decode()}" API {major}.{minor}, '
-          f'{image_size} + {bss_end - image_size} bytes, {len(relocs)} relocations')
+          f'{image_size} + {bss_end - image_size} bytes, {len(relocs)} relocations'
+          + (f' ({unaligned} unaligned: API 2.8)' if unaligned else ''))
+    if unaligned and (major, minor) < (2, 8):
+        fail(f'{unaligned} unaligned relocations need API 2.8')
 
 
 if __name__ == '__main__':

@@ -17,6 +17,11 @@ SECTIONS
     .data : ALIGN(4) {
         *(.data .data.*)
         . = ALIGN(4);
+        /* C++'s static constructors (a C++ app runs them first: the game
+         * kit's kit_run); relocated like any data */
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
     }
     __image_end = .;
     .bss (NOLOAD) : ALIGN(4) {
@@ -25,7 +30,7 @@ SECTIONS
     }
     __bss_end = .;
     /DISCARD/ : {
-        *(.ARM.exidx*) *(.ARM.extab*) *(.init_array*) *(.fini_array*)
+        *(.ARM.exidx*) *(.ARM.extab*) *(.fini_array*)
         *(.got*) *(.plt*) *(.interp) *(.dynamic*)
     }
 }

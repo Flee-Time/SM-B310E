@@ -40,8 +40,8 @@ bool notify_post(notify_t *n)
     } else {
         if (notify_count() >= NOTIFY_MAX)
             return false;
-        n->owner = app_current;
-        klog("notify: \"%s\" from %s", n->title, app_current ? app_name(app_current) : "the OS");
+        n->owner = app_self();
+        klog("notify: \"%s\" from %s", n->title, n->owner ? app_name(n->owner) : "the OS");
     }
     n->seq = ++seq;
     n->next = head;

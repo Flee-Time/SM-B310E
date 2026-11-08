@@ -60,6 +60,13 @@ static void post(uint8_t code, bool down)
         queue_send_isr(&events, &ev);
 }
 
+/* The matrix keys down now, by code: a press of one already down is
+ * not posted again. Re-enabling the scan (keypad_resume, after every
+ * card DMA) latches the keys held at that moment as new presses: Doom,
+ * reading the card all the time, got dozens a press, and the flood
+ * filled the event queue until a release was lost. */
+static uint32_t matrix_down[4];
+
 static void keypad_isr(void)
 {
     uint32_t raw = KPD->int_raw, status = KPD->key_status;
@@ -75,8 +82,19 @@ static void keypad_isr(void)
             continue;
         byte = status >> ((i & 3) * 8);
         k = (byte & 0x70u) >> 1 | (byte & 7u);
-        if (keymap[k] != 0xff)
-            post(keymap[k], i < 4);
+        if (keymap[k] != 0xff) {
+            uint8_t code = keymap[k];
+            uint32_t bit = 1u << (code & 31), *word = &matrix_down[(code >> 5) & 3];
+
+            if (i < 4) {
+                if (*word & bit)
+                    continue;           /* still held: no second press */
+                *word |= bit;
+            } else {
+                *word &= ~bit;
+            }
+            post(code, i < 4);
+        }
     }
 }
 

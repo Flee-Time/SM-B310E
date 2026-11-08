@@ -40,11 +40,13 @@ static screen_t *stack[MAX_DEPTH];
 static int depth;
 static bool dirty;
 static uint32_t last_input, end_down, next_repeat, next_second, next_tick, next_music;
+static bool end_in_game;                /* END went down on a raw-key screen */
 static bool collect;                    /* an app's screen left the stack */
 static uint32_t zero_down;
 static uint32_t center_down;            /* Center held on a panel host */
 static screen_t *panel_hosts[4];
 static int n_hosts;
+static struct { screen_t *s; unsigned flags; } modes[4];   /* ui_screen_mode */
 
 #define PANEL_HOLD_MS  600
 
@@ -148,24 +150,64 @@ void ui_apply_brightness(void)
 
 /* ---- stack ---------------------------------------------------------------- */
 
+#define RELOADING "One moment..."       /* an app between two loads */
+
 static void publish(void)
 {
     os_status.ui_depth = (uint32_t)depth;
-    os_status.ui_title = depth ? stack[depth - 1]->title : NULL;
+    os_status.ui_title = app_reloading() ? RELOADING : depth ? stack[depth - 1]->title : NULL;
 }
+
+static unsigned top_mode(void);
+static void raw_release_all(screen_t *s, uint32_t now);
 
 void ui_push(screen_t *s)
 {
     if (!s || depth == MAX_DEPTH)
         return;
+    if (depth && top_mode() & UI_MODE_RAW_KEYS)
+        raw_release_all(stack[depth - 1], kernel_ticks());  /* a game lets go of its keys */
     if (!s->app)
-        s->app = app_current;
+        s->app = app_self();
     stack[depth++] = s;
     if (s->enter)
         AS_OWNER(s, s->enter(s));
     next_tick = kernel_ticks() + tick_period(s);
     publish();
     dirty = true;
+}
+
+/* ---- screens in a mode of their own (games) ------------------------------ */
+void ui_screen_mode(screen_t *s, unsigned flags)
+{
+    int free_slot = -1;
+
+    for (int i = 0; i < (int)ARRAY_SIZE(modes); i++) {
+        if (modes[i].s == s) {
+            modes[i].flags = flags;
+            if (!flags)
+                modes[i].s = NULL;
+            dirty = true;
+            return;
+        }
+        if (!modes[i].s && free_slot < 0)
+            free_slot = i;
+    }
+    if (flags && free_slot >= 0) {
+        modes[free_slot].s = s;
+        modes[free_slot].flags = flags;
+        dirty = true;
+    }
+}
+
+static unsigned top_mode(void)
+{
+    screen_t *s = depth ? stack[depth - 1] : NULL;
+
+    for (int i = 0; s && i < (int)ARRAY_SIZE(modes); i++)
+        if (modes[i].s == s)
+            return modes[i].flags;
+    return 0;
 }
 
 void ui_pop(void)
@@ -175,6 +217,7 @@ void ui_pop(void)
     if (depth <= 1)
         return;
     s = stack[--depth];
+    ui_screen_mode(s, 0);
     if (s->leave)
         AS_OWNER(s, s->leave(s));
     if (s->app) {
@@ -323,6 +366,19 @@ static void redraw(void)
     if (light == 2)                     /* asleep: drawn again on wake */
         return;
     dirty = false;
+    if (app_reloading()) {              /* an app between two loads: not the
+                                         * screen under it for a moment */
+        gfx_fill(0, 0, LCD_WIDTH, LCD_HEIGHT, C_BG);
+        gfx_text_centered(LCD_HEIGHT / 2 - 4, RELOADING, C_DIM, FONT_SMALL, 1);
+        lcd_update();
+        return;
+    }
+    if (top_mode() & UI_MODE_FULL) {    /* the whole LCD is the screen's */
+        if (s->draw)
+            AS_OWNER(s, s->draw(s));
+        lcd_update();
+        return;
+    }
     gfx_fill(0, UI_TOP, LCD_WIDTH, UI_CONTENT_H, C_BG);
     if (overlay && under->draw)         /* a dialog over the screen under it */
         AS_OWNER(under, under->draw(under));
@@ -331,6 +387,17 @@ static void redraw(void)
     draw_bars(s, overlay ? under->title : s->title);
     draw_status();
     lcd_update();
+}
+
+/* (API 2.9) From a screen's draw(). Only a full-screen one on top has the
+ * panel to itself: under a dialog, or anything else, false, and it draws
+ * as usual. */
+bool ui_present(const uint16_t *px)
+{
+    if (!(top_mode() & UI_MODE_FULL))
+        return false;
+    lcd_present(px);
+    return true;
 }
 
 static void splash(const char *text)
@@ -355,6 +422,7 @@ void ui_power_off(void)
 
 static void (*volatile call_fn)(void *);
 static void *volatile call_arg;
+static app_t *volatile call_app;        /* the caller's: fn runs as that app */
 static volatile bool call_taken;
 static sem_t call_done;
 static mutex_t call_lock;
@@ -367,6 +435,7 @@ bool ui_call(void (*fn)(void *arg), void *arg, uint32_t timeout_ms)
     mutex_lock(&call_lock, WAIT_FOREVER);
     s = arch_irq_save();
     call_arg = arg;
+    call_app = app_self();
     call_taken = false;
     call_fn = fn;
     arch_irq_restore(s);
@@ -389,16 +458,22 @@ static void serve_call(void)
 {
     void (*fn)(void *);
     void *arg;
+    app_t *app;
     uint32_t s = arch_irq_save();
 
     fn = call_fn;
     arg = call_arg;
+    app = call_app;
     call_fn = NULL;
     if (fn)
         call_taken = true;
     arch_irq_restore(s);
     if (fn) {
+        app_t *saved = app_current;
+
+        app_current = app;
         fn(arg);
+        app_current = saved;
         sem_post(&call_done);
     }
 }
@@ -576,11 +651,110 @@ void ui_wake(void)
     wake();
 }
 
+/* The keys a raw-key screen (a game) has been given down: released for it
+ * when the quick panel comes over it, so it does not walk on meanwhile. */
+static uint32_t raw_held[4];
+static screen_t *raw_screen;
+
+static void raw_deliver(screen_t *s, const key_event_t *ev)
+{
+    uint32_t bit = 1u << (ev->code & 31), *w = &raw_held[(ev->code >> 5) & 3];
+
+    if (s != raw_screen) {
+        memset(raw_held, 0, sizeof(raw_held));
+        raw_screen = s;
+    }
+    if (ev->down)
+        *w |= bit;
+    else
+        *w &= ~bit;
+    if (s->key)
+        AS_OWNER(s, s->key(s, ev));
+}
+
+static void raw_release_all(screen_t *s, uint32_t now)
+{
+    for (unsigned code = 0; s == raw_screen && code < 128; code++)
+        if (raw_held[code >> 5] & 1u << (code & 31)) {
+            key_event_t up = { (uint8_t)code, 0, now };
+
+            raw_deliver(s, &up);
+        }
+}
+
+/* * and # together: the quick panel (volume, the torch ...) over any
+ * screen, games too; again: it closes. The key pressed first went to the
+ * screen, which gets its release; the chord's other presses and releases
+ * go nowhere. */
+static uint8_t chord_down, chord_eat;   /* bit 0: *, bit 1: # */
+
+static bool chord(const key_event_t *ev, uint32_t now)
+{
+    uint8_t bit;
+    screen_t *s = depth ? stack[depth - 1] : NULL;
+
+    if (ev->code != KEY_STAR && ev->code != KEY_HASH)
+        return false;
+    bit = ev->code == KEY_STAR ? 1 : 2;
+    if (!ev->down) {
+        chord_down &= (uint8_t)~bit;
+        if (chord_eat & bit) {
+            chord_eat &= (uint8_t)~bit;
+            return true;
+        }
+        return false;
+    }
+    chord_down |= bit;
+    if (chord_down != 3 || !s)
+        return false;
+    chord_eat = 3;
+    if (light)
+        wake();
+    held_key = swallow_key = 0;
+    center_down = zero_down = 0;
+    if (top_mode() & UI_MODE_RAW_KEYS)
+        raw_release_all(s, now);        /* the first of the two, and the rest */
+    if (s == ui_panel()) {
+        ui_pop();
+    } else {
+        ui_buzz(4, 40);
+        ui_push(ui_panel());
+    }
+    klog("ui: quick panel by * + #");
+    return true;
+}
+
 static void on_key(const key_event_t *ev, uint32_t now)
 {
     os_status.keys++;
     os_status.last_key = ev->code | (uint32_t)ev->down << 8;
     last_input = now;
+
+    if (app_reloading()) {              /* the keys are not for the screen under it */
+        if (ev->code == KEY_END && !ev->down) {
+            end_down = 0;
+            end_in_game = false;
+        }
+        held_key = swallow_key = 0;
+        center_down = zero_down = 0;
+        return;
+    }
+    if (chord(ev, now))
+        return;
+    if (top_mode() & UI_MODE_RAW_KEYS) {  /* a game: every press and release */
+        screen_t *s = stack[depth - 1];
+
+        if (ev->down && light)
+            wake();
+        if (ev->code == KEY_END)
+            end_down = ev->down ? (now ? now : 1) : 0;  /* held: power off */
+        if (ev->code == KEY_END)
+            end_in_game = ev->down;     /* its release is the game's too */
+        held_key = swallow_key = 0;
+        center_down = zero_down = 0;
+        raw_deliver(s, ev);
+        return;
+    }
 
     if (ev->down && light) {            /* the first key only wakes */
         wake();
@@ -613,8 +787,13 @@ static void on_key(const key_event_t *ev, uint32_t now)
     if (ev->code == KEY_END) {
         if (ev->down) {
             end_down = now;
+            end_in_game = false;
         } else if (end_down) {
             end_down = 0;
+            if (end_in_game) {          /* pressed in a game that has ended: */
+                end_in_game = false;    /* not a press of the screen's */
+                return;
+            }
             ui_home();
         }
         return;
@@ -673,6 +852,8 @@ static void every_second(uint32_t now)
     os_status.heap_free = heap_free_bytes();
     os_status.stray_irqs = irq_stray_count;
 
+    if (top_mode() & UI_MODE_AWAKE)
+        last_input = now;               /* a game: no timeout */
     if (timeout && light == 0 && now - last_input > timeout)
         set_light(1);
     else if (timeout && light == 1 && now - last_input > timeout + DARK_AFTER_MS)
@@ -696,9 +877,19 @@ static uint32_t tick_after(uint32_t now, uint32_t period)
     return t;
 }
 
+/* An app's thread ended (kernel, interrupts off): the UI loop looks
+ * whether the app can go (its screens may have left the stack before). */
+static void app_thread_ended(void)
+{
+    collect = true;
+    keypad_inject(0, false);
+}
+
 void ui_run(screen_t *home)
 {
     key_event_t ev;
+
+    thread_owned_exit = app_thread_ended;
 
     settings_load();
     rtc_restore();
@@ -729,8 +920,12 @@ void ui_run(screen_t *home)
             wait = 50;
         if (background_audio() && wait > MUSIC_MS)
             wait = MUSIC_MS;
-        if (dirty && light < 2)       /* dark: drawn on wake, do not spin */
-            wait = 0;
+        if (dirty && light < 2) {     /* dark: drawn on wake, do not spin */
+            uint32_t busy = lcd_busy_ms();  /* the keys in the meantime, and then
+                                             * what is newest, not what was */
+            if (busy < wait)
+                wait = busy;
+        }
 
         if (keypad_get(&ev, wait) == WAIT_OK && ev.code)
             on_key(&ev, kernel_ticks());
@@ -776,10 +971,16 @@ void ui_run(screen_t *home)
             }
         }
         if (collect) {
+            bool reloading = app_reloading();
+
             collect = false;
             app_collect(stack, depth);
+            if (reloading && !app_reloading()) {
+                publish();
+                dirty = true;
+            }
         }
-        if (dirty && light < 2)
+        if (dirty && light < 2 && !lcd_busy_ms())
             redraw();
     }
 }

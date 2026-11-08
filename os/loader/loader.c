@@ -21,10 +21,32 @@ struct app {
     int n_allocs, cap_allocs;
     char name[20];
     char *arg;                          /* what it was opened with, or NULL */
+    char dir[96];                       /* the folder its .app is in (2.6) */
+    char path[96];                      /* its .app */
+    bool reload;                        /* load it again once it has gone (2.7) */
+    char *reload_arg;
 };
+
+/* the app to load again once app_collect has unloaded it (app_reload) */
+static char reload_path[96], *reload_arg;
+static bool reload_pending;
+static uint32_t reload_asked;           /* when app_reload was called; 0: not */
+#define RELOAD_PATIENCE_MS 10000        /* an app that does not go: not for ever */
 
 static app_t *apps;
 app_t *app_current;
+static mutex_t allocs_lock;             /* every app's allocs list (threads) */
+
+/* The app a call is made for: the one whose thread is running, else the
+ * one whose callback the UI is running. An app's own thread must not go
+ * by app_current: that is the UI's, and whatever it last set (often no app
+ * at all, or another app's while that one's callback waits on the card). */
+app_t *app_self(void)
+{
+    thread_t *t = thread_self();
+
+    return t && t->owner ? t->owner : app_current;
+}
 
 /* ---- CRC-32 (IEEE), four bits at a time ---------------------------------- */
 static uint32_t crc32_update(uint32_t crc, const void *data, size_t n)
@@ -45,6 +67,7 @@ static uint32_t crc32_update(uint32_t crc, const void *data, size_t n)
 }
 
 /* ---- memory owned by an app ---------------------------------------------- */
+/* (allocs_lock held) */
 static void track(app_t *a, void *p)
 {
     if (a->n_allocs == a->cap_allocs) {
@@ -63,21 +86,35 @@ static void track(app_t *a, void *p)
     a->allocs[a->n_allocs++] = p;
 }
 
-void app_forget(app_t *a, void *p)
+/* (allocs_lock held) */
+static bool forget(app_t *a, void *p)
 {
     for (int i = 0; a && i < a->n_allocs; i++)
         if (a->allocs[i] == p) {
             a->allocs[i] = a->allocs[--a->n_allocs];
-            return;
+            return true;
         }
+    return false;
+}
+
+void app_forget(app_t *a, void *p)
+{
+    mutex_lock(&allocs_lock, WAIT_FOREVER);
+    forget(a, p);
+    mutex_unlock(&allocs_lock);
 }
 
 void *app_malloc(size_t size)
 {
     void *p = kmalloc(size);
 
-    if (p && app_current)
-        track(app_current, p);
+    app_t *a = app_self();
+
+    if (p && a) {
+        mutex_lock(&allocs_lock, WAIT_FOREVER);
+        track(a, p);
+        mutex_unlock(&allocs_lock);
+    }
     return p;
 }
 
@@ -90,11 +127,22 @@ void *app_zalloc(size_t size)
     return p;
 }
 
+/* Off the list it is on: the caller's, or another app's (a block one
+ * thread allocated and another freed); left on one, unload would free it
+ * a second time. */
 void app_free(void *p)
 {
+    app_t *self;
+
     if (!p)
         return;
-    app_forget(app_current, p);
+    mutex_lock(&allocs_lock, WAIT_FOREVER);
+    self = app_self();
+    if (!forget(self, p))
+        for (app_t *a = apps; a; a = a->next)
+            if (a != self && forget(a, p))
+                break;
+    mutex_unlock(&allocs_lock);
     kfree(p);
 }
 
@@ -175,44 +223,133 @@ static void unload(app_t *a)
             *pp = a->next;
             break;
         }
+    mutex_lock(&allocs_lock, WAIT_FOREVER);
     for (int i = 0; i < a->n_allocs; i++)
         kfree(a->allocs[i]);
+    mutex_unlock(&allocs_lock);
     os_status.apps_loaded = (uint32_t)app_count();
     klog("app: %s closed (%d blocks freed)", a->name, a->n_allocs);
+    if (a->reload && !reload_pending) {
+        memcpy(reload_path, a->path, sizeof(reload_path));
+        reload_arg = a->reload_arg;     /* app_collect loads it again */
+        a->reload_arg = NULL;
+        reload_pending = true;
+    }
+    kfree(a->reload_arg);
     kfree(a->arg);
     kfree(a->allocs);
     kfree(a->image);
     kfree(a);
 }
 
+/* ---- a CRC that does not match: where, and whether the card agrees ---------- */
+#define PART (64u * 1024)               /* the log's CRCs are per 64 KB */
+#define PARTS (APP_MAX_SIZE / PART)
+
+static uint32_t crc_of(const void *p, size_t n)
+{
+    return ~crc32_update(0xffffffffu, p, n);
+}
+
+/* The CRC of each 64 KB of the image and of the relocations, as read
+ * first (part[], relocs) and as the file reads now, a piece at a time into
+ * a small block: parts that differ between the reads point at the read or
+ * the memory it went to, the same CRCs both times at the file itself
+ * (the file's own: python os/sdk/appcrc.py file.app). */
+static void crc_report(FIL *f, const app_t *a, const app_file_t *h,
+                       const uint32_t *part, uint32_t relocs)
+{
+    enum { PIECE = 16 * 1024 };
+    uint8_t *buf = kmalloc(PIECE);
+    uint32_t nparts = (h->image_size + PART - 1) / PART, again[PARTS], crc = 0xffffffffu;
+    uint32_t pos = 0, left = h->reloc_count * 4u;
+    UINT n;
+    int differ = 0;
+
+    klog("app: %s: CRC, image at %p, %lu + %lu bytes, %lu relocations",
+         h->name, (void *)a->image, (unsigned long)h->image_size,
+         (unsigned long)h->bss_size, (unsigned long)h->reloc_count);
+    if (!buf || f_lseek(f, h->header_size) != FR_OK) {
+        kfree(buf);
+        return;
+    }
+    while (pos < h->image_size) {       /* the image again */
+        uint32_t k = h->image_size - pos < PIECE ? h->image_size - pos : PIECE;
+
+        if (f_read(f, buf, k, &n) != FR_OK || n != k)
+            break;
+        crc = crc32_update(crc, buf, k);
+        pos += k;
+        if (pos % PART == 0 || pos == h->image_size) {
+            again[(pos - 1) / PART] = ~crc;
+            crc = 0xffffffffu;
+        }
+    }
+    for (; pos == h->image_size && left; left -= n) {     /* the relocations */
+        if (f_read(f, buf, left < PIECE ? left : PIECE, &n) != FR_OK || !n)
+            break;
+        crc = crc32_update(crc, buf, n);
+    }
+    kfree(buf);
+    if (pos != h->image_size || left) {
+        klog("app: %s: the second read failed at %lu", h->name, (unsigned long)pos);
+        return;
+    }
+    for (uint32_t i = 0; i < nparts; i++) {
+        klog("app: %s: %3lu KB %08lx %08lx%s", h->name, (unsigned long)(i * PART / 1024),
+             (unsigned long)part[i], (unsigned long)again[i], part[i] != again[i] ? " differ" : "");
+        differ += part[i] != again[i];
+    }
+    klog("app: %s: relocs %08lx %08lx%s; %d of %lu parts read differently", h->name,
+         (unsigned long)relocs, (unsigned long)~crc, relocs != ~crc ? " differ" : "",
+         differ, (unsigned long)nparts);
+}
+
 static const char *load(FIL *f, app_t *a, const app_file_t *h)
 {
     uint32_t reloc[RELOC_CHUNK], crc = 0xffffffffu, left = h->reloc_count;
+    uint32_t part[PARTS], rcrc = 0xffffffffu;
     UINT n;
 
     if (f_read(f, a->image, h->image_size, &n) != FR_OK || n != h->image_size)
         return "read error";
     crc = crc32_update(crc, a->image, h->image_size);
+    for (uint32_t i = 0; i * PART < h->image_size; i++)     /* for crc_report */
+        part[i] = crc_of(a->image + i * PART,
+                         h->image_size - i * PART < PART ? h->image_size - i * PART : PART);
     while (left) {
         uint32_t k = left > RELOC_CHUNK ? RELOC_CHUNK : left;
 
         if (f_read(f, reloc, k * 4, &n) != FR_OK || n != k * 4)
             return "read error";
         crc = crc32_update(crc, reloc, k * 4);
+        rcrc = crc32_update(rcrc, reloc, k * 4);
         for (uint32_t i = 0; i < k; i++) {
-            uint32_t off = reloc[i], *w;
+            uint32_t off = reloc[i], v;
 
-            if (off & 3 || off > h->image_size - 4)
+            if (off > h->image_size - 4)
                 return "bad relocation";
-            w = (uint32_t *)(a->image + off);
-            if (*w > a->size)           /* must point into the app */
+            if (!(off & 3)) {
+                uint32_t *w = (uint32_t *)(a->image + off);
+
+                if (*w > a->size)       /* must point into the app */
+                    return "bad relocation";
+                *w += (uint32_t)a->image;
+                continue;
+            }
+            /* 2.8: a word of a packed struct (Wolf4SDL's), a byte at a time */
+            memcpy(&v, a->image + off, 4);
+            if (v > a->size)
                 return "bad relocation";
-            *w += (uint32_t)a->image;
+            v += (uint32_t)a->image;
+            memcpy(a->image + off, &v, 4);
         }
         left -= k;
     }
-    if (~crc != h->crc32)
+    if (~crc != h->crc32) {
+        crc_report(f, a, h, part, ~rcrc);
         return "damaged (CRC)";
+    }
     memset(a->image + h->image_size, 0, h->bss_size);
     return NULL;
 }
@@ -243,40 +380,99 @@ const char *app_open(const char *path)
     return open_with(path, NULL);
 }
 
+/* In dir (and, deeper levels down, in its folders): the .app whose name
+ * (its header's) or file name is name; its path in path. */
+static bool find_in(const char *dir, const char *name, char *path, size_t size, int deeper)
+{
+    DIR d;
+    FILINFO fi;
+    bool found = false;
+
+    if (f_opendir(&d, dir) != FR_OK)
+        return false;
+    while (!found && f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
+        app_file_t h;
+        size_t n = strlen(fi.fname);
+
+        if (fi.fattrib & AM_DIR) {
+            if (deeper && fi.fname[0] != '.') {
+                char sub[96];
+
+                if (snprintf(sub, sizeof(sub), "%s/%s", dir, fi.fname) < (int)sizeof(sub))
+                    found = find_in(sub, name, path, size, deeper - 1);
+            }
+            continue;
+        }
+        if (n < 5 || strcmp(fi.fname + n - 4, ".app") ||
+            snprintf(path, size, "%s/%s", dir, fi.fname) >= (int)size)
+            continue;
+        found = (app_peek(path, &h) == 0 && !strcmp(h.name, name)) || !strcmp(fi.fname, name);
+    }
+    f_closedir(&d);
+    return found;
+}
+
+/* An app's file by its name ("Doom") or file name ("doom.app"): in
+ * APP_DIR, in a folder of its own there (APP_DIR "/Doom/doom.app"), or in
+ * a category (APP_DIR "/Games/Doom/doom.app"). */
+bool app_find(const char *name, char *path, size_t size)
+{
+    return find_in(APP_DIR, name, path, size, 3);
+}
+
 /* An app on the card by its name ("Music") or file ("music.app"), opened
  * with an argument it reads through app_arg(). An app that is open already
  * gets the argument and starts again (start() pushes its screen anew). */
 const char *app_launch(const char *name, const char *arg)
 {
-    DIR d;
-    FILINFO fi;
-    char path[80];
-    const char *err = "no such app";
+    char path[96];
 
     for (app_t *a = apps; a; a = a->next)
         if (!strcmp(a->name, name))
             return restart(a, arg);
-    if (f_opendir(&d, APP_DIR) != FR_OK)
-        return "no apps folder";
-    while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
-        app_file_t h;
-        size_t n = strlen(fi.fname);
+    return app_find(name, path, sizeof(path)) ? open_with(path, arg) : "no such app";
+}
 
-        if (n < 5 || strcmp(fi.fname + n - 4, ".app"))
-            continue;
-        snprintf(path, sizeof(path), APP_DIR "/%s", fi.fname);
-        if ((app_peek(path, &h) == 0 && !strcmp(h.name, name)) || !strcmp(fi.fname, name)) {
-            f_closedir(&d);
-            return open_with(path, arg);
-        }
-    }
-    f_closedir(&d);
-    return err;
+/* Load the app again, fresh (its data and bss as on the card), with arg,
+ * once it has gone: its screens off the stack, its threads ended. An
+ * emulator's way back to its list of ROMs, or on to one, with nothing of
+ * the last game left in its variables. */
+bool app_reload(const char *arg)
+{
+    app_t *a = app_self();
+
+    if (!a)
+        return false;
+    kfree(a->reload_arg);
+    a->reload_arg = NULL;
+    if (arg && (a->reload_arg = kmalloc(strlen(arg) + 1)))
+        memcpy(a->reload_arg, arg, strlen(arg) + 1);
+    a->reload = true;
+    reload_asked = kernel_ticks() | 1;
+    return true;
+}
+
+bool app_reloading(void)
+{
+    if (reload_asked && (int32_t)(kernel_ticks() - reload_asked) > RELOAD_PATIENCE_MS)
+        reload_asked = 0;
+    return reload_asked != 0;
+}
+
+/* The folder the app's .app is in: APP_DIR, or one of its own there
+ * (where a game keeps its data, its saves and its settings). */
+const char *app_dir(void)
+{
+    app_t *a = app_self();
+
+    return a ? a->dir : NULL;
 }
 
 const char *app_arg(void)
 {
-    return app_current ? app_current->arg : NULL;
+    app_t *a = app_self();
+
+    return a ? a->arg : NULL;
 }
 
 /* A thread of the app's: the app stays loaded while it runs, even with no
@@ -291,7 +487,7 @@ thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *
         prio = PRIO_LOW;
     t = thread_create(name, prio, stack, fn, arg);
     if (t)
-        t->owner = app_current;
+        t->owner = app_self();          /* a thread's thread: the same app's */
     return t;
 }
 
@@ -352,6 +548,16 @@ static const char *open_with(const char *path, const char *arg)
 
     memcpy(a->name, h.name, sizeof(a->name));
     a->name[sizeof(a->name) - 1] = 0;
+    snprintf(a->path, sizeof(a->path), "%s", path);
+    {
+        const char *slash = strrchr(path, '/');
+        size_t n = slash ? (size_t)(slash - path) : 0;
+
+        if (n >= sizeof(a->dir))
+            n = 0;
+        memcpy(a->dir, path, n);
+        a->dir[n] = 0;
+    }
     if (arg && (a->arg = kmalloc(strlen(arg) + 1)))
         memcpy(a->arg, arg, strlen(arg) + 1);
     a->next = apps;
@@ -393,6 +599,17 @@ void app_collect(screen_t *const *stack, int depth)
             used = true;                /* a notification of its is up */
         if (!used)
             unload(a);
+    }
+    if (reload_pending) {               /* app_reload: the fresh one */
+        char *arg = reload_arg;
+        const char *err;
+
+        reload_pending = false;
+        reload_arg = NULL;
+        if ((err = open_with(reload_path, arg)))
+            klog("app: %s did not load again: %s", reload_path, err);
+        kfree(arg);
+        reload_asked = 0;
     }
 }
 

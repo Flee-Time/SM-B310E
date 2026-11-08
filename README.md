@@ -6,7 +6,9 @@ embedded PSRAM, no Linux, no vendor SDK, no off-the-shelf BSP.
 
 - **B310E OS** ([os/](os/README.md)): our own operating system, written
   from scratch, and the future home of GSM calls and SMS. Design:
-  [docs/os-design.md](docs/os-design.md).
+  [docs/os-design.md](docs/os-design.md). Its apps are loadable `.app`
+  files; Chocolate Doom is one ([os/README.md, "Doom"](os/README.md#doom);
+  in QEMU so far).
 - **A Rockbox port** for music, recording and FM radio.
 - **An SD boot menu** that launches either, the stock firmware, and the
   fpdoom game ports.

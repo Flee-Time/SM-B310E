@@ -49,6 +49,13 @@ all: $(BUILD)/b310e-os.bin $(APPS)
 # Codec modules (media/codecs.mk): $(BUILD)/codecs/<name>.cdc
 include media/codecs.mk
 
+# Ports of games as apps (ports/doom/doom.mk): $(BUILD)/ports/doom.app
+include ports/kit/kit.mk
+include ports/chocolate/chocolate.mk
+include ports/gnuboy/gnuboy.mk
+include ports/infones/infones.mk
+include ports/wolf4sdl/wolf4sdl.mk
+
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf
 $(BUILD)/modules/%.elf: $$(wildcard modules/$$*/*.c) sdk/start.c sdk/app.ld sdk/app.h \

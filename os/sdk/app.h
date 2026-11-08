@@ -214,6 +214,11 @@ void *memset(void *dst, int c, size_t n);
 #define notify_remove          (os->notify_remove)
 #define notify_count           (os->notify_count)
 #define notify_get             (os->notify_get)
+#define ui_screen_mode         (os->ui_screen_mode)
+#define ui_call                (os->ui_call)
+#define app_dir                (os->app_dir)
+#define app_reload             (os->app_reload)
+#define ui_present             (os->ui_present)
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 

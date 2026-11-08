@@ -205,6 +205,60 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
   MP3 15, MP2 14, ALAC 17, AAC 20, WavPack 21, Opus 26. On the phone the
   card log has it for every track: `media: <file> done after N ms of
   audio: decoder N ms CPU in N ms (N%), N underruns, N MHz`.
+- **Doom as an app** (2026-11-07 in QEMU; runs on the phone 2026-11-08): Chocolate
+  Doom 3.1, the boot menu's pinned and patched tree, built as
+  `doom.app` (then on fpdoom's tree; now `ports/chocolate`, see "Games"
+  below) and opened from Apps like
+  any other app: title, demos, music and effects, new game, saves, the
+  menu's Quit back to Apps; the app is unloaded and its memory returned.
+  App API 2.5 for it: `ui_screen_mode` (a screen that owns the whole
+  LCD, gets every key press and release, keeps the screen lit) and
+  `ui_call`; apps up to 2 MB (image + bss); an app whose thread ends is
+  unloaded at once (before, only when a screen next left the stack).
+  The keypad posts a held key's press once: re-enabling the scan after
+  each card DMA (`keypad_resume`) latched it again (in QEMU's model since
+  it reports keys held at enable), and Doom, reading the card all the
+  time, got dozens of presses until the flood cost a release.
+- **An app's threads count as the app** (2026-11-07): `malloc`, `free`,
+  `app_arg`, `thread_create` and notifications from a thread of an app's
+  go by that thread's app (`app_self()` in `loader/loader.c`), no longer
+  by `app_current`, the UI thread's (usually no app at all while the UI
+  waits). Before, a thread's `malloc` was nobody's and leaked when the
+  app closed, and a block taken in the UI thread and freed in the app's
+  thread stayed on the app's list and was freed a second time at unload.
+  `free` now takes a block off whichever app's list holds it, the lists
+  have a lock, and `ui_call` runs its function as the caller's app.
+- **Apps in folders of their own** (2026-11-08, API 2.6): an app may sit
+  in a folder in `/b310e-os/apps/` with its data
+  (`/b310e-os/apps/Doom/doom.app` and the WAD beside it). The Apps list,
+  `app_launch` and the shell's `run` look one level into those folders
+  (`app_find`), and `app_dir()` tells an app the folder it was loaded
+  from. Doom looks for its WAD there first and keeps its settings and
+  saves beside it; 7 and 9 quick-save and quick-load.
+- **The game kit; Doom, Heretic, Hexen from upstream** (2026-11-08, in
+  QEMU): `ports/kit` is what every game app shares (newlib-nano with its
+  system calls over the API, the app's thread, screen, keys and sound,
+  frames turned and scaled by a view), and `ports/chocolate` builds
+  upstream Chocolate Doom, unchanged, as `doom.app`, `heretic.app` and
+  `hexen.app` on it. The fpdoom tree, its patch, its libc and its
+  assembly are no longer used for them (see "Games" below). * and #
+  pressed together open the quick panel on every screen, games too (the
+  game is let go of the keys it held); again, it closes.
+- **Game Boy and NES apps** (2026-11-08, in QEMU; API 2.7): upstream
+  gnuboy and InfoNES on the game kit, with a front end of the kit's: the
+  ROMs beside the app, per-ROM options (the screen's turn and scale, the
+  keypad, the emulator's own), each game in a fresh app (`app_reload`).
+  The kit got a malloc of its own (newlib-nano's realloc could not grow a
+  2 MB ROM) and `<dirent.h>`. The UI no longer takes the release of an
+  END that went to a game as a press of its own (it went home when the
+  game had ended in between).
+- **Wolfenstein 3D** (2026-11-08, in QEMU; API 2.8): upstream Wolf4SDL
+  on the kit with an SDL and SDL_mixer of our own (see "Wolfenstein 3D"
+  below). The app format took unaligned relocations and C++'s static
+  constructors; the kit's malloc became best fit (first fit left 524 KB
+  free in 30 KB pieces when Wolf4SDL made its sounds) and says in the
+  log when it runs out. Tests can show QEMU's screen in a window
+  (`B310E_QEMU_DISPLAY`, "Test in QEMU").
 
 | Part | What there is |
 |---|---|
@@ -222,7 +276,7 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 | Playback engine | a decoder thread below the UI (priority 11) runs a codec module per format and fills a 64K-frame PCM ring (1.49 s at 44.1 kHz) that the audio DMA interrupt plays; play, stop, pause, seek, position, duration, tags; format by extension, or by the first bytes; rates without a codec clock (88.2, 64 kHz ...) resampled linearly to 44.1 or 48 kHz; 16-bit stereo out, no DSP (`media/`, `include/os/media.h`) |
 | Album art | the cover from the tags or the folder, decoded small in a low thread: baseline and progressive JPEG (reduced IDCT), PNG (own inflate); 60 x 60 on Now playing (`media/art.c`, `include/os/art.h`) |
 | Codec modules | Rockbox's decoders and metadata parsers built unchanged against a shim (`media/rockbox/`) into `.cdc` files with the app layout (`include/os/codec.h`, `media/codecs/`): mpa (MP3/MP2/MP1, libmad), vorbis (Tremor), flac, opus, aac (libfaad, LC and HE), alac, wavpack, wav (libpcm); all fixed point, ARM mode with Rockbox's ARM assembly |
-| Loadable apps | `.app` files from `/b310e-os/apps/`, relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); opened from Apps or by name with an argument (`app_launch`, `app_arg`), kept loaded while a thread of theirs runs; apps: Music, Recorder, FM radio, Alarm, Calculator, Notes, Stopwatch (`modules/`). API 2.4: the hardware and every service through wrappers (see below), an icon of their own, notifications |
+| Loadable apps | `.app` files from `/b310e-os/apps/` (or a folder of their own there, with their data: `app_dir`), relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); opened from Apps or by name with an argument (`app_launch`, `app_arg`), kept loaded while a thread of theirs runs; apps: Music, Recorder, FM radio, Alarm, Calculator, Notes, Stopwatch (`modules/`), Doom, Heretic, Hexen (`ports/chocolate/`, on the game kit `ports/kit/`). API 2.6: the hardware and every service through wrappers (see below), an icon of their own, notifications, full-screen raw-key screens for games, the app's own folder |
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
 | Faults | undefined instruction and aborts show the registers on screen |
 
@@ -286,7 +340,7 @@ the only one that carries binary transfers. Three sessions at a time.
 | `adi ADDR [VAL]` | an analog-die register through the ADI mailbox |
 | `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `mv`, `df`, `crc` | files on the card (absolute or from the current folder) |
 | `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565 (raw port; the helper does these) |
-| `run APP`, `close` | close the app that is open, load and start APP (a path, or a name in `/b310e-os/apps/`); close it |
+| `run APP`, `close` | close the app that is open, load and start APP (a path, or a name or file name in `/b310e-os/apps/` or its folders); close it |
 | `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
 | `reboot` | restart to the boot menu |
 | `echo`, `exit` | |
@@ -354,7 +408,7 @@ since the new UI (`gfx_round`, `gfx_icon`, `gfx_bar`, `gfx_switch`,
 FONT_LARGE, FONT_HUGE; 1.x apps are refused, rebuild them). A screen
 with `tick_ms` set gets `tick()` that often (the stopwatch uses 100 ms).
 Close your files before your last screen goes; memory from `malloc` is
-freed for you.
+freed for you, also what a thread of the app's (`thread_create`) took.
 
 ## Codec modules
 
@@ -390,6 +444,279 @@ build.
 | wavpack | .wv | wavpack.c, libwavpack (ARM assembly) | 22 + 20 KB | 4 KB |
 | wav | .wav | wav.c, libpcm | 20 + 44 KB | 4 KB |
 
+## The Apps menu
+
+`/b310e-os/apps` as a list: a `.app` is an app; a folder with an `.app` of its
+own name (`Doom/doom.app`, the case does not matter) is an app with its data
+beside it; any other folder is a category, opening on a list like this one
+(`Emulators/NES/NES.app`). Categories come first, then the apps, each by name;
+a name starting with a dot is not listed.
+
+A folder may say more in a text file of its own, `.info`, every line optional:
+
+```
+name Retro games
+app infones.app
+icon 00ffff00ffff
+```
+
+`name` is what the list calls it. `app` makes the folder that app, whatever the
+file's called. `icon` is 12 such lines, top to bottom, 12 pixels each from 0
+(off) to f (full); `python os/sdk/mkicon.py picture.png <folder>/.info` writes
+them from a picture and leaves the other lines alone.
+
+## Games: Doom, Heretic, Hexen
+
+`doom.app`, `heretic.app` and `hexen.app` are upstream Chocolate Doom
+(3.1, pinned, its source unchanged) built as loadable apps on the game
+kit (`ports/kit`, below). Nothing in the OS knows about them: they reach
+the LCD, the keys, the card and the sound through the API (2.6), like
+Music or the Calculator.
+
+**On the card**: each in a folder of its own, its WAD beside it:
+
+```
+/b310e-os/apps/Doom/doom.app      doom.wad (or doom1, doom2, plutonia, tnt,
+                                  freedoom1, freedoom2, freedm, chex, hacx)
+/b310e-os/apps/Heretic/heretic.app heretic.wad (or heretic1.wad)
+/b310e-os/apps/Hexen/hexen.app    hexen.wad
+```
+
+Any case. The configuration (`default.cfg`, `heretic.cfg`, `hexen.cfg`)
+and the saves go to the WAD's folder. With no WAD beside the app it is
+looked for where the boot menu kept it (`/games/doom1`, `/games/doom2`,
+`/games/doom`, `/games/heretic`, `/games/hexen`). Without a card or a
+WAD the app says so and Back closes it.
+
+**Keys**: hold the phone sideways, the keypad to the right (the game's
+top is the LCD's right edge; its 320 x 200 stretched to 160 x 128, each
+pixel the mean of the ones it covers: Doom's pixels were never square).
+
+| Key | In the game | In the menus |
+|---|---|---|
+| D-pad | move and turn, by where it points (Right is ahead) | up, down, left, right |
+| Center | fire | select, yes |
+| LSoft, 5 | use, open doors | select, yes |
+| RSoft | the menu | back, no |
+| Dial | run on / off | |
+| 1, 3 | strafe left, right | |
+| 4, 6 | previous, next weapon | |
+| 7 | quick save (the first time: pick a slot; then asks, LSoft: yes) | |
+| 9 | quick load (asks; LSoft: yes) | |
+| 0 | the map | |
+| \*, # | Doom: zoom the map out, in; the view smaller, larger. Heretic, Hexen: the inventory left, right | |
+| 2 | Heretic, Hexen: use the artifact | |
+| END | quit (asks; LSoft: yes) | |
+| \* and # together | the OS's quick panel (volume ...) over the game; again: back | |
+
+Saving and loading are also in the menu (RSoft: Save game, Load game).
+In the menus Center, LSoft and 5 are a gamepad's fire button, so an empty
+save slot gets the map's name, as upstream does for gamepads. END held
+2 s still powers off. The screen does not time out while a game is in
+front; alarms still ring over it.
+
+**How they are built** (`ports/chocolate/`, `chocolate.mk`):
+
+- `python os/ports/sources.py chocolate-doom` fetches the pinned upstream
+  archive into `build/chocolate-doom` (SHA-256 checked); `make` builds
+  the three apps when it is there (`make chocolate` says what is
+  missing), and `os.sh` stages each in its folder.
+- Upstream's game files build unchanged against newlib. Ours: `i_main.c`
+  (main is the kit's), `i_video.c` (frames, keys, timer, no joystick),
+  `i_sound.c` (the kit's mixer and MUS/MIDI synth: 8 voices at 22050 Hz),
+  `stubs.c` (no network: a game is a local one, and upstream's server
+  alone would keep 0.5 MB of buffers; no CD audio, ENDOOM, directory
+  listings, text-mode or 640 x 480 start-up), `sdl/` (the few SDL names
+  the game files use: types, byte order, qsort; no SDL code), and
+  `chocolate_os.c` (each app's OS side: the WAD, the icon). The zone is
+  the game's block less 448 KB (upstream asks for whole MiB from 16
+  down; the link wraps `I_ZoneBase`).
+- Speed: the renderer, the fixed-point maths, the screen's patches, the
+  zone and the lumps, the map's geometry, sight lines and monsters are ARM
+  code at -O2 (an indexed byte load or FixedMul's smull is one
+  instruction; Thumb on the ARM926 has neither), the rest Thumb at -Os.
+  FixedDiv is ARM assembly (fpdoom's loop, public domain, with
+  upstream's saturation; the link wraps it). Doom's low detail is the
+  default (160 columns, each drawn twice: the screen shows 160 anyway),
+  in a new `default.cfg` (its Options menu can set it high); Heretic's
+  and Hexen's renderers draw only the left half in low detail (the
+  originals had none), so they stay high. In QEMU at 250 million instructions a second
+  (`tests/bench-chocolate.py`, demo1 of the shareware WAD) that took
+  Doom from 97 to 151 frames a second, the demo in step.
+- Doom is 433 KB of code and data and 267 KB of bss, Heretic 437 + 258
+  KB, Hexen 557 + 300 KB. In QEMU the zone is 2.1 MB for Doom and
+  Heretic, 1.9 MB for Hexen.
+- `args.txt` beside the WAD adds arguments (upstream's response file):
+  `-file sandy.wad -deh sandy.deh`, `-warp 1 1`, `-timedemo demo1` ...
+- The log says how long a game took to its first frame and its card
+  reads to then ("to the first frame: 177 card reads, 2910 KB"), every
+  10 s its frames a second, and the card reads again at the end: the
+  phone's numbers.
+
+## The game kit (`ports/kit/`)
+
+What a game or an emulator built as an app shares (`kit.h` is all its
+code sees):
+
+- The C library: newlib-nano from the toolchain (BSD), with its system
+  calls over the API (`kit_sys.c`): files on the card (relative paths in
+  the game's folder; a file opened for reading has no newlib buffer,
+  which cut every read into card commands of 1 KB, but a 16 KB cache, one
+  card command, so a WAD's lumps that lie one after another, its sprites
+  and patches, take one command between them (a card command costs about
+  a millisecond on the phone); a file written to has a 4 KB buffer, as
+  configurations and saves are written a few bytes a call. newlib-nano's
+  fread on an unbuffered file reads a byte a call, so the link wraps it:
+  one call into the cache for the whole read. Without that Ultimate
+  Doom's start-up was 5 million calls and 26 s on the phone), stdout and stderr to the OS log a line at a time
+  (stderr's last line is shown if the game stops with an error), malloc
+  on the block the kit takes for the game (`_sbrk`), `exit()` back to the
+  kit, the time from the RTC.
+- The app (`kit_os.c`): the game in a thread of the app's at `PRIO_LOW`
+  (every OS thread first) with the CPU held at 208 MHz; its block of the
+  heap (all but 384 KB), taken in that thread, so it is the app's and
+  freed with it; a full-screen, raw-key, awake screen (`ui_screen_mode`)
+  whose key events the game reads (`kit_key`, the D-pad turned with the
+  view); the game ending (or an error, shown with Back) pops it from the
+  UI thread (`ui_call`), the screen leaving makes the game save and end.
+- The screen: `kit_present8` (palette indexes) and `kit_present565` put a
+  frame on the LCD as the view says: turned 0, 90, 180 or 270 degrees,
+  fitted (bars), stretched, cropped or 1:1, each pixel the mean of the up
+  to 2 x 2 it covers, or the nearest.
+- Sound: `kit_audio_start(rate, render)` pulls 16-bit stereo from the
+  game in a thread above it into a 4096-frame ring that `audio_play`'s
+  fill callback (the DMA interrupt) only copies; a playing track is
+  paused. The mixer and the MUS/MIDI synth (`sound/`, first written for
+  the boot menu's games) sit on it.
+- A game's OS side is a `kit_game_t` (its log name, stack, memory, view,
+  and `prepare` for its folder and arguments) and `KIT_APP(name, icon)`.
+  An emulator's gives its ROMs' extensions, old folders and options
+  instead, and the kit's front end (`kit_menu.c`) does the list, the
+  options and the fresh reloads.
+- malloc is the kit's own (`kit_malloc.c`) on the game's block:
+  newlib-nano's realloc moves a block it cannot grow in place, so a
+  buffer grown a little at a time needs twice its size at the end
+  (gnuboy reads a ROM 4 KB a realloc: a 2 MB ROM did not fit); here
+  blocks grow into the free space after them and free neighbours merge.
+  The kit also has the `<dirent.h>` newlib lacks here.
+
+## Emulators: Game Boy, NES
+
+`gnuboy.app` (Game Boy and Game Boy Color: upstream gnuboy, GPLv2) and
+`infones.app` (the NES: upstream InfoNES, Apache-2.0; with the GPLv2+ OS
+the app is GPLv3 in effect) run on the game kit, their sources pinned and
+unchanged (`python os/ports/sources.py gnuboy infones`).
+
+**On the card**: each in a folder of its own, the ROMs beside it (the
+boot menu's old folders are looked in too):
+
+```
+/b310e-os/apps/Game Boy/Game Boy.app   *.gb, *.gbc   (and /games/gameboy)
+/b310e-os/apps/NES/NES.app             *.nes         (and /games/nes)
+```
+
+The app opens on its list of ROMs. Center plays one; LSoft opens its
+options, kept beside it in `<rom>.opt`: how the screen is turned
+(Upright, Sideways, Upside down, Sideways the other way), the scale (Fit,
+Fill, Crop, 1:1; the Game Boy starts on Fill: its 160 columns are the
+screen's, so text stays sharp across), the pixels (Smooth: no line is
+lost; most stay as they are and the few left over are the mean of two, a
+Game Boy's going where its 8-line tiles have nothing, so that a font keeps
+every line, sharp; Fit near half size across is half exactly and the whole
+height, a NES's 128 x 128, so a thin upright line weighs the same wherever a
+scroll puts it; Fill, the whole screen, has each column what it covers; Sharp:
+the nearest),
+whether the
+D-pad turns with the screen, and
+the emulator's own (Game Boy: the original Game Boy's colours, Blue, Grey
+or Green; NES: the 8 lines top and bottom a TV hid, Cropped or Whole, and TV,
+Auto, NTSC or PAL: a European game runs a fifth too fast at NTSC's 60 Hz, and
+Auto goes by its name and header, which seldom say).
+Battery saves go beside the ROM (`.sav`, `.srm`), as do Game Boy save
+states (1 saves, 3 loads).
+
+Held sideways the keypad's columns stand as rows would, 7 8 9 to the
+right of 4 5 6, as A is to the right of B on a pad:
+
+| Key | Game Boy | NES |
+|---|---|---|
+| D-pad | D-pad (turned with the screen) | D-pad |
+| Center, 7, 8, 9 | A | A |
+| 4, 5, 6 | B | B |
+| RSoft, Dial, # | Start | Start |
+| LSoft, \*, 0 | Select | Select |
+| 1, 3 | save state, load state | |
+| END | asks to leave: END again, Center or LSoft leave (the battery save written), RSoft plays on | the same |
+| \* and # together | the quick panel | the quick panel |
+
+A game always runs in a fresh app: picking a ROM loads the app again with
+it (`app_reload`, API 2.7), and leaving loads it again with the list, the
+cursor on the ROM, so nothing of one game is left in the emulator's
+variables for the next ("One moment..." on the screen meanwhile, not the
+screen under the app). Each emulator sets its own pace by its sound: it
+waits when it is 2048 frames ahead of what the codec has played. The NES
+shows its frames by the clock, nudged to stay with the sound (the codec's
+6 ms blocks are too coarse to scroll by), and draws fewer (down to 1 in 4)
+when one is late, so the game and its sound keep their speed; every 600
+frames the log says how many were drawn and where their time went.
+
+InfoNES is upstream's with the changes `ports/infones/prepare.py` lists and
+checks: its sound's envelopes and sweeps never ran (unsigned counters tested
+for being below 0, so every effect stayed on its first note) and were not
+right once they did (`tests/nes-apu-test.c` holds them to it), a few more of
+its bugs, and this phone's speed (the frame RGB565 as it stands, the 6502's
+fetches inlined, a line read into the cache before it is drawn).
+
+## Wolfenstein 3D
+
+`wolf3d.app` is upstream Wolf4SDL (under the GPL, its other licence, id's,
+not used) on the game kit, for the registered game's data (`*.WL6`,
+GoodTimes/Activision 1.4, Wolf4SDL's default edition):
+
+```
+/b310e-os/apps/Wolf3D/wolf3d.app   AUDIOHED.WL6 AUDIOT.WL6 GAMEMAPS.WL6 MAPHEAD.WL6
+                                   VGADICT.WL6 VGAGRAPH.WL6 VGAHEAD.WL6 VSWAP.WL6
+```
+
+(or in the boot menu's old `/games/wolf3d`). Its configuration
+(`config.wl6`) and saves go beside the data.
+
+| Key | In the game | In the menus |
+|---|---|---|
+| D-pad | move and turn | up, down |
+| Center | fire | select |
+| LSoft, 5 | open doors | yes |
+| RSoft | the menu | back, no |
+| Dial | run on / off | |
+| 8 (held) | strafe | |
+| 1-4 | knife, pistol, machine gun, chain gun | |
+| 7, 9 | save, load | |
+| END | quit (asks; LSoft: yes) | |
+
+Left and right start at a third of the game's speed and are up to it in
+300 ms, so a tap turns a little (`wolf_turn`, the one change to its play
+code, in `prepare.py`).
+
+**How it is built** (`ports/wolf4sdl/`): Wolf4SDL is SDL 2 and SDL_mixer
+all through, so the port is an SDL of its own over the kit, only what
+Wolf4SDL calls (`sdl/SDL.h`, `sdl/SDL_mixer.h`, `sdl_kit.c`): every
+surface 8-bit with a palette (the screen too: Wolf4SDL's 8-bit path), the
+"texture" the screen goes to is the kit's frame; the keys as scancode
+events; a mixer of 8 channels (the digitised sounds, kept 8-bit at their
+own 7042 Hz and stepped through as they play: Wolf4SDL keeps every sound
+and the whole VSWAP), the OPL music hooked before them, the PC speaker
+after. The music and the AdLib effects are DOSBox's GPL OPL emulator
+(`USE_GPL`, not MAME's), which makes `id_sd.c` C++, so the game is built
+as C++ throughout. The output is 11025 Hz (a quarter of the OPL's 44.1
+kHz work). `prepare.py` copies the source to the build with three
+changes, checked: Wolf4SDL packs every struct (`#pragma pack(1)` in
+`wl_def.h` and `dbopl.cpp`), and an unaligned word load on this ARMv5
+does not fault but rotates; the pragmas go and the two structs read from
+the map files as they are on disk are packed one by one. Two changes of
+the app format came with it (API 2.8): relocations may be unaligned, and
+`sdk/app.ld` keeps C++'s static constructors (`.init_array`), which the
+kit runs before the game (DBOPL fills its tables in them).
+
 ## Build
 
 ```
@@ -397,12 +724,23 @@ build.ps1 os        (Windows)
 bash build.sh os    (Linux)
 ```
 
-Output: `build/os/b310e-os.bin`, staged as `sdcard/progs/b310e-os.bin`.
-The boot menu lists it under progs. The first build downloads FatFs
+Output: `build/os/b310e-os.bin`, staged as `sdcard/payloads/b310e-os.bin`.
+The boot menu lists it under payloads. The first build downloads FatFs
 R0.15a from elm-chan.org into `build/fatfs/` (checked against its
 SHA-256); the OS uses its own `fs/ffconf.h`.
 
 ## Test in QEMU
+
+To watch a test, set `B310E_QEMU_DISPLAY` to a QEMU display (`gtk`,
+`sdl`; `gtk,zoom-to-fit=on` lets the 128 x 160 screen be made larger):
+the tests run as they do without it, QEMU's window shows the screen as
+it goes (`$env:B310E_QEMU_DISPLAY = "gtk,zoom-to-fit=on"` in PowerShell,
+`B310E_QEMU_DISPLAY=gtk python os/tests/test-doom.py ...` in bash). The
+keys the test sends still go to QEMU; ones typed in the window too.
+
+`B310E_QEMU_AUDIO` adds QEMU's sound to the game and app tests, so you can
+hear them too: `export B310E_QEMU_AUDIO="-audiodev sdl,id=audio0,in.voices=0
+-global sc6530_adi.audiodev=audio0"`.
 
 ```
 python os/tests/test-boot.py
@@ -427,6 +765,12 @@ python os/tests/test-net.py
 ```
 python os/tests/test-codecs.py [--icount SHIFT]
 python os/tests/test-art.py
+python os/tests/test-doom.py --wad path/to/doom1.wad
+python os/tests/test-chocolate.py --game heretic --wad path/to/heretic1.wad
+python os/tests/test-chocolate.py --game hexen --wad path/to/hexen.wad
+python os/tests/test-emu.py --app gnuboy --rom path/to/game.gbc
+python os/tests/test-emu.py --app infones --rom path/to/game.nes
+python os/tests/test-wolf.py --data path/to/wolf3d
 ```
 
 `test-codecs.py` makes a 3 s tone at -6 dBFS in every format a module
@@ -465,6 +809,35 @@ and run, `log -f` while a second session starts it, a lost segment
 retransmitted, the helper script's own calls), unplugs and checks the
 files in the card image.
 
+`test-doom.py` puts `doom.app` and a WAD (yours: `--wad`,
+`$B310E_DOOM_WAD` or `sdcard/games/doom1/doom1.wad`) in
+`/b310e-os/apps/Doom/` on the card and opens
+Apps -> Doom (upstream Chocolate Doom on the game kit): the title and its demo (frames counted by the kit, Doom's
+colours in a screenshot, sound in QEMU's WAV output), the menu, a new
+game on E1M1, a walk (the view moves), a save in slot 0, a walk on and
+the save loaded (the view is back), the same with 7 and 9 (quick
+save, its question the second time, quick load), END and yes: back in Apps, the app
+unloaded, the heap within 16 KB of before (the game's block, taken in
+its thread, is on the loader's list of Doom's memory), `default.cfg` and
+`doomsav0.dsg` on the card, no `temp.dsg`, "doom: ended (0)" in the log;
+on the way, * + # opens the quick panel on Home and over the game (Right
+held meanwhile is let go for the game: the view stops).
+`test-chocolate.py` does the same for Heretic or Hexen up to a walk in a
+new game, then quits and checks the unload, the heap and the log.
+`test-emu.py --app gnuboy|infones --rom <rom>` puts the app and the ROM
+in its folder: the list, the ROM's options (changed, kept in `.opt`), the
+game (frames, a screenshot with its colours, keys), END asking (the game
+waits; RSoft plays on), END twice back to the list in a fresh app with
+Apps never on the way, Back out of it, the heap back where it was.
+`test-wolf.py` puts Wolf3D and its data in its folder: the title, the
+menu, a new game, a turn (the view changes), END and yes, the unload,
+the heap and the log.
+`bench-chocolate.py` runs a game's `-timedemo` in QEMU at a fixed
+instruction rate (`-icount`) and prints its frames a second and the
+time to its first frame: the same for the same code, for comparing
+builds (not the phone's: no cache, no PSRAM waits; QEMU's card costs
+real time a command).
+
 ## Layout
 
 ```
@@ -482,6 +855,11 @@ apps/           built-in screens: home, menu, apps, files, system, settings, pow
                 tools, clock (date and time), usb, sim, dspboot, wavio
 sdk/            for loadable apps: app.h, app.ld, start.c, mkapp.py
 modules/        loadable apps, one folder each
+ports/          games as apps: kit/ (the game kit: newlib's system calls, the
+                app, frames, keys, sound), chocolate/ (Doom, Heretic, Hexen
+                from upstream Chocolate Doom), gnuboy/, infones/ (the Game
+                Boy, the NES), wolf4sdl/ (Wolf3D: its SDL of ours),
+                sources.py (the pinned sources)
 tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py,
                 b310e-shell.py (the PC side of the shell)
 lib/            string functions, printf

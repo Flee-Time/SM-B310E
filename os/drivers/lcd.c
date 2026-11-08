@@ -384,12 +384,64 @@ static bool row_same(const uint16_t *a, const uint16_t *b)
  * lagged until the next redraw. Polling the LCDC's done flag instead cost
  * up to half the CPU (Rockbox found it unreliable); lcd_measure() only
  * times it once for the log. */
+uint32_t lcd_busy_ms(void)
+{
+    uint32_t since = kernel_ticks() - last_kick;
+
+    return kicked && since < last_ms ? last_ms - since : 0;
+}
+
+/* A whole frame of a game's, sent as it lies: the LCDC reads it where it
+ * is (32-byte aligned, left alone until the next one is sent), no copy,
+ * and no 40 KB going through the D-cache and out with the game's data each
+ * frame. The lcd_update() after it, of the screen's draw, is then done: it
+ * must not send lcd_fb, which holds what was drawn before the game. px
+ * sent already, or NULL: the panel stays as it is. */
+static bool presented;
+static const uint16_t *sent_px;         /* the LCDC's source, when not FRAME_ADDR */
+
+void lcd_present(const uint16_t *px)
+{
+    lcdc_t *lc = LCDC;
+
+    presented = true;
+    if (asleep || !px || px == sent_px)
+        return;
+    if (kicked) {
+        uint32_t since = kernel_ticks() - last_kick;
+
+        if (since < last_ms)
+            thread_sleep(last_ms - since);
+    }
+    dcache_clean_range((void *)px, LCD_WIDTH * LCD_HEIGHT * 2);
+    lc->img.y_base_addr = (uint32_t)px >> 2;
+    sent_px = px;
+    set_band(0, LCD_HEIGHT);
+    send_all = false;
+    lc->irq.clr |= 1;
+    lc->ctrl |= 8;
+    lcd_kicks++;
+    lcd_rows_sent += LCD_HEIGHT;
+    last_kick = kernel_ticks();
+    last_ms = TRANSFER_MS + 2;
+    kicked = true;
+}
+
 void lcd_update(void)
 {
     lcdc_t *lc = LCDC;
     const uint16_t *frame = (const uint16_t *)FRAME_ADDR;
     int y0 = 0, y1 = LCD_HEIGHT;
 
+    if (presented) {
+        presented = false;
+        return;
+    }
+    if (sent_px) {                      /* back from a game's frames */
+        lc->img.y_base_addr = FRAME_ADDR >> 2;
+        sent_px = NULL;
+        send_all = true;
+    }
     if (asleep)
         return;
     if (!send_all) {

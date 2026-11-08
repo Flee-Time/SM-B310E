@@ -90,12 +90,13 @@ def main():
     root = [n for n, d, h in card_list(card.read_bytes(), '/') if d and not h]
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-           '-display', 'none', '-serial', 'none', '-monitor', 'none',
+           '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), *os.environ.get('B310E_QEMU_AUDIO', '').split(), '-serial', 'none', '-monitor', 'none',
            '-drive', f'file={image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
            '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
            '-qtest', f'tcp:127.0.0.1:{qtest_port},server=on,wait=off',
-           '-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0']
+           *([] if os.environ.get('B310E_QEMU_AUDIO') else
+             ['-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0'])]
     env = os.environ.copy()
     if os.name == 'nt':
         env['PATH'] = r'D:\Toolchains\msys64\mingw64\bin;' + env.get('PATH', '')

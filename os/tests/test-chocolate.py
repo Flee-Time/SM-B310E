@@ -67,7 +67,7 @@ def main():
                     '--output', str(card)], check=True, capture_output=True)
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-           '-display', 'none', '-serial', 'none', '-monitor', 'none',
+           '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), *os.environ.get('B310E_QEMU_AUDIO', '').split(), '-serial', 'none', '-monitor', 'none',
            '-drive', f'file={image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
            '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
@@ -154,6 +154,10 @@ def main():
         result['walked'] = [x0, y0, x1, y1]
         assert (x0, y0) != (x1, y1), result
         result['game_colours'] = colours(shot(f'{args.game}-level'))
+        f0 = var('kit')
+        time.sleep(1.5)
+        result['frames_after_walk'] = var('kit') - f0
+        assert result['frames_after_walk'] > 5, result                # still running
 
         key('esc', wait=1.0)                                  # END: quit?
         shot(f'{args.game}-quit')

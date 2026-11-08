@@ -214,7 +214,7 @@ def main():
 
     qmp_port, qtest_port = free_port(), free_port()
     command = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-               '-display', 'none', '-serial', 'none', '-monitor', 'none',
+               '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), *os.environ.get('B310E_QEMU_AUDIO', '').split(), '-serial', 'none', '-monitor', 'none',
                '-drive', f'file={args.image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
                '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
                '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
@@ -251,8 +251,8 @@ def main():
                 while time.monotonic() < end:
                     t, s = screen()
                     if t == title:
-                        time.sleep(0.4)         # let it draw
-                        return s
+                        time.sleep(0.4)         # let it draw (its list's count with it)
+                        return screen()[1]
                     time.sleep(0.1)
                 raise AssertionError(f'after {key}: screen {screen()[0]!r}, wanted {title!r}')
 
@@ -333,7 +333,7 @@ def main():
             press('ret', 'Display')          # 15 s
             shot('settings-display-set')
             press('f2', 'Settings')
-            s = press('esc', 'B310E OS')     # END: home
+            s = press('esc', 'B310E OS', hold=200)   # END: home (debounced: longer)
             assert s['ui_depth'] == 1, s
             # 15 s to dim, 10 s more to dark (QEMU runs ~0.7x real time)
             wait_for(qt, base, lambda s: s['ui_light'] == 1, 40, 'never dimmed')

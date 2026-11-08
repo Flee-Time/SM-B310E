@@ -530,7 +530,7 @@ def main():
 
     qmp_port, qtest_port, usb_port = BOOT['free_port'](), BOOT['free_port'](), BOOT['free_port']()
     command = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-               '-display', 'none', '-serial', 'none', '-monitor', 'none',
+               '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), '-serial', 'none', '-monitor', 'none',
                '-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0',
                '-drive', f'file={image.as_posix()},format=raw,if=none,id=os,readonly=on',
                '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',

@@ -51,7 +51,7 @@ def main():
                       ('--add', f'b310e-os/apps/{m}.app={(args.build / "modules" / (m + ".app")).resolve()}')],
                     '--output', str(card)], check=True, capture_output=True)
     qmp_port, qtest_port = free_port(), free_port()
-    cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox', '-display', 'none',
+    cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox', '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'),
            '-serial', 'none', '-monitor', 'none',
            '-drive', f'file={image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',

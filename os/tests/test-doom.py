@@ -43,7 +43,6 @@ import runpy
 import subprocess
 import sys
 import time
-import wave
 
 REPO = Path(__file__).resolve().parents[2]
 boot = runpy.run_path(str(Path(__file__).with_name('test-boot.py')))
@@ -84,16 +83,20 @@ def main():
                     '--add', f'{DIR[1:]}/{args.wad.name.lower()}={args.wad.resolve()}',
                     '--output', str(card)], check=True, capture_output=True)
     wav_out = out / 'audio.wav'
+    wav_out.unlink(missing_ok=True)
+    # heard as well (B310E_QEMU_AUDIO): the same sound still captured, by the monitor
+    audio = os.environ.get('B310E_QEMU_AUDIO', '').split()
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-           '-display', 'none', '-serial', 'none', '-monitor', 'none',
+           '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), *audio, '-serial', 'none', '-monitor', 'none',
            '-drive', f'file={image.resolve().as_posix()},format=raw,if=none,id=os,readonly=on',
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
            '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
            '-qtest', f'tcp:127.0.0.1:{qtest_port},server=on,wait=off',
-           '-audiodev', f'wav,id=audio0,path={wav_out.as_posix()},out.frequency=44100,'
-                        'out.channels=2,out.format=s16',
-           '-global', 'sc6530_adi.audiodev=audio0']
+           *([] if audio else
+             ['-audiodev', f'wav,id=audio0,path={wav_out.as_posix()},out.frequency=44100,'
+                           'out.channels=2,out.format=s16',
+              '-global', 'sc6530_adi.audiodev=audio0'])]
     env = os.environ.copy()
     if os.name == 'nt':
         env['PATH'] = r'D:\Toolchains\msys64\mingw64\bin;' + env.get('PATH', '')
@@ -108,6 +111,8 @@ def main():
             except OSError:
                 time.sleep(.1)
         assert qmp and qt, 'QEMU did not start'
+        if audio:
+            qmp.hmp(f'wavcapture {wav_out.as_posix()} audio0 44100 16 2')
 
         def title():
             return string(qt, status(qt, base)['ui_title'])
@@ -311,9 +316,8 @@ def main():
     save = card_file(img, f'{DIR}/doomsav0.dsg') or b''
     result['save'] = [len(save), save[:24].split(b'\0')[0].decode(errors='replace')]
     result['temp_left'] = card_file(img, f'{DIR}/temp.dsg') is not None
-    with wave.open(str(wav_out), 'rb') as w:
-        frames = w.readframes(w.getnframes())
-    samples = memoryview(frames).cast('h')
+    frames = wav_out.read_bytes()[44:]                  # (a capture cut off has no sizes)
+    samples = memoryview(frames[:len(frames) // 2 * 2]).cast('h')
     result['audio_peak'] = max((abs(s) for s in samples), default=0)
     print(json.dumps(result, indent=2))
     assert any('doom: ended (0)' in l for l in result['log']), result

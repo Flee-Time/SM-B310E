@@ -111,7 +111,7 @@ def main():
 
     qmp_port, qtest_port = free_port(), free_port()
     command = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
-               '-display', 'none', '-serial', 'none', '-monitor', 'none',
+               '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), '-serial', 'none', '-monitor', 'none',
                '-drive', f'file={image.as_posix()},format=raw,if=none,id=os,readonly=on',
                '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
                '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
