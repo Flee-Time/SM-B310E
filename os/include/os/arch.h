@@ -109,6 +109,7 @@ void arch_power_off(void) __attribute__((noreturn));
 #define BOOT_REQ_PATH  0xb3
 bool arch_boot_loader(void);
 void arch_boot_request(unsigned req, const char *path);
+bool arch_boot_pending(void);       /* a request waits for the next reset */
 
 #endif /* __ASSEMBLER__ */
 #endif

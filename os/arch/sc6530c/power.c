@@ -65,13 +65,14 @@ void arch_reboot(void)
         arch_wait_for_irq();
 }
 
-/* The boot loader's handshake (boot/boot.h): the reset-mode byte, APB
- * 0x8b000228 bits 15:8, survives the watchdog reset; the loader takes a
- * value 0xb0-0xb3 and clears it. BOOT_REQ_PATH also leaves the program's
- * path in a block at the top of PSRAM (in our MMU table, dead by then),
- * cleaned from the D-cache so it reaches PSRAM before the reset. */
+/* The boot loader's handshake (boot/boot.h): the high byte of analog
+ * 0x82001148 keeps its value over the reset; the loader takes a value
+ * 0xb0-0xb3 and clears it. The low byte is the stock firmware's restart
+ * mode. BOOT_REQ_PATH also leaves the program's path in a block at the top
+ * of PSRAM (in our MMU table, dead by then), cleaned from the D-cache so it
+ * reaches PSRAM before the reset. */
 #define LOADER_HEADER 0x003fc000u       /* NOR: the loader's header */
-#define HWRST         0x8b000228u
+#define REQ_REG       0x82001148u
 #define REQ_BLOCK     0x043fff00u
 #define REQ_MAGIC     0x51523342u       /* "B3RQ" */
 #define REQ_PATH_LEN  56
@@ -100,7 +101,14 @@ void arch_boot_request(unsigned req, const char *path)
         b[0] = REQ_MAGIC;
         dcache_clean_range((const void *)REQ_BLOCK, 4 * (2 + REQ_PATH_LEN / 4));
     }
-    REG32(HWRST) = (REG32(HWRST) & ~0xff00u) | (req & 0xffu) << 8;
+    adi_write(REQ_REG, (adi_read(REQ_REG) & 0xffu) | (req & 0xffu) << 8);
+}
+
+bool arch_boot_pending(void)
+{
+    unsigned req = (adi_read(REQ_REG) >> 8) & 0xff;
+
+    return req >= BOOT_REQ_STOCK && req <= BOOT_REQ_PATH;
 }
 
 /* Cut the supplies (stock 0x1a448: SET1 = 0x1f, then SET0 = 0x3fff; the
@@ -121,6 +129,12 @@ void arch_power_off(void)
     torch_set(false);
     arch_irq_save();
     REG32(INTC_DISABLE) = 0xffffffffu;
+    /* END is down after "held 2 s": cut now and the chip comes straight back
+     * up with END held, which the boot loader takes for a power-on to its
+     * menu. Display off, wait for it (30 s at most). */
+    for (int ms = 30000; ms > 0 && ((adi_read(0x82001900) >> 3) & 1); ms--)
+        udelay(1000);
+    udelay(50000);
     if (!adi_write(LDO_PD_SET1, 0x1f))
         arch_reboot();
     while ((REG32(0x82000020) & (1u << 9)) && --n)

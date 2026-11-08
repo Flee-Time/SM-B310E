@@ -4,8 +4,8 @@
 #ifndef BOOT_H
 #define BOOT_H
 
-#define BOOT_VERSION     0x00010011     /* 1.17 */
-#define BOOT_VERSION_STR "v1.17"
+#define BOOT_VERSION     0x00010014     /* 1.20 */
+#define BOOT_VERSION_STR "v1.20"
 #define BOOT_TAIL_MAGIC  0x4c494154     /* "TAIL": boot.ld, start.S */
 #define SFC_SIZE_REG     0x20a00200     /* the NOR size the windows decode, MiB */
 #define STOCK_ENTRY      0x000046e4     /* the stock PBL (NOR word 0x20 before) */
@@ -20,11 +20,21 @@
 #define HDR_PATH_LEN     48
 #define DEFAULT_PROGRAM  "payloads/b310e-os.bin"
 
-/* The reset-mode byte, APB 0x8b000228 bits 15:8 ("HWRST1"). A watchdog
- * reset keeps it, a power-on clears it; the stock firmware keeps its own
- * reset reasons there (0x5a 0x6a 0x7a in the PBL, 0x8a 0x9a in the main
- * OS, NOR 0x2c00 / 0x3c5c / 0x1a5ac / 0x1a7f8). Ours are 0xb0-0xb3; the
- * loader clears one it takes and leaves any other value for the stock. */
+/* A request across a reset: the high byte of analog 0x82001148. On the
+ * phone that register keeps its value over the watchdog reset (2026-11-09:
+ * 0xb2 to B310E OS with the cable in) while 0x82001140 and 0x82001144 read
+ * 0 after a reset; the stock's restart mode is its low five bits and it does not
+ * read the high byte (NOR 0x1a630, 0x1a686). Ours are 0xb0-0xb3; the loader
+ * clears one it takes and leaves any other value.
+ * The stock's reset-mode byte, APB 0x8b000228 bits 15:8, does not carry a
+ * request: it reads 0x9a after a watchdog reset whatever was written. It
+ * only tells that this was a reset (early_request's raw). */
+#define REQ_REG          0x82001148u
+/* Its low five bits are the stock's restart mode. END on its charging screen
+ * restarts with mode 8 (keypad handler NOR 0x445a0, 0x1818a), END possibly
+ * already let go: read here as a power-on by the user. */
+#define STOCK_MODE_MASK  0x1fu
+#define STOCK_MODE_START 8u
 #define HWRST_REG        0x8b000228
 #define REQ_STOCK        0xb0           /* the stock firmware, once */
 #define REQ_MENU         0xb1           /* the menu */
@@ -39,8 +49,7 @@
 #define REQ_PATH_LEN     56             /* NUL-terminated */
 /* block: magic, path[56], check = ~(magic + sum of the 14 path words) */
 
-#define EARLY_KEY        0x01           /* boot_early() flags: a keypad key */
-#define EARLY_STAY       0x02
+#define EARLY_STAY       0x02           /* boot_early() flags */
 #define EARLY_END        0x04           /* END held: a power-on by the user */
 #define AUTOBOOT_FILE    "autoboot.txt" /* in the payload folder */
 

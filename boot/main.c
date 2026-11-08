@@ -1,8 +1,8 @@
 /* B310E boot loader — what to start, and the menu.
  *
  * boot_early() (hw.c) has already decided the loader stays: the phone was
- * switched on with END, a keypad key was held, or a program asked for
- * something across its reset. Here: chip init, the stock pin table, the
+ * switched on with END, or a program asked for something across its
+ * reset. Here: chip init, the stock pin table, the
  * panel, the card; then the requested payload, the autoboot entry after
  * its countdown, or the menu: the card's payloads/ (raw images, *.bin) and
  * the stock firmware.
@@ -430,7 +430,9 @@ static void auto_load(void)
 
                 while (*val >= '0' && *val <= '9')
                     t = t * 10 + (*val++ - '0');
-                auto_timeout = t > 99 ? 99 : t;
+                /* at least 1 s: a key in the countdown is the only way
+                 * to the menu past an entry that does not start */
+                auto_timeout = t > 99 ? 99 : t < 1 ? 1 : t;
             }
         }
         line = next;
@@ -865,7 +867,6 @@ static void menu(bool autoboot)
 void boot_main(uint32_t early)
 {
     uint32_t req = early >> 8;
-    bool key = early & EARLY_KEY;
     char path[REQ_PATH_LEN];
     bool have_path = false;
     const char *err = NULL;
@@ -892,7 +893,7 @@ void boot_main(uint32_t early)
     card_ok = !sd && !boot_status.fs_code;
     read_battery();                     /* after the card, as B310E OS does */
 
-    if (!key && card_ok) {
+    if (card_ok) {
         if (req == REQ_OS)
             err = start_os();
         else if (req == REQ_PATH && have_path)
@@ -916,8 +917,8 @@ void boot_main(uint32_t early)
     }
     else if (err)
         set_message(err);
-    /* autoboot only on a plain power-on: no key held, no request, no error */
-    menu(!key && !req && !err);
+    /* autoboot only on a plain power-on: no request, no error */
+    menu(!req && !err);
     for (;;)
         ;
 }

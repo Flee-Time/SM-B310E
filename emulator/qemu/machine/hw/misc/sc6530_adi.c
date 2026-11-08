@@ -967,9 +967,15 @@ void sc6530_adi_set_eic_pb(Object *adi_obj, bool held)
 static void sc6530_adi_reset(DeviceState *dev)
 {
     Sc6530AdiState *s = SC6530_ADI(dev);
+    /* 0x82001148 keeps its value over a reset, 0x82001140 and 0x82001144
+     * read 0 (the phone, 2026-11-09; the stock's watchdog check, NOR
+     * 0x1a89c, relies on it). The boot loader's requests live there
+     * (boot/boot.h). */
+    uint32_t kept_148 = s->ana_regs[0x148 / 4];
 
     memset(s->mailbox_regs, 0, sizeof(s->mailbox_regs));
     memset(s->ana_regs, 0, sizeof(s->ana_regs));
+    s->ana_regs[0x148 / 4] = kept_148;
     /* ADC power-downs start set: ADC core (+0x5c bit7, +0x60 bits 7/5,
      * +0xac bit6) and ADC L/R (+0x5c bits 5/3). */
     s->ana_regs[(0xa00 + 0x5c) / 4] = 0xe8;   /* phone's value at rest */

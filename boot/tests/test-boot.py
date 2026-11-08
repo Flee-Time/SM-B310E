@@ -10,7 +10,6 @@ watchdog reset does):
 
   cold, END held         the menu (the default): B310E OS, a long name on
                          two rows, Rockbox, Stock firmware
-  cold, key held         the menu, the key seen
   menu -> B310E OS       the OS starts (its status block)
   reset, request 0xb1    the menu
   Auto on B310E OS       payloads/autoboot.txt written; after a reset the
@@ -21,16 +20,18 @@ watchdog reset does):
   reset, request 0xb3    the payload named in PSRAM (Rockbox)
   reset, 0xb3 no block   the menu, "Request lost"
   reset, request 0xb0    the stock firmware
-  reset, a stock value   left alone (0x7a), the menu
+  reset, another value   left alone (0x1f), the menu
   B310E OS Power ->      the OS sets 0xb1 and resets by the watchdog;
   Restart to menu        the menu comes up
   default stock, no key  the stock firmware (a loader built --default stock)
   default program        payloads/rockbox.bin starts (--default program:...)
   an old card (progs/)   the menu lists progs/ and starts B310E OS from it
-  no END, a charger      the stock firmware (its off-charging), no menu
+  no END, a charger      the stock firmware (its off-charging), no menu;
+                         then its restart mode 8, no END: the menu
   no END, no charger     switched off (a battery put in): the next END
                          is a real power-on
-  END held 2 s in menu   the phone powers off (QEMU exits)
+  END held 2 s in menu   the phone powers off (QEMU exits) once END is let go
+  a tap of END           not a power-on: switched off
   no card                "No card" within 3 s, only Stock firmware
   autoboot.txt on a card Rockbox after a 1 s countdown
   a bad upper NOR read   (the marker at the image's end corrupted) stock
@@ -58,7 +59,7 @@ BOOT_FIELDS = ('magic stage early request sd_code fs_code items sel pinmap '
 BOOT_MAGIC = 0x53423342
 STAGES = {1: 'init', 2: 'card', 3: 'menu', 4: 'load', 5: 'enter', 6: 'stock'}
 OS_MAGIC = 0x534f3342
-HWRST = 0x8b000228
+REQ_REG = 0x82001148                       # the request: its high byte (boot/boot.h)
 REQ_BLOCK, REQ_MAGIC = 0x043fff00, 0x51523342
 NOR_LOADER = (0x3fc000, 0x40c000)
 WINDOW = (0x303fc000, 0x3040c000)          # the loader through the 0x30000000 window
@@ -219,7 +220,7 @@ def main():
             m.qt.write(os_base, 0)
             if block is not None:
                 m.qt.memory(REQ_BLOCK, block)
-            m.qt.write(HWRST, (m.qt.read(HWRST) & ~0xff00) | byte << 8)
+            m.qt.write(REQ_REG, (m.qt.read(REQ_REG) & ~0xff00) | byte << 8)
             m.qmp.command('system_reset')
             m.qmp.command('cont')
 
@@ -241,7 +242,7 @@ def main():
         def cold_no_key():
             m.qmp.command('cont')
             s = wait('no menu', in_menu, 15)
-            assert not s['early'] & 1 and s['early'] & 4, s       # END, no key
+            assert s['early'] & 4, s                              # END
             assert s['request'] == 0 and s['items'] == 4, s
             assert s['sd_code'] == 0 and s['fs_code'] == 0 and s['pinmap'] > 100, s
             time.sleep(0.5)
@@ -249,26 +250,9 @@ def main():
             return s
         case('cold, no key: menu', cold_no_key)
 
-        # 2. cold start with a key held: the menu
-        def cold_key():
-            m.qmp.hmp('sendkey 5 4000')              # held through the reset
-            m.qmp.command('stop')
-            m.qt.memory(base, bytes(80))
-            m.qt.write(HWRST, m.qt.read(HWRST) & ~0xff00)
-            m.qmp.command('system_reset')
-            m.qmp.command('cont')
-            s = wait('no menu', in_menu, 15)
-            assert s['early'] & 1, s
-            assert s['items'] == 4, s
-            assert s['sd_code'] == 0 and s['fs_code'] == 0, s
-            assert s['pinmap'] > 100, s
-            time.sleep(4.5)                          # the key released
-            m.shot('2-menu')
-            return s
-        case('cold, key held: menu', cold_key)
-
         # 3. the menu starts B310E OS (first entry)
         def menu_os():
+            time.sleep(2.5)                          # the power-on END let go
             m.qmp.hmp('sendkey ret 100')
             wait('B310E OS did not start', os_running, 20)
             s = st()
@@ -282,8 +266,8 @@ def main():
         def req_menu():
             reset_with(0xb1)
             s = wait('no menu after 0xb1', in_menu, 15)
-            assert s['request'] == 0xb1 and not s['early'] & 1, s
-            assert m.qt.read(HWRST) >> 8 & 0xff == 0, 'request not cleared'
+            assert s['request'] == 0xb1, s
+            assert m.qt.read(REQ_REG) >> 8 & 0xff == 0, 'request not cleared'
             m.shot('4-menu-request')
             return s
         case('reset 0xb1: menu', req_menu)
@@ -375,19 +359,19 @@ def main():
             reset_with(0xb0)
             time.sleep(3)
             r = wait('stock not running after 0xb0', stock_running, 10)
-            r['hwrst_now'] = hex(m.qt.read(HWRST) >> 8 & 0xff)      # 0x8a: the stock's own
-            assert r['hwrst_now'] != '0xb0', 'request not cleared'
+            r['req_now'] = hex(m.qt.read(REQ_REG) >> 8 & 0xff)      # 0x1f: the stock's own
+            assert r['req_now'] != '0xb0', 'request not cleared'
             return r
         case('reset 0xb0: stock', req_stock)
 
-        # 9. a stock reset reason is left for the stock firmware
+        # 9. any other value is not a request: left as it is
         def stock_value():
-            reset_with(0x7a)                    # a PBL value the main OS does not write
-            s = wait('no menu after 0x7a', in_menu, 15)
-            got = m.qt.read(HWRST) >> 8 & 0xff
-            assert s['request'] == 0 and got == 0x7a, (s, hex(got))
-            return {'hwrst_after_loader': hex(got)}
-        case('reset 0x7a: left alone', stock_value)
+            reset_with(0x1f)                    # what the stock keeps there
+            s = wait('no menu after 0x1f', in_menu, 15)
+            got = m.qt.read(REQ_REG) >> 8 & 0xff
+            assert s['request'] == 0 and got == 0x1f, (s, hex(got))
+            return {'after_loader': hex(got)}
+        case('reset 0x1f: left alone', stock_value)
 
         # 10. the OS's own request: Power -> Restart to menu
         if not args.skip_os_restart:
@@ -430,7 +414,7 @@ def main():
                 m.qt.memory(base, bytes(80))
                 m.qmp.hmp('sendkey ret 100')                              # Yes
                 s = wait('no menu after the OS restart', in_menu, 30)
-                assert s['request'] == 0xb1 and not s['early'] & 1, s
+                assert s['request'] == 0xb1, s
                 m.shot('10-menu-from-os')
                 return s
             case('OS Power -> Restart to menu', os_restart)
@@ -449,6 +433,7 @@ def main():
     for default, check in (('stock', 'stock'), ('program:payloads/rockbox.bin', 'program'),
                            ('menu', 'old card'), ('menu', 'charger'), ('menu', 'battery'),
                            ('menu', 'autoboot'), ('menu', 'bad window'), ('menu', 'power off'),
+                           ('menu', 'tap'),
                            ('menu', 'no card')):
         loader = out / f'loader-{check}.bin'
         raw = args.loader.read_bytes()
@@ -465,7 +450,7 @@ def main():
         m = Machine(args, out, nor_d,
                     None if check == 'no card' else
                     old_card if check == 'old card' else auto_card if check == 'autoboot' else card,
-                    end=check not in ('charger', 'battery'), charger=check == 'charger')
+                    end=check not in ('charger', 'battery', 'tap'), charger=check == 'charger')
         try:
             st = lambda: boot_status(m, base)
 
@@ -477,7 +462,20 @@ def main():
                     assert st()['magic'] != BOOT_MAGIC, hex(pc)
                     assert not NOR_LOADER[0] <= pc < NOR_LOADER[1], hex(pc)
                     assert not WINDOW[0] <= pc < WINDOW[1], hex(pc)
-                    return {'pc': hex(pc)}
+                    if check != 'charger':
+                        return {'pc': hex(pc)}
+                    # END on the stock's charging screen: its restart mode 8,
+                    # END let go by now, the charger still in: the menu, once
+                    m.qmp.command('stop')
+                    m.qt.memory(base, bytes(80))
+                    m.qt.write(REQ_REG, 8)
+                    m.qmp.command('system_reset')
+                    m.qmp.command('cont')
+                    s = wait('no menu after mode 8', lambda: (lambda s: s if s['stage'] == 'menu' else None)(st()), 15)
+                    assert s['early'] & 4 and not s['request'], s
+                    left = m.qt.read(REQ_REG)
+                    assert left & 0x1f == 0, hex(left)
+                    return {'pc': hex(pc), 'mode8': 'menu', 'left': hex(left)}
                 if check == 'no card':
                     t0 = time.monotonic()
                     s = wait('no menu', lambda: (lambda s: s if s['stage'] == 'menu' else None)(st()), 15)
@@ -486,6 +484,14 @@ def main():
                     assert took < 6, took
                     m.shot('no-card')
                     return {'menu_after_s': round(took, 1), 'message': s['message']}
+                if check == 'tap':                  # END down too short: not a power-on
+                    m.qmp.hmp('sendkey end 60')
+                    m.qmp.command('cont')
+                    try:
+                        m.process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        raise AssertionError(f'a tap was taken for END held: {st()}')
+                    return {'powered_off': True}
                 if check == 'battery':
                     try:
                         m.process.wait(timeout=15)
@@ -495,12 +501,15 @@ def main():
                 if check == 'power off':
                     wait('no menu', lambda: (lambda s: s if s['stage'] == 'menu' else None)(st()), 15)
                     time.sleep(2.5)                  # the power-on END (2 s) let go
+                    t0 = time.monotonic()
                     m.qmp.hmp('sendkey end 3500')
                     try:
                         m.process.wait(timeout=15)
                     except subprocess.TimeoutExpired:
                         raise AssertionError('no power-off after END held')
-                    return {'powered_off': True}
+                    took = time.monotonic() - t0
+                    assert took >= 3.4, f'power cut with END down, after {took:.1f} s'
+                    return {'powered_off': True, 'after_s': round(took, 1)}
                 if check == 'autoboot':
                     s = wait('no autoboot', lambda: (lambda s: s if s['stage'] == 'enter' else None)(st()), 20)
                     assert s['loaded'] == args.rockbox.stat().st_size, s

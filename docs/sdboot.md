@@ -10,9 +10,10 @@ under [History](#history-fpdoom-sdboot3-and-fpmain-2026-08-to-2026-11).
 **Status (2026-11-07):**
 
 - v1.0 (12.4 KB, default stock) was flashed and works on the phone: stock
-  boot without a key, the menu with a key, B310E OS and Rockbox from it,
-  and B310E OS Power → Restart to menu (the reset-mode byte survives the
-  watchdog reset on the hardware).
+  boot without a key, the menu with a key, B310E OS and Rockbox from it.
+  This line also said Restart to menu worked, so the reset-mode byte survives a
+  watchdog reset. **Correction (2026-11-09):** that was not really tested, and
+  on the phone it fails; see "A request and a hard reset" below.
 - v1.1 (26.9 KB, 7 sectors): the menu by default, the B310E OS look,
   `payloads/`, Stock firmware as a direct jump. On the phone the text and
   icons came out as solid boxes, and the stock jump ended with the phone
@@ -173,6 +174,31 @@ under [History](#history-fpdoom-sdboot3-and-fpmain-2026-08-to-2026-11).
   or byte 12 of NV item 22 (0x2c4c0) set; this phone's NV has 0 there
   (every copy of item 0x16 in the NV log), so it powers off (0x1a42e).
   The emulator does not show this (its held END latches).
+- v1.18 (34.8 KB): requests come from the high byte of analog 0x82001148, not
+  the APB byte (see "Warm-restart handshake"); the ADI is brought up first
+  thing. B310E OS writes them there, and a plain reboot asks for 0xb2. 22 QEMU
+  cases pass; flashed 2026-11-09. On the phone a 0xb2 written from the shell and
+  a hard reset, cable in, no key: B310E OS back in 12 s; a plain `reboot` from
+  an OS built with this change: back in 16 s.
+- v1.19: the stock's restart mode 8 in 0x82001148 means the menu. END on the
+  stock's charging screen restarts with it (NOR 0x445a0, 0x1818a; read 0x1f08 on
+  the phone); a short press had END let go by the time the loader looked, and
+  with a charger the stock then started booting. The same mode comes from
+  0x183c2 (callers 0x1133e, 0x12adc, not traced), so a restart of the stock's
+  own may also land in the menu. 22 QEMU cases pass, one for this; flashed
+  2026-11-09. On the phone: a short END press on the charging screen shows the
+  menu.
+- v1.20: END must stay down 250 ms to count as a power-on; up for 20 ms is a tap.
+  Until now END seen once in the 300 ms wait was enough, so taps in a row opened
+  the menu (the next tap fell inside the wait the last one had opened). Power-off,
+  here and in B310E OS, waits with the display off for END to be let go (30 s at
+  most): cutting the supplies with END held brought the phone straight back to
+  the menu (reported by the user; the mechanism is inferred). The check for a
+  keypad key held at start-up is gone: END opens the menu. Autoboot's timeout is
+  at least 1 s, as a key in the countdown is now the only way past it. 22 QEMU
+  cases pass; flashed 2026-11-09. On the phone (the user): taps leave it off, END
+  held opens the menu, power-off from the OS and the menu stays off with END held
+  past the dark screen, Power → Restart to menu works with and without the cable.
 
 ## Boot flow
 
@@ -181,16 +207,18 @@ under [History](#history-fpdoom-sdboot3-and-fpmain-2026-08-to-2026-11).
 | END held at power-on, no request (default `menu`) | full init → the autoboot countdown, or the menu |
 | no END, a charger in (its power-on), or a stock reset reason in the byte | chains to the stock PBL at once (its charging screen, its restart) |
 | no END, no charger, nothing in the byte (a battery put in) | switched off: the next END is a real power-on |
-| any keypad key held | full init → the menu |
 | request 0xb1 (menu) | full init → the menu |
 | request 0xb2 (B310E OS) | full init → `payloads/b310e-os.bin` (`progs/` on an old card; the menu if it fails) |
 | request 0xb3 (named payload) | full init → the path in the PSRAM block (the menu if the block is missing) |
 | request 0xb0 (stock once) | chains to the stock PBL at once: the steps sdboot took |
 | default `stock` / `program:PATH` (build option) | the stock PBL at once / that payload, with no key and no request |
 
-A keypad key held at power-on always gives the menu, over a request and
-over the default. END is not in the keypad matrix: it is analog EIC channel
-3, read in `boot_early()` for 40 ms after the ADI comes up.
+END is the way to the menu. It is not in the keypad matrix: it is analog EIC
+channel 3, read in `boot_early()` after the ADI comes up, and has to stay down
+250 ms. Until v1.19 any keypad key held also gave the menu, over a request and
+over the default; a key was not seen after a watchdog reset (5 held, cable in:
+the stock's charging screen, not explained), and END does the job. With the
+build options `stock` or `program:PATH` the menu now needs a request.
 
 The menu is drawn like B310E OS: its theme colours, status, title and
 soft-key bars, list cards, Montserrat text and icons (`os/ui/gfx.c`,
@@ -312,7 +340,7 @@ suspected too short):
 MMU and D-cache off, I-cache on, SVC mode with IRQ/FIQ masked, stack at
 0x40009000, keypad clock and reset pulse, keypad enable, a 20 ms wait on the
 system counter, keypad clock off, then `bx 0x46e4`. Two differences, both
-reads: the reset-mode byte (below) is read, and cleared only when it holds
+reads: the request (below) is read, and cleared only when it is
 one of our values; a key press edge on any of the four slots counts (sdboot
 looked at slot 0 only). `.data` and `.bss` are not touched on this path.
 
@@ -348,16 +376,24 @@ not supported.
 
 ### Warm-restart handshake
 
-The request travels in the **reset-mode byte, APB 0x8b000228 bits 15:8**
-("HWRST1"). A watchdog reset keeps it; a power-on clears it. Evidence:
+The request travels in the **high byte of analog 0x82001148**. Evidence, from
+the phone (2026-11-09):
 
-- The stock firmware uses this byte for the same job. The PBL writes 0x5a
-  (NOR 0x2c00) and branches on 0x5a/0x6a/0x7a (0x3c5c). The main OS writes a
-  reset mode there (0x1a5ac) and reads back 0x8a/0x9a after a reset
-  (0x1a7f8, 0x1a840).
-- On the phone, 2026-08-23: a stale 0x5a in this byte survived the watchdog
-  reboot and made the next boot need END. Clearing it before the reset
-  fixed BOOT STOCK (AGENTS.md, learnings #18).
+- The reset-mode byte, APB 0x8b000228 bits 15:8, which v1.0 to v1.17 used, does
+  not carry a request: 0xb2 written and read back, the watchdog reset, cable
+  in: no request seen, the stock's charging screen. After a watchdog reset the
+  byte reads 0x9a whatever was written, also with no stock code run (v1.18, 0xb2
+  to B310E OS directly): the reset or the boot ROM sets it, before the loader's
+  first instruction. An old note (2026-08-23) that a stale 0x5a survived a
+  watchdog reset does not fit this and is unexplained.
+- 0x82001148 keeps its value over the watchdog reset: with v1.18, 0xb200 written
+  from the shell, a hard reset, cable in and no key: B310E OS back in 12 s, the
+  register then 0. Over the stock's own restart too (it read 0x1f08, the stock's
+  0x1f1f with restart mode 8, while 0x82001140 and 0x82001144 read 0). The
+  stock's watchdog check relies on this (NOR 0x1a89c: 0x82001148 set and
+  0x82001144 clear).
+- The stock firmware's restart mode is the low five bits, bit 7 a flag (NOR
+  0x1a630, 0x1a686); it writes 0x1f1f and does not read the high byte.
 
 | Value | Meaning |
 |---|---|
@@ -365,12 +401,11 @@ The request travels in the **reset-mode byte, APB 0x8b000228 bits 15:8**
 | 0xb1 | the menu |
 | 0xb2 | `payloads/b310e-os.bin` |
 | 0xb3 | the payload named in the PSRAM block |
-| anything else | not ours: left as it is for the stock firmware |
+| anything else | not ours: left as it is |
 
-Our values avoid the stock's 0x5a 0x6a 0x7a 0x8a 0x9a. The loader clears the
-byte when it takes a request, so a later crash or reset does not repeat it.
-In QEMU the stock firmware leaves 0x1f there after booting; the loader
-ignores it.
+The loader clears the byte when it takes a request, so a later crash or reset
+does not repeat it. The APB byte still counts as "this was a reset": no END, no
+charger and a non-zero byte go to the stock firmware instead of powering off.
 
 0xb3's block is at PSRAM 0x043fff00 (inside B310E OS's MMU table, which is
 dead once it resets): `"B3RQ"` (0x51523342), a 56-byte NUL-terminated path,
@@ -381,17 +416,40 @@ plan (docs/dsp-audio-route.md) relied on it, but no result of that run is
 recorded. 0xb1 and 0xb2 do not depend on it.
 
 B310E OS (`os/arch/sc6530c/power.c`): `arch_boot_loader()` checks the
-header; `arch_boot_request(req, path)` writes the byte (and the block for
+header; `arch_boot_request(req, path)` writes the request (and the block for
 0xb3, cleaned from the D-cache); `arch_reboot()` then resets by the
-watchdog. **Power → Restart to menu** uses 0xb1 (without the loader in NOR
+watchdog. `ui_reboot()` asks for 0xb2 when nothing else was asked, so a plain
+reboot comes back to the OS instead of the stock firmware; a crash that calls
+`arch_reboot()` directly, or a hung watchdog, still goes to the stock firmware. **Power → Restart to menu** uses 0xb1 (without the loader in NOR
 it says so). **Restart B310E OS** chains `/payloads/b310e-os.bin` without a
 reset (it keeps the clock), and falls back to 0xb2 when that fails. A watchdog reset clears the RTC; the OS
 gets the time back from `clock.txt` and SNTP.
 
+**A request and a hard reset** failed on the phone up to v1.17, on battery and
+charging (the byte above). v1.18 moves the request to 0x82001148: 0xb2 works on
+the phone with the cable in (2026-11-09), also the plain `reboot` of an OS built
+with this change, which asks for it (16 s to the shell, twice, the second one
+11.6 s after the boot), and Power → Restart to menu (0xb1) with and without
+the cable. Not yet tried there: 0xb0 (`reboot stock`).
+
+USB after a reset: once, a reboot 10.7 s after a boot left the phone with no word
+from the PC (0 resets, 0 setups), and the background network took it for a
+charger after one 5 s try and stayed off until a replug. It now makes up to 4
+connections before that (`usb_auto_tick`, os/apps/usb.c). The same quick reboot
+later came back on the first try, so the extra tries have not been seen working
+on the phone.
+
+The shell's `reboot` is a hard reset, and `reboot menu`, `os` and `stock` add the
+request. `reboot soft` chains the image on the card, as Restart
+B310E OS does: use it when no one is at the phone.
+
 ### QEMU model changes
 
-- `sc6530_aux.c`: the reset keeps APB 0x8b000228 bits 15:8. Machine creation
-  starts it at zero, as a power-on would.
+- `sc6530_adi.c`: a reset keeps analog 0x82001148 and clears the others.
+- `sc6530_aux.c`: a reset leaves 0x9a in APB 0x8b000228 bits 15:8, whatever was
+  there, as on the phone. Machine creation starts
+  it at zero, as a power-on would. Until v1.18 the model kept the byte, by
+  assumption, which is why QEMU passed what failed on the phone.
 - `sc6530_keypad.c`: enabling the scan latches a press edge for every key
   already held, as the phone does when it powers on with a key down. A
   reset after the first keeps the held keys (a finger stays on the key).

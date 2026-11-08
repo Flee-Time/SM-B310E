@@ -460,7 +460,7 @@ static void sc6530_keypad_write(void *opaque, hwaddr offset,
     case SC6530_KPD_CTRL:
         /* Enabling the scan finds the keys held already: each latches
          * its press edge, as when the phone powers on with a key held
-         * (the boot loader's test, boot/hw.c early_key). */
+         * (the boot loader looked for this until v1.20). */
         if (!(s->ctrl & 1) && (value & 1)) {
             for (int i = 0; i < 4; i++) {
                 if (s->held[i] >= 0) {

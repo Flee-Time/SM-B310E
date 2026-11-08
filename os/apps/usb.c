@@ -15,8 +15,12 @@
  * In the background (Settings -> USB, "Mode"): plugging a data
  * cable in starts the chosen function with no screen at all; pulling it
  * out stops it (and mounts the card again after storage). A plain charger
- * (no PC answers within NO_HOST_MS) stops it again, so the CPU clock is
- * not held for nothing. Only the plug starts it: leaving a USB screen
+ * (no PC answers within NO_HOST_MS, NO_HOST_TRIES times) stops it again, so
+ * the CPU clock is not held for nothing. Each try is a new connection: a PC
+ * still busy with the last one (the phone reset just after it came up, or
+ * the boot ROM's own at a power-on) does not see the first, and without
+ * another nothing would bring it back but a replug (seen on the phone,
+ * 2026-11-09: 0 resets, 0 setups). Only the plug starts it: leaving a USB screen
  * with the cable in does not. The status bar shows USB (disk) or NET.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -367,8 +371,11 @@ static screen_t menu_screen = {
 
 /* ---- in the background: the function chosen in Settings, on the plug ---- */
 
-#define NO_HOST_MS 5000                 /* a charger: nobody enumerates us */
+#define NO_HOST_MS 5000                 /* a try: nobody enumerates us */
+#define NO_HOST_TRIES 4                 /* then a charger */
 
+static int auto_tries;                  /* connections made since the plug */
+static bool auto_retry;                 /* NO_HOST_MS passed: connect again */
 static int auto_fn = -1;                /* USB_FN_* running in the background, -1 none */
 static bool cable_was;
 static uint32_t auto_since;
@@ -403,7 +410,7 @@ static void auto_stop(bool unplugged)
         return;
     notify_remove(&note);
     klog("usb: background %s stopped (%s)", auto_fn == USB_FN_STORAGE ? "storage" : "network",
-         unplugged ? "unplugged" : "a USB screen took over");
+         unplugged ? "unplugged" : "no PC, or a USB screen or Stop");
     if (auto_fn == USB_FN_STORAGE) {
         st.unplugged = unplugged;
         storage_end();
@@ -425,13 +432,23 @@ void usb_auto_tick(void)
         if (!cable) {
             auto_stop(true);
         } else if (usb_stat.state < USB_ENUMERATING && kernel_ticks() - auto_since > NO_HOST_MS) {
-            klog("usb: no PC on the cable: a charger");
+            auto_retry = auto_tries < NO_HOST_TRIES;
+            if (!auto_retry)
+                klog("usb: no PC on the cable: a charger");
             auto_stop(false);
         }
         return;
     }
-    if (!plugged || !ui_settings.usb_default || usb_running())
+    if (!plugged && !(auto_retry && cable)) {
+        auto_retry = false;
         return;
+    }
+    auto_retry = false;
+    if (plugged)
+        auto_tries = 0;
+    if (!ui_settings.usb_default || usb_running())
+        return;
+    auto_tries++;
     auto_since = kernel_ticks();
     if (ui_settings.usb_default == 1) {
         storage_begin();
@@ -448,8 +465,10 @@ void usb_auto_tick(void)
         }
         auto_fn = USB_FN_NETWORK;
     }
-    klog("usb: background %s on the plug", auto_fn == USB_FN_STORAGE ? "storage" : "network");
-    note_post();
+    klog("usb: background %s on the plug (try %d)",
+         auto_fn == USB_FN_STORAGE ? "storage" : "network", auto_tries);
+    if (auto_tries == 1)
+        note_post();
 }
 
 /* "USB" or "NET" in the status bar while one runs, else NULL */

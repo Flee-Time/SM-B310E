@@ -51,38 +51,32 @@ EARLY void ms_wait(uint32_t ms)
 
 /* ---- the early decision: stack only, no .data or .bss ------------------ */
 
-/* sdboot's keypad check, for any key: power and reset the keypad, enable
- * it, wait 20 ms; a key held at power-on shows as a press edge. sdboot
- * tested edge slot 0 only; any slot (bits 0-3) is taken here. */
-EARLY static bool early_key(void)
+/* The ADI up, before the first analog read (sdboot's init), and the system
+ * counter, which ms_now() reads (off after a reset). */
+EARLY static void early_adi(void)
 {
-    uint32_t raw;
-
-    REG32(APB_EB_SET) = 0x80040u;       /* keypad and system counter clocks */
-    REG32(APB_RST_SET) = 1;
-    delay(10);
-    REG32(APB_RST_CLR) = 1;
-    KPD->int_clr = 0xfff;
-    KPD->polarity = 0xffff;
-    KPD->clk_divide = 0;
-    KPD->debounce = 15;
-    KPD->ctrl |= 1;
-    ms_wait(20);
-    raw = KPD->int_raw;
-    KPD->int_clr = 0xfff;
-    REG32(APB_EB_CLR) = 0x40;           /* keypad clock off (as sdboot) */
-    return (raw & 0x0f) != 0;
+    REG32(APB_EB_SET) = 0x80000u;       /* the system counter */
+    REG32(APB_EB_SET) = 1u << 24;       /* ADI clock */
+    REG32(APB_RST_SET) = 1u << 19;
+    delay(100);
+    REG32(APB_RST_CLR) = 1u << 19;
+    REG32(0x82000000) &= ~(1u << 4);
+    REG32(0x82000004) = 0x55000;
 }
 
-/* Take our request from the reset-mode byte; leave the stock's values. */
+/* Take our request (boot.h, REQ_REG); leave anything else. *raw: the
+ * stock's reset-mode byte, non-zero after a reset. */
 EARLY static uint32_t early_request(uint32_t *raw)
 {
-    uint32_t v = REG32(HWRST_REG), b = (v >> 8) & 0xff;
+    uint32_t v = adi_read(REQ_REG), b = (v >> 8) & 0xff;
 
-    *raw = b;
+    *raw = (REG32(HWRST_REG) >> 8) & 0xff;
     if (b < REQ_STOCK || b > REQ_PATH)
         return 0;
-    REG32(HWRST_REG) = v & ~0xff00u;
+    /* For the stock firmware the whole register, as at a cold power-on: its
+     * restart mode left in the low byte with 0x82001144 clear (a reset does
+     * that) reads as a watchdog crash (NOR 0x1a89c, 0x1063c). */
+    adi_write(REQ_REG, b == REQ_STOCK ? 0 : v & 0xff);
     return b;
 }
 
@@ -101,16 +95,13 @@ EARLY static uint32_t early_request(uint32_t *raw)
 
 /* END (channel 3) seen held in the window, and the charger (channel 2,
  * B310E OS battery.c) at its end: *charger. */
+#define END_HOLD_MS 250
+#define END_UP_MS   20
 EARLY static bool early_end(bool *charger)
 {
-    uint32_t t;
+    uint32_t t, since = 0, last = 0, n = 1000000;   /* n: never hang a boot */
+    bool down;
 
-    REG32(APB_EB_SET) = 1u << 24;       /* ADI clock */
-    REG32(APB_RST_SET) = 1u << 19;
-    delay(100);
-    REG32(APB_RST_CLR) = 1u << 19;
-    REG32(0x82000000) &= ~(1u << 4);
-    REG32(0x82000004) = 0x55000;
     adi_write(0x820010e4, 0x20);        /* EIC clocks, the END channel */
     adi_write(0x820010e0, 0x80);
     /* Only unmask END and the charger, and read. v1.3 to v1.10 also set
@@ -120,14 +111,26 @@ EARLY static bool early_end(bool *charger)
      * power key. The mask is kept for stock_jump() to put back. */
     REG32(EARLY_SAVE_DMSK) = adi_read(EIC_DMSK);
     adi_write(EIC_DMSK, adi_read(EIC_DMSK) | 1u << 3 | 1u << 2);
+    /* END seen once was enough until v1.19: taps in a row woke the loader,
+     * and the next tap fell inside the wait this one had opened. It now has
+     * to stay down END_HOLD_MS; END_UP_MS up is a tap (not a bounce). */
     t = ms_now();
+    down = false;
     do {
-        uint32_t d = adi_read(EIC_DATA);
+        uint32_t d = adi_read(EIC_DATA), now = ms_now();
 
         *charger = d & 1u << 2;
-        if (d & 1u << 3)
-            return true;
-    } while (ms_now() - t < 300);
+        if (d & 1u << 3) {
+            if (!down)
+                since = now;
+            down = true;
+            last = now;
+            if (now - since >= END_HOLD_MS)
+                return true;
+        } else if (down && now - last >= END_UP_MS) {
+            return false;
+        }
+    } while ((down || ms_now() - t < 300) && --n);
     return false;
 }
 
@@ -160,14 +163,16 @@ EARLY static void early_power_off(void)
 }
 
 /* 0: chain the stock firmware now. Else (request << 8) | EARLY_STAY,
- * with EARLY_KEY (a keypad key held) and EARLY_END (END held).
+ * with EARLY_END (END held).
  *
  * The phone runs this whenever it gets power: a battery put in, a charger
  * plugged in, END pressed, a reset. The stock firmware's "off" is its own
  * code waiting for END (v1.6 on the phone: the menu came up at every
  * battery insertion; END pressed in the stock's wait started the stock
  * without the loader). So:
- *   END held, a keypad key, or a request of ours   the loader stays
+ *   END held, or a request of ours                 the loader stays
+ *   the stock's restart mode 8 (END on its charging
+ *   screen, END possibly let go by now)            the menu
  *   a charger                                      the stock (charging)
  *   a stock reset reason in the byte (0x1f ...)    the stock
  *   request 0xb0                                   the stock, at once
@@ -177,25 +182,31 @@ EARLY static void early_power_off(void)
  * stay, as sdboot did. */
 EARLY uint32_t boot_early(void)
 {
-    uint32_t raw, req = early_request(&raw), entry = _start.stock_entry;
+    uint32_t raw, req, entry = _start.stock_entry;
     bool stock_ok = entry && entry != 0xffffffffu && !(entry & 3);
-    bool key, end, charger = false;
+    bool end, charger = false, asked;
 
+    early_adi();
+    req = early_request(&raw);
     if (req == REQ_STOCK && stock_ok)
         return 0;
-    key = early_key();
     end = early_end(&charger);
-    if (!key && !req && stock_ok) {
+    asked = (adi_read(REQ_REG) & STOCK_MODE_MASK) == STOCK_MODE_START;
+    if (!req && stock_ok) {
         if (_start.mode == MODE_STOCK)
             return 0;
-        if (!end) {
+        if (asked) {
+            end = true;                 /* as a power-on with END held */
+        } else if (!end) {
             if (charger || raw)
                 return 0;
             early_power_off();
             return 0;                   /* no power-off: the stock waits */
         }
     }
-    return req << 8 | EARLY_STAY | (key ? EARLY_KEY : 0) | (end ? EARLY_END : 0);
+    if (asked)                          /* once: not again at the next reset */
+        adi_write(REQ_REG, adi_read(REQ_REG) & ~STOCK_MODE_MASK);
+    return req << 8 | EARLY_STAY | (end ? EARLY_END : 0);
 }
 
 /* ---- ADI: the analog die through the mailbox --------------------------- */
@@ -335,7 +346,6 @@ static uint32_t saved_clk, saved_smc[sizeof(smc_offsets)];
 static bool saved;
 
 uint32_t poweron_backlight, poweron_keylight, poweron_lcd_rst;
-uint32_t poweron_mode[3];               /* analog 0x1140, 0x1144, 0x1148 */
 static uint32_t poweron_iram;
 
 void chip_save(void)
@@ -345,8 +355,6 @@ void chip_save(void)
     poweron_backlight = adi_read(0x82001220);
     poweron_keylight = adi_read(0x82001224);
     poweron_lcd_rst = REG32(0x8b000224u);
-    for (unsigned i = 0; i < 3; i++)
-        poweron_mode[i] = adi_read(0x82001140u + 4 * i);
     poweron_iram = REG32(IRAM_BANKS_REG) & IRAM_BANKS;
     saved_clk = REG32(CLK_CTL);
     for (unsigned i = 0; i < sizeof(smc_offsets); i++)
@@ -469,6 +477,11 @@ void power_off(void)
     adi_write(0x82001224, adi_read(0x82001224) | 0x10u);
     backlight_on(0);
     REG32(0x8000000c) = 0xffffffffu;
+    /* END is down after "held 2 s": cut now and the chip comes straight back
+     * up with END held, which is a power-on to the menu. Display off, wait. */
+    for (uint32_t t = ms_now(); (adi_read(0x82001900) & 1u << 3) && ms_now() - t < 30000; )
+        ;
+    ms_wait(50);
     if (!adi_write(0x82001184, 0x1f))
         return;
     while ((REG32(0x82000020) & (1u << 9)) && --n)

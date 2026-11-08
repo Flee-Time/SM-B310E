@@ -596,13 +596,17 @@ const char *ui_chain(const char *path, const char *what)
 void ui_reboot(void)
 {
     splash("Restarting");
-    klog("reboot to the boot menu");
+    klog("reboot: hard reset");
     volume_save();
     rtc_save();
     fs_sync();
     thread_sleep(300);
     backlight_set(0);
     keylight_set(false);
+    /* Back to this OS unless something else was asked: without a request
+     * the loader leaves a reset to the stock firmware. */
+    if (arch_boot_loader() && !arch_boot_pending())
+        arch_boot_request(BOOT_REQ_OS, NULL);
     arch_reboot();
 }
 
