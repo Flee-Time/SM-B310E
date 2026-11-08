@@ -416,6 +416,11 @@ const char *app_open(const char *path)
     return open_with(path, NULL);
 }
 
+const char *app_open_arg(const char *path, const char *arg)
+{
+    return open_with(path, arg);
+}
+
 /* In dir (and, deeper levels down, in its folders): the .app whose name
  * (its header's) or file name is name; its path in path. */
 static bool find_in(const char *dir, const char *name, char *path, size_t size, int deeper)

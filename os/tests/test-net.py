@@ -847,6 +847,19 @@ def main():
             wait_title('Stopwatch')
             assert helper.cmd('close').startswith('OK')
             wait_title('USB network')
+            # an app with an argument (run APP "ARG"): the radio lab, which
+            # ends at once here (no DSP program in QEMU) and logs its argument
+            helper.put('/b310e-os/apps/radiolab.app', (build / 'modules/radiolab.app').read_bytes())
+            assert helper.cmd('run "/b310e-os/apps/radiolab.app" "arfcn=54 | tag=8"').startswith('OK')
+            wait_title('Radio lab')
+            end = time.monotonic() + 30
+            while 'lab: radiolab: done' not in (lab_log := helper.cmd('log')):
+                assert time.monotonic() < end, lab_log[-2000:]
+                time.sleep(0.5)
+            assert 'lab: radiolab: arg "arfcn=54 | tag=8"' in lab_log, lab_log[-2000:]
+            assert helper.cmd('close').startswith('OK')
+            wait_title('USB network')
+            result['app_argument'] = True
             try:
                 helper.put('/no/such/folder/x', b'1')
                 raise AssertionError('put into a missing folder succeeded')
@@ -863,7 +876,7 @@ def main():
             time.sleep(0.5)
             s = netstat()
             result['net_stat'] = s
-            assert s['shell_sessions'] == 3 and s['files_in'] >= 6 and s['apps_run'] == 3, s
+            assert s['shell_sessions'] == 3 and s['files_in'] >= 6 and s['apps_run'] == 4, s
             assert s['tx_timeouts'] == 0 and s['shell_open'] == 0, s
             shot('usb-network')
 

@@ -247,11 +247,14 @@ static void net_leave(screen_t *s)
     net_end();
 }
 
-/* the shell's "run" and "close" (in the UI thread): back to this screen */
+/* the shell's "run" and "close" (in the UI thread): back to this screen,
+ * or home when the network runs in the background (no screen) */
 void usb_net_close_apps(void)
 {
-    if (!nt.depth)
+    if (!nt.depth) {
+        ui_home();
         return;
+    }
     while (ui_depth() > nt.depth)
         ui_pop();
 }

@@ -231,4 +231,5 @@ const os_api_t os_api = {
     .app_reload = app_reload,
     .ui_present = ui_present,
     .volume_register = app_volume_register,
+    .l1 = &l1_api,
 };

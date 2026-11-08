@@ -127,11 +127,16 @@
 #define FI_POWER        11u
 #define FI_FCCH         9u
 #define FI_SCH          10u
+#define FI_BLOCK        2u
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
 #define RX_IN           0x5bcu
 #define RX_OUT          0x5beu
+#define BEP_BASE        0xfa0u          /* BEP reports: 7 x 4 bytes */
+#define BEP_SLOTS       7u
+#define BEP_IN          0xfbcu
+#define BEP_OUT         0xfbeu
 #define FI_ASK_MORE     0x8200u
 
 /* ---- the image in NOR (e52q7a) -------------------------------------------- */
@@ -691,6 +696,19 @@ static void l1_service(void)
         }
         sm_w16(RESP_OUT, (uint16_t)out);
     }
+    /* The DSP adds a BEP report per decoded block (DSP 0xfacc). With the ring
+     * full it keeps up to 5 more in its own list, then asserts 0x1900. */
+    in = sm_r16(BEP_IN);
+    out = sm_r16(BEP_OUT);
+    if (in < BEP_SLOTS && out < BEP_SLOTS && in != out) {
+        while (out != in) {
+            out = (out + 1) % BEP_SLOTS;
+            p->bep_last[0] = sm_r16(BEP_BASE + out * 4);
+            p->bep_last[1] = sm_r16(BEP_BASE + out * 4 + 2);
+            p->beps++;
+        }
+        sm_w16(BEP_OUT, (uint16_t)out);
+    }
     if (sm_r16(FE0_ACK) == 0) {
         uint32_t m = (uint32_t)sm_r16(FE0_MSG) << 16 | sm_r16(FE0_PARAM);
 
@@ -699,6 +717,7 @@ static void l1_service(void)
             p->msg_phase = p->phase;
         }
         p->msg_last = m;
+        p->msg_log[p->msgs % 8] = m;
         p->msgs++;
         *sm(FE0_ACK) = 1;
     }
@@ -1006,6 +1025,66 @@ int l1_sch_post(uint16_t index, uint8_t gain, int cell)
     fi[10] = (uint16_t)((fi[10] & 0xfc00u) | 0x100u | 0xffu);
     return post_fi(fi, ext);
 }
+
+/* FUN_000504f8, one instruction per burst: word 1 = tag << 4 | burst; word 3
+ * bits 10:8 = the timeslot, word 4 bits 11:8 = the TSC (the CBCH tables,
+ * FUN_00050f6a, fill them from a channel description's TN and TSC [L]);
+ * word 6 = the serving index over 0xfc00; words 7-9 no monitor channel;
+ * word 10 = cell << 10 | 1 << 8 (FUN_0006188a) | the card bit (card 0). */
+int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
+{
+    uint16_t fi[11], ext[3];
+
+    fi_init(fi, ext, FI_BLOCK);
+    fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
+    fi[3] = (uint16_t)((tn & 7) << 8);
+    fi[4] = (uint16_t)((tsc & 7) << 8);
+    fi[6] = (uint16_t)(0xfc00u | (index & 0x3ffu));
+    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
+    return post_fi(fi, ext);
+}
+
+uint32_t l1_next_fn(void)
+{
+    return frame_number;
+}
+
+int l1_fi_post(const uint16_t fi[11], const uint16_t ext[3])
+{
+    uint16_t f[11];
+
+    for (int i = 0; i < 11; i++)
+        f[i] = fi[i];
+    f[1] = (uint16_t)((f[1] & 0x1ffu) | ((frame_number >> 16) & 0x7f) << 9);
+    f[2] = (uint16_t)frame_number;
+    return post_fi(f, ext);
+}
+
+uint16_t l1_share_r16(uint32_t off)
+{
+    return off < 0x1000u && !(off & 1) ? sm_r16(off) : 0;
+}
+
+void l1_share_w16(uint32_t off, uint16_t v)
+{
+    if (off < 0x1000u && !(off & 1))
+        sm_w16(off, v);
+}
+
+int l1_cmd_post(const uint16_t cmd[5])
+{
+    return dsp_info.state == DSP_RUNNING ? post_cmd(cmd) : DSP_ENOTRUN;
+}
+
+const l1_api_t l1_api = {
+    .dsp_boot = dsp_boot, .dsp_stop = dsp_stop, .start = l1_start, .run = l1_run,
+    .poll = l1_poll, .fi_free = l1_fi_free, .idle_post = l1_idle_post,
+    .ask_more = l1_ask_more, .arfcn_index = l1_arfcn_index, .pm_post = l1_pm_post,
+    .pm_read = l1_pm_read, .fcch_post = l1_fcch_post, .sch_post = l1_sch_post,
+    .burst_post = l1_burst_post, .next_fn = l1_next_fn, .rx_read = l1_rx_read,
+    .fi_post = l1_fi_post, .share_r16 = l1_share_r16, .share_w16 = l1_share_w16,
+    .cmd_post = l1_cmd_post, .info = &dsp_info, .probe = &dsp_probe_info,
+};
 
 /* FUN_0005f692 / FUN_0005f674: "in" is the slot written last; the bytes from
  * +0x12 come swapped pairwise, so each data halfword is high byte first. */

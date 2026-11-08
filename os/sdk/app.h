@@ -134,6 +134,7 @@ void *memset(void *dst, int c, size_t n);
 #define volume_set             (os->volume_set)
 #define volume_use             (os->volume_use)
 #define volume_register        (os->volume_register)
+#define l1_api                 (os->l1)
 #define audio_play             (os->audio_play)
 #define audio_play_stop        (os->audio_play_stop)
 #define audio_playing          (os->audio_playing)

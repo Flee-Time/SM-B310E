@@ -881,6 +881,301 @@ type 9 over 26 frames, then a type 10 in each of the next 51 frames.
 derived frame offsets (BCCH is at FN mod 51 = 2..5). That gives System
 Information: MCC/MNC, LAC and cell id.
 
+### First BCCH tries (phone, 2026-11-08)
+
+- **Sync repeats** [C]: ARFCN 54 gives BSIC 36 (NCC 4, BCC 4), ARFCN 120
+  BSIC 30 (NCC 3, BCC 6), each with a consistent FN in two runs.
+- **DSP messages:** code 5 (param 0x258) comes once per type 10 and is not
+  an assert. FUN_0003ab0a only stops on code 0xffff (assert) [C].
+- **Rx types** [C]: 7 goes to the BCCH/CCCH handler (FUN_0004d5b4). It
+  converts our frame count to the cell's with the per-cell offset
+  (FUN_000484e4). 8 goes to the paging handler (FUN_0004dad0).
+- **Type 2** (`l1_burst_post`, as FUN_000504f8 builds it): tag 7 gave rx
+  type 7, tag 9 gave rx type 8, tag 8 gave nothing [L].
+- The type-7 block came back exactly at cell FN mod 51 = 5, the block's last
+  burst, so the frame offset from the SCH is right [C].
+- **Both blocks had bfi 1** (CRC failed). This happened with the BCC in
+  words 3 and 4, and with it in word 3 only.
+- **Then the DSP asserted: message `ffff1900`.** It stopped taking frames
+  749 ms into the step.
+
+**Words 3 and 4 are the timeslot and the TSC** [L] (stock, read again)
+- FUN_000504f8 starts from FUN_0004f5fc: words 0-5 zero, words 6-10
+  0xffff. With no monitor cells, FUN_00050074 changes nothing. So words 0-2
+  and 5-10 of our type 2 already match the stock (for word 10, if
+  FUN_0006188a returns 1, the non-sawless case).
+- Word 3 bits 10:8 come from a per-card byte (0x4283ee0 + card · 0x16c).
+  Word 4 bits 11:8 come from the serving cell's byte +0x20 & 7, the low 3
+  bits of the BSIC: the BCC.
+- The CBCH tables (FUN_00050f6a / FUN_0005138e) fill the same two fields
+  from a channel description: +5 (3 bits) into word 3 and +6 (4 bits) into
+  word 4. TN and TSC fit, and CBCH can sit on timeslots 0-3.
+- The variants ran in order: BCC in both words, word 3 only, word 4 only.
+  The two bad blocks were the two that put 4 in word 3, timeslot 4: the
+  wrong slot, so a CRC failure is expected. The third block (timeslot 0,
+  TSC 4, the stock layout) was posted but did not come back before the
+  assert.
+- Run with timeslot 0 and TSC = BCC (ARFCN 120, BSIC 30): the same
+  pattern, 2 blocks with bfi 1, then `ffff1900` at the third. So the
+  timeslot was not the cause of the assert [C].
+
+**Assert 0x1900: the BEP report ring was full** [C for the site]
+- Disassembled with teakra (a small front end around its
+  `Disassembler::Do`, built with zig c++). Each assert site loads the
+  routine from DSP 0x11cd, the id into a0, then jumps.
+- The function at DSP 0xfacc adds one 2-word report to the ring at DSP
+  0xafd0 (ARM +0xfa0, 7 slots). Write index 0xafde (+0xfbc), read index
+  0xafdf (+0xfbe). The first word is bits 15:14 = [0x0af1] & 3, bits 13:0
+  = [0x0062]; the second is the caller's argument.
+- When the ring is full it stores the report in an overflow list (DSP
+  0xefec, count at 0x0af7), and asserts 0x1900 once the count passes 5
+  (0xfbcf). Sites 0x1901 and 0x1903 in the same function check the flush
+  of that list.
+- Our driver never moved +0xfbe, so the DSP stopped after 12 reports. It
+  is now drained in the interrupt, as the response ring is. The report
+  line `bcch: BEP reports` gives the count and the last entry.
+
+**With the ring drained (phone, ARFCN 120)** [C]
+- No assert: 9 blocks posted, 9 received in 2 s, 36 BEP reports (one per
+  burst). Tag 7 came back as rx type 7, tag 8 as type 8. All bfi 1.
+
+**The SCH frame offset was wrong: header +0x08** [C from two blocks]
+- FUN_000461e4 (calibration) takes cell FN offset = SCH FN − reported FN
+  + (hi − lo of +0x08). We left that term out.
+- An earlier run had two good SCH blocks: local 0x270 with +0x08 = 0x1a07
+  (FN 1651605) and local 0x272 with 0 (FN 1651625). The second gives
+  offset 1650999, the first 1650981 uncorrected: 18 frames out. A
+  single-frame read can only return its own frame, so the second is exact,
+  and the first needs hi − lo − 1 = 18 (the stock formula gives 19) [L].
+- So every BCCH read so far was about 20 frames off, which straddles
+  two CCCH blocks: bfi 1 is expected.
+- Now: the sync step corrects by hi − lo − 1 and prefers a block with
+  +0x08 = 0. The tag-7 multiframes try offsets 0, −1 and +1 in turn.
+
+**Corrected offset on the phone: still bfi 1** [C]
+- ARFCN 56 (corrected, 15 back) and ARFCN 54 (exact) gave the same
+  offset, 1926007, so they are one site and the correction holds. Their
+  second pair (local 0x2d0 with 0x1a07, 0x2d3 with 0) again needs
+  hi − lo − 1.
+- Reading ARFCN 56: all 9 blocks bfi 1, at offsets 0, −1 and +1 and with
+  tag 8.
+- In every run the BCCH cell was synced first, then the other cells were
+  searched (ARFCN 120 is another site). If the DSP keeps the slot timing
+  and frequency of its last search, the reads were misaligned [G]. The
+  BCCH step now syncs its cell again just before reading.
+- Phone: the re-sync found an SCH (ARFCN 122, BSIC 37) and the BCCH read
+  right after it was still all bfi 1 at every offset. The search order
+  was not the cause [C].
+
+**Live experiments: the Radio lab** (`os/modules/radiolab`, API 2.11)
+- Apps get layer 1 through `os_api_t.l1` (`l1_api_t` in os/dsp.h): the
+  posts, the rings, a raw frame instruction (`l1_fi_post`), raw share
+  memory and commands. The shell's `run APP "ARG"` passes an argument.
+- With the phone on the USB cable (the shell comes up by itself):
+  `python os/tools/b310e-shell.py run build/os/modules/radiolab.app
+  --arg "arfcn=56 | tag=8 | w6=0xfc36" --follow`. Each '|' segment is a
+  variant (sync, then BCCH reads), keys in the file's header. Results
+  go to the log and to /b310e-os/radiolab.txt.
+
+### Live results over USB (Radio lab, 2026-11-08)
+
+All on ARFCN 54 (BSIC 36), with the phone on the USB shell [C]:
+- **Type 2 changes that did nothing** (every block bfi 1): w6 gain bits
+  0, 10, 25, 40; w10 = 0x0001, 0x01ff, 0x03ff, 0x0101; cell index 1 and 5
+  instead of 0; command 3 (gain 30, 50, 60, slot 0x0101) after the sync;
+  command 2 `{2, 0x000f}` before the frame clock; offsets 0, -1, +1.
+- **24 consecutive blocks:** blocks in the same SI slot (TC) differ in
+  about 80 of 184 bits, so they are noise, not a near miss.
+- **BEP reports** name the right channel (word 0 = 0x4036, index 54).
+  Word 1 changes with the gain settings.
+- **Each sync gets one good SCH, and it comes from inside the FCCH
+  window** (type 9): for example burst at our frame 76, window 70-95.
+- **Type 10 SCH reads on their own return nothing at all**: no good and
+  no bad block, posted only at cell FN mod 51 = 1, 11, 21, 31, 41 with
+  idle frames between, at offsets -4..+4. The handler (0x8ee6) runs and
+  schedules a receive, so the decode fails.
+- So no receive works once the FCCH search window has ended: normal
+  bursts (type 2) and SCH (type 10) alike. Timing or frequency from the
+  search is not kept for later frames [L]. The search shifts the frame
+  timer itself (0xdb85 adds to the adjust 0xecb9).
+- Some "exact" SCH blocks (+0x08 = 0) are false decodes: BSIC 41 or 58
+  with a wild offset on ARFCN 54. The sync must also check the BSIC.
+
+### DSP type-2 receive path (2026-11-08)
+
+Static reading of the DSP program (teakra disassembly). Addresses are DSP
+words. Function pointers live in data RAM and come from the parameter
+records that follow 5a5a a5a5 in the image (record = length, DSP address,
+data). That is how the tables below were resolved.
+
+**Decode and dispatch** [C]
+- 0x971b runs once per frame while 0xff72 bit 2 is set. It calls the
+  decoder 0x7c4f (reader at 0x7c67), then sets the frame's cell [0xbb] from
+  word 10 (0x9743).
+- The decoder takes slot `out+1` (0xa800 + 11·slot) and unpacks it into
+  0xec1a..0xec52:
+
+| Word | Field | Where it goes |
+|---|---|---|
+| w0 | bits 4:0 type → 0xec50; bits 15:9 → 0xec1a (flags, 0 for us) | |
+| w1 | bits 1:0 burst → 0xec1e → [0xa2]; 3:2 → 0xec1d; 7:4 tag → 0xec1c, 0x1d40; 15:9 FN high → 0xec20 | bit 8 = 0 copies share +0x3f0..+0x3f6 (T1/T2/T3 counters for the cipher unit) |
+| w2 | FN low → 0xec1f | |
+| w3 | 10:8 timeslot → 0xec25 → [0xc0] → [0x7d] (×625 quarter bits); 12:11 → 0x189; 15:12 → 0xec21 | |
+| w4 | 11:8 TSC → 0xec52 → [0xbf] → [0x7c] (TSC table at 0x4578+tsc, 0xd3b7); bit 12 → 0xec2d; 13/14/15 → 0xec29/28/27 | |
+| w5 | bits 0..3 = half-step LSB of the gains of w6..w9; 4,5,6,9,12,15 flags; 14:13 → 0xec83 (cipher mode, [L]) | 0 for us; flags pull in share +0x3e4/+0x3e8/+0x3ec/+0x3f8 (dedicated mode) |
+| w6 | 9:0 arfcn index → 0xec3c → [0xa5]; 15:10 → **gain 0xec37 = (w6>>10)·2 \| w5.0** → [0xb1] | |
+| w7..w9 | monitor channels, same layout (0x3ff = none) | |
+| w10 | 15:10 cell → 0xec1b (via 0xf0eb); 9:0 → 0xec40 | |
+
+- Handler = table at data **0x10dd + type** (record): 0 idle 0x867c,
+  1 0x8724, **2 0x8771**, 3 0x88b2, 9 0x4e7d, **10 0x8ee6**, 11 0x8f6a.
+  Command handlers are at 0x10fd + id (1 = 0x9a20, 2 = 0x9a52,
+  3 = 0x1257 → 0x9ab4).
+
+**Type 2 (0x8771)** [C]
+- If the cell (w10>>10) is not in the tracked list 0x1bf6..0x1bf9
+  (0x4058), it does gain += [0xeafe]. That word has no direct writer, so it
+  is probably 0.
+- Setup 0x87b0: arfcn → band/channel ([0x1237] = 0x5287) → 0xed75;
+  [0x93] = 0 (the block-completion case: CCCH), [0x96] = 4 (normal burst;
+  tag 1 gives 8), [0xa2] = burst, [0xa5] = arfcn, [0xb1] = gain,
+  0xecba = 2. Then 0x970c builds the receive list (monitor entries with
+  arfcn 0x3ff are skipped) and [0x1167] schedules it.
+- Tag 9 with burst 0 and 0xec2a = 0x7f, and tag 9 with burst 3, have extra
+  paging paths. Tags 7 and 8 have none.
+- No check skips demodulation for a normal type 2. The bursts are
+  received, and the BEP ring gets one report per burst. A report's first
+  word, bits 13:0, is [0x62], the snapshot of that frame's arfcn, so it
+  shows which channel each burst was taken on.
+
+**The empty header is normal for CCCH** [C]
+- At the end of a block, [0x50] (the frame's [0x93]) indexes the jump
+  table at program 0xc3. Case 0 (type 2) posts via [0x116f] = 0x11e1 →
+  0x8242, with a0 = b0 = b1 = 0 (0xd02c). The header words come out as:
+  - +0x08 = +0x0c = +0x0e = 0;
+  - **+0x0a = [0xff0f] << 12**, the frame's tracked-slot mask
+    (0x1000 = slot 0);
+  - +0x10 = 0, except for rx type 9.
+- So bfi 1 with a zero header does not mean the bursts were skipped. SCH
+  blocks use another writer ([0x1171] = 0x8407), which fills those words.
+
+**Gain: type 2 runs at the bottom of the gain table** [C for the mechanism]
+- [0xb1] → snapshot [0x6e] → 0x6b0b → [0x1231] = 0xb60c. It computes
+  idx = gain − [0x0f01] (skipped if 0xec60 ≠ 0), clamps idx to 0..71, and
+  looks it up in the record tables 0x0e59 (RF word) and 0x0ea1 (dB·16).
+  Index 0 is +46 dB and index 71 is −23 dB, 1 dB per index: **a bigger
+  value means less gain.**
+- Type 10 (0x8ee6) uses gain = 2·setting − [0x0187], clamped at ≥ 0. With
+  setting 25 that is index ≈ 50, about −2 dB.
+- Our type 2 has w6 bits 15:10 = 0x3f, so gain = 126, clamped to 71: about
+  21 dB less gain than the SCH that worked. This is the likeliest reason
+  for bfi 1 [L]. The stock ARM may OR a gain into w6 after
+  FUN_000504f8 (as FUN_0005cafe does for type 9); that is unchecked [G].
+
+**Timing: per-cell table and the frame cell** [C for the code, L for the effect]
+- 0xeb22 + 4·cell (48 cells; 0x32 = none) holds: +0 valid, +1 timing in
+  quarter bits (normalised to −1755..3245 by 0x1275), +2 the arfcn
+  (0xeb1e).
+  - A good SCH sets it through [0x1158] = 0xd75a, with the cell in 0xeb11
+    (type 10's w10>>10). The value is the measured offset + T([0x78]) +
+    slot·625 (0xd920-0xd959).
+  - [0x123b] = 0xd720 reads it, returning 0 for invalid or 0x32.
+- Each frame, 0x74fc compares [0xbb] (this frame's cell, from w10) with
+  [0x78] (the last frame's). When they differ it adds T(new) − T(old) to
+  the frame-timer adjust 0xecb9. That is the only place a cell's SCH
+  timing reaches later receive windows.
+- Idle and power frames set the frame cell to 0x32 (0x7cd5), and the FCCH
+  search realigns the timer itself (0xdb85).
+- With the same cell index for the SCH and the read, the read window ends
+  up where the FCCH left it. The SCH's fine offset is cancelled out (the
+  −T on leaving the cell is undone by the +T on returning). A stale T from
+  an earlier sync of another ARFCN on cell 0 adds to the confusion [L].
+- [0x78] and [0xbb] are set to 0x32 only by L1 init 0xbfb2. Only command
+  2 reaches it, with word 1 & 0xf = 0xf, which frees all 4 slots; it also
+  clears 0xff72 bit 2 and empties the frame ring. Our driver never sends
+  it, so both start at 0 (bss). Startup (0x39ae via [0x1163]) does clear
+  0xeb22 and set 0x1bf6..9 and 0xebe2 to 0x32.
+- Share mirror [G]: 0xcd0 adds the same delta to 0xeb23 + 4c and to
+  0xae37 + 4c (ARM +0xc6e + 8·cell).
+
+**Command 3 (0x9ab4)** [C for the fields, L for the meaning]
+- It puts a cell into the tracked slots: word 1 = cell; word 2 = gain
+  index 0..71 ([0x119b] = 0xb915); word 4 bit 0 = use the current slot;
+  word 4 bits 11:8 = a slot mask.
+- A tracked cell skips the +[0xeafe] gain offset and gets its own slot
+  context (0xff0e/0xff0f).
+- It looks like dedicated-mode or serving-cell AGC. Idle BCCH should not
+  need it.
+
+**Tests, best first** (one change each, ARFCN 56, tag 7)
+1. [L] w6 = setting << 10 | index, with setting 25 (0x6400 | idx), then
+   10 and 40. Keep everything else.
+2. [L] Use a different cell index per synced ARFCN: 1, 2, … (never 0 and
+   never 0x32), the same in its type 9, type 10 and type 2. Post no other
+   cell between them.
+3. [L] Send command 2 `{2, 0x000f, 0, 0, 0}` before l1_run's command 1
+   (the stock wake also sends id 2). Do it with the ring empty, then
+   restart the frames with command 1.
+4. [G] Command 3 `{3, cell, 50, 0, 0x0101}` after the SCH, then type 2
+   with w6 gain 25.
+5. Check: log the BEP reports for each variant. Word 0 bits 13:0 must
+   equal the arfcn index; word 1 is a quality value, min-merged at 0x1131
+   [G].
+
+### Handoff for the next agent (2026-11-08)
+
+**Where GSM stands.** Each step is verified on the phone unless marked.
+
+| Step | State |
+|---|---|
+| SIM read (ready / PIN / none) | works |
+| DSP boot, parameter records, frame clock (4615 µs) | works (0867fbc) |
+| Power scan, type 11, stock gain rule 25 → 10 / 40 | works: real levels, band order and rxlev sense settled |
+| FCCH (type 9) then SCH (type 10) | works: one good SCH per search, BSIC and FN decode |
+| BCCH (type 2) | **blocked**: every block bfi 1. The likeliest fix is the w6 gain ("Tests, best first" above) |
+| System Information, idle mode, paging | not started |
+| Layers 2/3 (OsmocomBB), calls, SMS, transmit | not started; transmit only on a shielded test network (os-design.md) |
+
+**Code map**
+- `os/drivers/dsp.c` / `os/include/os/dsp.h`: boot, `l1_start`, `l1_run`,
+  `l1_poll`, the posts (`l1_idle_post`, `l1_pm_post`, `l1_fcch_post`,
+  `l1_sch_post`, `l1_burst_post`), `l1_ask_more`, `l1_pm_read`,
+  `l1_rx_read`, and `l1_next_fn` (our own frame count).
+- `os/apps/gsmstatus.c` (Tools → Radio status): runs every step above in
+  one bounded thread and writes `/b310e-os/radio-report.txt`. The BCCH step
+  decodes SI 3 and SI 4 (MCC, MNC, LAC, cell id), so a `network:` line
+  appears in the report once a block passes its CRC.
+- `os/modules/radiolab` (live over USB, see above): the faster loop for
+  one-change experiments.
+- QEMU: `os/tests/test-radio.py --nor <dump>` and `test-dsp.py --nor`.
+  QEMU runs no DSP program, so they only check that the plumbing works and
+  that nothing is reported that did not happen. The phone is the only
+  test of the radio.
+
+**Rules that cost time**
+- **Once `l1_run()` starts the frame clock, never let the ring run dry.**
+  Keep about 8 instructions queued and set `l1_ask_more(3)` after each
+  batch. Count frames taken as posted minus queued (`gsmstatus.c`
+  `consumed()`).
+- **Drain every DSP-written ring.** That means responses, BEP reports and
+  rx blocks. A full ring makes the DSP assert (ids 3, 0x1900).
+- The 6-bit gain field only takes the stock's three settings: 25 to start,
+  10 after status 3, 40 after status 2. Status 3 at 10 means nothing is
+  there.
+- Allocate per-channel tables before the scan and clear them at once. A
+  report printed from an unset table looked like measurements.
+- Tools → DSP boot and Radio status share the DSP. Radio status refuses
+  to start while DSP boot runs, and the QEMU test waits for it.
+- When the phase enum in `gsmstatus.c` changes, update `R_DONE` in
+  `test-radio.py`.
+- The card loop: copy only `payloads/b310e-os.bin` to `E:\payloads\` and
+  `cmp` it. Apps live in category folders on the card, so never copy them
+  flat. Check the `boot: ... built` line in `log.txt` before trusting a
+  report: the phone may not have booted the new file.
+- Commits: git has no identity in the agent shell. Pass the user's identity
+  per command (`-c user.name=... -c user.email=...`, as in the log); never
+  write it to the config.
+
 ## Milestones
 
 1. **M0:** confirm the carrier still runs 2G, and that stock calls and

@@ -91,6 +91,9 @@ typedef struct {
     uint32_t after_each_wake[3];        /* unused */
     uint32_t last_ack[5];       /* the last ack: word 2.. carry the DSP's ids */
     uint32_t msg_phase;         /* DSP_P_* when the first message came */
+    uint32_t msg_log[8];        /* the last 8 messages, msg_log[msgs % 8] newest */
+    uint32_t beps;              /* BEP reports drained (+0xfa0 ring) */
+    uint32_t bep_last[2];       /* the last one's two words */
 } dsp_probe_t;
 
 extern volatile dsp_probe_t dsp_probe_info;
@@ -168,6 +171,15 @@ int l1_pm_read(l1_pm_t *out, int max);  /* results waiting, oldest first */
 int l1_fcch_post(uint16_t index, uint8_t gain, int window, int cell);
 int l1_sch_post(uint16_t index, uint8_t gain, int cell);
 
+/* Type 2: one burst (0..3) of a 4-burst block. tag: the stock's RxChannelTag
+ * (7 came back as a BCCH/CCCH block, 9 as a paging one); tn: the timeslot
+ * (0 for broadcast channels); tsc: the training sequence (their BCC). */
+int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
+
+/* The frame number the next posted instruction carries (our own count:
+ * received blocks report it, so cell FN = it + the offset an SCH gives). */
+uint32_t l1_next_fn(void);
+
 /* One received block (+0x40c ring). hdr[0] type (1 SCH, 7 CCCH/BCCH block,
  * 9 ...), hdr[1] bfi (0 good), hdr[2] frame number low, hdr[3] bits 7:0
  * frame number high and 12:8 the cell; hdr[4..8] partly unknown. data: SCH
@@ -178,5 +190,41 @@ typedef struct {
 } l1_rx_t;
 
 int l1_rx_read(l1_rx_t *rx);            /* 1 one block, 0 none, or an error */
+
+/* For experiments (os/modules/radiolab): any frame instruction, the next
+ * frame number written into word 1 bits 15:9 and word 2; share memory
+ * (offsets below 0x1000) and commands, raw. */
+int l1_fi_post(const uint16_t fi[11], const uint16_t ext[3]);
+uint16_t l1_share_r16(uint32_t off);
+void l1_share_w16(uint32_t off, uint16_t v);
+int l1_cmd_post(const uint16_t cmd[5]);
+
+/* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
+typedef struct l1_api {
+    int (*dsp_boot)(void);
+    void (*dsp_stop)(void);
+    int (*start)(void);
+    int (*run)(void);
+    void (*poll)(void);
+    int (*fi_free)(void);
+    int (*idle_post)(int frames);
+    void (*ask_more)(int back);
+    uint16_t (*arfcn_index)(int band, int arfcn);
+    int (*pm_post)(const uint16_t *index, const uint8_t *gain, int n);
+    int (*pm_read)(l1_pm_t *out, int max);
+    int (*fcch_post)(uint16_t index, uint8_t gain, int window, int cell);
+    int (*sch_post)(uint16_t index, uint8_t gain, int cell);
+    int (*burst_post)(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
+    uint32_t (*next_fn)(void);
+    int (*rx_read)(l1_rx_t *rx);
+    int (*fi_post)(const uint16_t fi[11], const uint16_t ext[3]);
+    uint16_t (*share_r16)(uint32_t off);
+    void (*share_w16)(uint32_t off, uint16_t v);
+    int (*cmd_post)(const uint16_t cmd[5]);
+    volatile dsp_info_t *info;
+    volatile dsp_probe_t *probe;
+} l1_api_t;
+
+extern const l1_api_t l1_api;
 
 #endif

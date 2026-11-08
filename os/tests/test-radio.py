@@ -37,7 +37,7 @@ RADIO_FIELDS = ('runs busy phase sim0 sim1 sim_sw0 sim_sw1 sim_mv0 sim_mv1 dsp_r
                 'records frames_taken frame_us sweeps pm_frames pm_results pm_valid pm_sat_hi '
                 'pm_sat_lo pm_other pm_stray channels_heard stalled').split()
 SIGNED = {'sim_sw0', 'sim_sw1', 'dsp_result', 'l1_result'}
-R_DONE = 8
+R_DONE = 9
 SIM_NONE, SIM_READY, SIM_PIN = 0, 1, 2
 DSP_OFF, DSP_FAILED = 0, 3
 DSP_EIMAGE, DSP_ECMD = -1, -7

@@ -36,6 +36,7 @@
 #include "ff.h"
 #include "os/alarm.h"
 #include "os/audio.h"
+#include "os/dsp.h"
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/media.h"
@@ -78,7 +79,9 @@
  * own in the quick panel's Sound page (os/audio.h). Older apps get one
  * too: audio_play uses a tag under the app's name, and VOL_APP from an app
  * means its own. */
-#define OS_API_MINOR 10
+/* 2.11 (2026-11-08): l1, after volume_register: layer 1 and the DSP
+ * (os/dsp.h, l1_api_t) for the radio experiments in os/modules/radiolab. */
+#define OS_API_MINOR 11
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -344,6 +347,9 @@ struct os_api {
      * volume_set and volume_use. A second name is a second tag: volume_use
      * picks which audio_play takes. Not needed just to have one. */
     int (*volume_register)(const char *name);
+
+    /* 2.11: layer 1 and the DSP */
+    const l1_api_t *l1;
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */
@@ -353,6 +359,8 @@ extern const os_api_t os_api;
 
 /* Load and start an app; NULL on success, else why it failed. */
 const char *app_open(const char *path);
+/* The same with an argument (app_arg() in it); NULL: none. */
+const char *app_open_arg(const char *path, const char *arg);
 /* An app by its name or file name, with an argument (app_arg() in it). */
 const char *app_launch(const char *name, const char *arg);
 /* Its path, in APP_DIR or in a folder of its own there; false if none. */

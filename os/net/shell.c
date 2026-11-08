@@ -1009,11 +1009,12 @@ static void c_shot(sess_t *s, int argc, char **argv)
 /* ---- the UI: apps, keys, reboot -------------------------------------------- */
 
 static const char *run_err;
+static char run_arg[LINE_MAX + 1];      /* the app's argument, "" none */
 
 static void ui_run_app(void *arg)
 {
     usb_net_close_apps();
-    run_err = app_open((const char *)arg);
+    run_err = app_open_arg((const char *)arg, run_arg[0] ? run_arg : NULL);
     ui_wake();
 }
 
@@ -1044,9 +1045,10 @@ static void c_run(sess_t *s, int argc, char **argv)
     size_t n;
 
     if (!name) {
-        say(s, "usage: run APP   (a path, or a name in " APP_DIR ")\n");
+        say(s, "usage: run APP [\"ARG\"]   (a path, or a name in " APP_DIR ")\n");
         return;
     }
+    snprintf(run_arg, sizeof(run_arg), "%s", argc > 2 ? argv[2] : "");
     if (!need_card(s))
         return;
     n = strlen(name);
@@ -1152,7 +1154,7 @@ static const cmd_t cmds[] = {
     { "put", "PATH SIZE", "upload (raw port)", c_put },
     { "get", "PATH", "download (raw port)", c_get },
     { "shot", "", "the screen, RGB565 (raw port)", c_shot },
-    { "run", "APP", "close the open app, load and start APP", c_run },
+    { "run", "APP [ARG]", "close the open app, load and start APP (with ARG)", c_run },
     { "close", "", "close the open app", c_close },
     { "key", "NAME...", "press keys", c_key },
     { "reboot", "", "restart to the boot menu", c_reboot },

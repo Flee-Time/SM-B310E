@@ -10,8 +10,9 @@ telnet port (23) does not carry.
   b310e-shell.py cmd ps                  one command, its output
   b310e-shell.py put app.bin /x/app.bin  upload (CRC32 checked)
   b310e-shell.py get /b310e-os/log.txt   download (to log.txt; CRC32 checked)
-  b310e-shell.py run build/os/modules/stopwatch.app [--follow]
-                                         upload to /b310e-os/apps/ and start it,
+  b310e-shell.py run build/os/modules/stopwatch.app [--arg ARG] [--follow]
+                                         upload to /b310e-os/apps/ and start it
+                                         (with ARG, its app_arg()),
                                          closing the app that is open; --follow
                                          then shows the log until Ctrl-C
   b310e-shell.py shot [screen.png]       the phone's screen as a PNG
@@ -193,6 +194,7 @@ def main():
     p = sub.add_parser('run')
     p.add_argument('app', type=Path)
     p.add_argument('--follow', action='store_true', help='then show the log until Ctrl-C')
+    p.add_argument('--arg', help="the app's argument (app_arg)")
     p = sub.add_parser('shot')
     p.add_argument('png', type=Path, nargs='?', default=Path('screen.png'))
     sub.add_parser('log')
@@ -229,7 +231,7 @@ def main():
             data = args.app.read_bytes()
             remote = '/b310e-os/apps/' + args.app.name
             sh.put(remote, data)
-            out = sh.cmd(f'run "{remote}"')
+            out = sh.cmd(f'run "{remote}"' + (f' "{args.arg}"' if args.arg else ''))
             sys.stdout.write(out)
             if not out.startswith('OK'):
                 sys.exit(1)
