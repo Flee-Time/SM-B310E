@@ -94,4 +94,18 @@ void __wrap_R_Init(void)
     detailLevel = 1;
     __real_R_Init();
 }
+
+/* Heretic's chat macros start as NULL, and its config prints them: on a PC
+ * "(null)", here whatever lies at address 0 (a 52 MB file in QEMU, until the
+ * card was full). */
+extern char *chat_macros[10];
+void __real_M_SaveDefaults(void);
+
+void __wrap_M_SaveDefaults(void)
+{
+    for (int i = 0; i < 10; i++)
+        if (!chat_macros[i])
+            chat_macros[i] = "";
+    __real_M_SaveDefaults();
+}
 #endif

@@ -152,8 +152,28 @@ void mutex_unlock(mutex_t *m)
         m->owner = NULL;
     }
     k_set_prio(cur, k_mutex_ceiling(cur));
+    if (cur->kill_pending && !cur->held)
+        thread_exit();
     k_preempt();
     arch_irq_restore(irq);
+}
+
+void k_mutex_drop(thread_t *t, mutex_t *m)
+{
+    thread_t *w = m->waiters.head;
+
+    held_remove(t, m);
+    m->depth = 0;
+    if (w) {
+        m->owner = w;
+        m->depth = 1;
+        w->blocked_on = NULL;
+        k_wake(w, WAIT_OK);
+        held_push(w, m);
+        k_set_prio(w, k_mutex_ceiling(w));
+    } else {
+        m->owner = NULL;
+    }
 }
 
 /* ---- message queue -------------------------------------------------------- */

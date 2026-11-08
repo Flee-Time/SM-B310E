@@ -29,7 +29,7 @@ CHOCO_OURS := i_main i_video i_sound stubs low_detail
 # to work (their sky: prepare.py)
 CHOCO_WRAP_doom := R_DrawColumnLow R_DrawSpanLow
 CHOCO_WRAP_heretic := $(CHOCO_WRAP_doom) R_Init R_DrawTLColumn R_DrawTranslatedColumn \
-	R_DrawTranslatedTLColumn
+	R_DrawTranslatedTLColumn M_SaveDefaults
 CHOCO_WRAP_hexen := $(CHOCO_WRAP_heretic) R_DrawAltTLColumn R_DrawTranslatedAltTLColumn
 
 CHOCO_GAME_doom := $(notdir $(basename $(filter-out %/doom_icon.c,$(wildcard $(CHOCO_SRC)/doom/*.c))))

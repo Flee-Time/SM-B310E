@@ -82,7 +82,7 @@
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
-#define APP_MAX_SIZE (2048u * 1024)     /* image + bss (512 KB before 2.5) */
+#define APP_MAX_SIZE (2560u * 1024)     /* image + bss (512 KB before 2.5) */
 
 typedef struct {
     uint32_t magic;
@@ -371,6 +371,8 @@ void app_volume_choose(int cat);        /* a tag: its next audio_play takes it *
 bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out);
 /* Unload the apps that have no screen on the stack (the UI loop calls it). */
 void app_collect(screen_t *const *stack, int depth);
+bool app_is_loaded(const app_t *a);
+void app_kill(app_t *a);                /* its threads end now (END held); the UI's */
 bool app_reloading(void);               /* between app_reload and the fresh app */
 int app_count(void);
 

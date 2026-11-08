@@ -71,8 +71,9 @@ static void keypad_isr(void)
 {
     uint32_t raw = KPD->int_raw, status = KPD->key_status;
 
-    if (raw)
-        KPD->int_clr = KPD_INT_ALL;
+    if (raw)                            /* what was read: a later edge stays. All of
+                                         * them lost a release that came just now */
+        KPD->int_clr = raw;
     if (status & 8u)                    /* a bad scan frame */
         return;
     for (int i = 0; i < 8; i++) {

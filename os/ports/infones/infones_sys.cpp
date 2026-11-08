@@ -88,6 +88,8 @@ static bool says_pal(const char *rom)
     static const char *const names[] = { "(E)", "(Europe)", "(PAL)", "(EU)" };
     bool clean = true;
 
+    if ((NesHeader.byInfo2 & 0x0c) == 0x08)     /* NES 2.0: byte 12 says, 1 is PAL */
+        return (NesHeader.byReserve[4] & 3) == 1;
     for (int i = 2; i < 8; i++)         /* (bytes 10-15: junk in old dumps) */
         clean = clean && !NesHeader.byReserve[i];
     if (clean && NesHeader.byReserve[1] & 1)

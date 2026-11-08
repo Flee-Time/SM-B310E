@@ -41,6 +41,31 @@ SOURCES = {
         'dc8b250af35fb0ace68db5eb879490b50068c20e.zip',
         '393182e7ee9afc77a2ef74d0b583520a4c9b32f5fb39a23015ea6def8f359402',
         'wl_main.c'),
+    # Ken Silverman's Build engine, JonoF's port (Ken's licence, buildlic.txt: not GPL
+    # compatible, see os/ports/duke/README)
+    'jfbuild': (
+        'https://github.com/jonof/jfbuild/archive/'
+        'efd88d9cc24f753038a28479c9d8e7ac398909c8.zip',
+        '767d6bfdedc801608d110423de255b39dbe57b629668126a65d9c853e9472f29',
+        'src/engine.c'),
+    # 3D Realms' MACT library (GPLv2)
+    'jfmact': (
+        'https://github.com/jonof/jfmact/archive/'
+        '1f0746a3b9704906669d8aaed2bbb982053a393e.zip',
+        '68f16ea5ecb38ea732b04f10ed86465819ae512258fb884903ebc7bbfe5c7a25',
+        'control.c'),
+    # Duke Nukem 3D (GPLv2)
+    'jfduke3d': (
+        'https://github.com/jonof/jfduke3d/archive/'
+        '41cd46bc00633e7457d07d88c8add9f99a7d9d41.zip',
+        'edde47b058d0c37bc4dbdff078dc55cf0dd2c5d76d8b2526dc759c4ead44b1af',
+        'src/game.c'),
+    # JonoF's audiolib: only its headers are used (GPLv2)
+    'jfaudiolib': (
+        'https://github.com/jonof/jfaudiolib/archive/'
+        '96cb69e686a56069d1789cf6748a63593af31e6e.zip',
+        '491d8f9df332d8d4d9248d5ea41d92f744c12a167c2cd00fd5b9dd8dc7e99a95',
+        'include/fx_man.h'),
 }
 
 

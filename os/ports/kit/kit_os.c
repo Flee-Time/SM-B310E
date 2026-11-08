@@ -197,14 +197,40 @@ static void make_taps(const axis_t *a, int src, int dst, int scaled, bool smooth
 }
 
 static axis_t ax_u, ax_v;
+static uint32_t kit_sound_cycles(void);
 static uint32_t launched_ms, fps_since, fps_frames, scale_ms;
+static uint32_t frame_at, worst_ms, slow_frames, heap_low = ~0u;
 
 /* the log says how long a game took to its first frame, then its frames
  * a second every 10 s: the phone's numbers */
+/* where the phone's time went, for the log: the game's thread and the sound's, of
+ * each 10 s, in the kernel's 26 MHz cycles */
+static void cpu_report(uint32_t ms)
+{
+    static uint32_t game_last, sound_last;
+    uint32_t game = k.thread ? k.thread->cycles : 0, sound = kit_sound_cycles();
+
+    if (ms)
+        klog("%s: of the time: game %lu%%, sound %lu%%", kit_game.log_name,
+             (unsigned long)((game - game_last) / 26000 * 100 / ms),
+             (unsigned long)((sound - sound_last) / 26000 * 100 / ms));
+    game_last = game;
+    sound_last = sound;
+}
+
 static void frame_done(void)
 {
     uint32_t now = ticks();
 
+    if (frame_at) {
+        if (now - frame_at > worst_ms)
+            worst_ms = now - frame_at;
+        if (now - frame_at > 33)
+            slow_frames++;
+    }
+    frame_at = now;
+    if (heap_free() < heap_low)
+        heap_low = heap_free();
     if (kit.frames == 1) {
         klog("%s: first frame after %lu ms", kit_game.log_name,
              (unsigned long)(now - launched_ms));
@@ -214,10 +240,20 @@ static void frame_done(void)
     } else if (now - fps_since >= 10000) {
         uint32_t tenths = (kit.frames - fps_frames) * 10000u / (now - fps_since);
 
-        klog("%s: %lu.%lu fps, %lu.%lu ms a frame to scale", kit_game.log_name,
+        static unsigned last_kb, last_ms;
+        unsigned kb = kit_io_kb(), ms = kit_io_ms();
+
+        cpu_report(now - fps_since);
+
+        klog("%s: %lu.%lu fps, %lu.%lu ms a frame to scale, %u KB read in %u ms, "
+             "worst frame %lu ms, %lu over 33 ms", kit_game.log_name,
              (unsigned long)(tenths / 10), (unsigned long)(tenths % 10),
              (unsigned long)(scale_ms / (kit.frames - fps_frames)),
-             (unsigned long)(scale_ms * 10 / (kit.frames - fps_frames) % 10));
+             (unsigned long)(scale_ms * 10 / (kit.frames - fps_frames) % 10), kb - last_kb,
+             ms - last_ms, (unsigned long)worst_ms, (unsigned long)slow_frames);
+        last_kb = kb;
+        last_ms = ms;
+        worst_ms = slow_frames = 0;
         fps_since = now;
         fps_frames = kit.frames;
         scale_ms = 0;
@@ -574,6 +610,11 @@ static void sound_main(void *arg)
     snd.thread = NULL;
 }
 
+static uint32_t kit_sound_cycles(void)
+{
+    return snd.thread ? snd.thread->cycles : 0;
+}
+
 int kit_audio_start(unsigned rate, void (*render)(int16_t *lr, unsigned frames))
 {
     if (snd.on)
@@ -606,7 +647,8 @@ void kit_audio_stop(void)
     audio_play_stop();
     snd.stop = true;
     sem_post(&snd.more);
-    while (snd.thread)                  /* it ends within a chunk */
+    /* it ends within a chunk (unless it was ended: END held) */
+    for (int i = 0; snd.thread && i < 40; i++)
         thread_sleep(5);
 }
 
@@ -768,6 +810,16 @@ static void game_main(void *arg)
     mutex_unlock(&k.frame_lock);
     if (code && !kit.error[0])
         snprintf(kit.error, sizeof(kit.error), "%s stopped (%d).", app_info.name, code);
+    {
+        const uint32_t *low = k.thread->stack;
+        size_t unused = 0;
+
+        while (unused < k.thread->stack_size / 4 && low[unused] == 0x57a57a57)
+            unused++;
+        klog("%s: stack %lu of %lu KB, OS heap never below %lu KB", kit_game.log_name,
+             (unsigned long)((k.thread->stack_size - unused * 4) / 1024),
+             (unsigned long)(k.thread->stack_size / 1024), (unsigned long)(heap_low / 1024));
+    }
     klog("%s: ended (%d)%s%s", kit_game.log_name, code, kit.error[0] ? ": " : "", kit.error);
     while (!ui_call(finished, NULL, 2000))
         ;
@@ -969,6 +1021,7 @@ screen_t *kit_start(void)
 void kit_stop(void)
 {
     kit_audio_stop();
+    kit_close_files();
     if (k.held)
         cpufreq_release();
     klog("%s: unloaded", kit_game.log_name);

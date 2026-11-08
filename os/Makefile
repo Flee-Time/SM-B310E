@@ -55,6 +55,7 @@ include ports/chocolate/chocolate.mk
 include ports/gnuboy/gnuboy.mk
 include ports/infones/infones.mk
 include ports/wolf4sdl/wolf4sdl.mk
+include ports/duke/duke.mk
 
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf

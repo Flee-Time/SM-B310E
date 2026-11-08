@@ -47,14 +47,14 @@ done
 # the emulators (os/ports/gnuboy, os/ports/infones): their ROMs go beside them
 # Wolf3D (os/ports/wolf4sdl): its *.WL6 go beside it
 # (a folder with an .app of its own name is an app; any other, a category)
-for pair in "gnuboy:Game Boy" "infones:NES" "wolf3d:Wolf3D"; do
+for pair in "gnuboy:Game Boy" "infones:NES" "wolf3d:Wolf3D" "duke3d:Duke 3D"; do
     app="${pair%%:*}.app" folder="${pair#*:}"
     if [ -f "$BUILD_DIR/ports/$app" ]; then
         mkdir -p "$REPO_DIR/sdcard/b310e-os/apps/$folder"
         rm -f "$REPO_DIR/sdcard/b310e-os/apps/$folder/$app"
         cp -f "$BUILD_DIR/ports/$app" "$REPO_DIR/sdcard/b310e-os/apps/$folder/$folder.app"
     else
-        echo "no $app: run python os/ports/sources.py first (gnuboy, infones, wolf4sdl)"
+        echo "no $app: run python os/ports/sources.py first (gnuboy, infones, wolf4sdl, jfbuild jfmact jfduke3d jfaudiolib)"
     fi
 done
 ls -l "$REPO_DIR/sdcard/payloads/b310e-os.bin" "$REPO_DIR"/sdcard/b310e-os/apps/*.app "$REPO_DIR"/sdcard/b310e-os/apps/*/*.app 2>/dev/null || true

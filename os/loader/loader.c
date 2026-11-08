@@ -619,6 +619,24 @@ static const char *open_with(const char *path, const char *arg)
     return NULL;
 }
 
+bool app_is_loaded(const app_t *a)
+{
+    for (const app_t *p = apps; p; p = p->next)
+        if (p == a)
+            return true;
+    return false;
+}
+
+/* It did not end when asked: its threads end here, and app_collect unloads it
+ * as usual, with its stop() (whatever it has open, a game's files). */
+void app_kill(app_t *a)
+{
+    int left = thread_kill_owned(a, a->image, (const char *)a->image + a->size);
+
+    klog("app: %s killed%s", a->name, left ? ", a thread inside the OS ends when it leaves" : "");
+    notify_drop_owner(a);
+}
+
 void app_collect(screen_t *const *stack, int depth)
 {
     app_t *a = apps, *next;

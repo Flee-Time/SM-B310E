@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 bool b310e_music_start(const void *data, unsigned size, bool loop);
+bool b310e_music_start_borrowed(const void *data, unsigned size, bool loop);
 void b310e_music_stop(void);
 void b310e_music_pause(bool pause);
 void b310e_music_volume(int volume);

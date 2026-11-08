@@ -52,6 +52,7 @@ struct thread {
     uint32_t cycles;            /* 26 MHz cycles run (statistics) */
     thread_t *all_next;         /* every thread, for listings */
     void *owner;                /* the app that started it, or NULL */
+    bool kill_pending;          /* ends when it lets go of its last mutex */
 };
 
 #define WAIT_OK       0
@@ -66,6 +67,10 @@ void thread_exit(void) __attribute__((noreturn));
 /* Called (interrupts off) when a thread with an owner (an app's) ends. */
 extern void (*thread_owned_exit)(void);
 thread_t *thread_self(void);
+/* End an app's threads wherever they are. A mutex in [lo, hi) (the app's own
+ * memory) is let go; one of the OS's means the thread is inside the OS with
+ * something half done: it ends when it lets go of that. How many are left. */
+int thread_kill_owned(const void *owner, const void *lo, const void *hi);
 int thread_count_owned(const void *owner);  /* threads of an app still running */
 void thread_set_priority(thread_t *t, int prio);
 thread_t *thread_first(void);   /* walk all threads (interrupts off) */

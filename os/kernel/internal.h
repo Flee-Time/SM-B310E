@@ -15,5 +15,6 @@ void k_preempt(void);       /* switch now if a higher thread is ready */
 void k_set_prio(thread_t *t, int prio);
 void k_mutex_inherit(mutex_t *m, int prio);
 int k_mutex_ceiling(thread_t *t);   /* base or inherited priority */
+void k_mutex_drop(thread_t *t, mutex_t *m);     /* t ends: the next waiter has it */
 
 #endif

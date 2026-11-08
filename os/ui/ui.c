@@ -21,6 +21,7 @@
 #define REPEAT_DELAY   450
 #define REPEAT_EVERY   110
 #define END_HOLD_MS    2000
+#define KILL_AFTER_MS  1500             /* END held on an app: asked, then this long */
 #define TORCH_HOLD_MS  1000            /* hold 0: torch on/off (as in Rockbox) */
 #define BUZZ_MS        80
 #define TACTILE_MS     30                /* a key's feedback buzz */
@@ -431,6 +432,48 @@ static void splash(const char *text)
     gfx_fill(0, 0, LCD_WIDTH, LCD_HEIGHT, C_BG);
     gfx_text_centered(LCD_HEIGHT / 2 - 8, text, C_TEXT, FONT_LARGE, 1);
     lcd_update();
+}
+
+/* END held: the app on top closes, and the phone stays on. Its screens go, which
+ * asks it to end (a game saves); if it has not after KILL_AFTER_MS, it is ended.
+ * No app on the stack: false (the phone powers off). */
+static app_t *closing;
+static uint32_t closing_at;
+
+static bool close_top_app(uint32_t now)
+{
+    app_t *a = NULL;
+    int lowest = 0;
+
+    for (int i = depth - 1; i >= 1; i--)
+        if (stack[i]->app) {
+            if (!a)
+                a = stack[i]->app;
+            if (stack[i]->app == a)
+                lowest = i;
+        }
+    if (!a)
+        return false;
+    klog("ui: END held: closing %s", app_name(a));
+    closing = a;
+    closing_at = now;
+    while (depth > lowest)
+        ui_pop();
+    collect = true;
+    return true;
+}
+
+static void closing_tick(uint32_t now)
+{
+    if (!closing)
+        return;
+    if (!app_is_loaded(closing))
+        closing = NULL;
+    else if (now - closing_at >= KILL_AFTER_MS) {
+        app_kill(closing);
+        closing = NULL;
+        collect = true;
+    }
 }
 
 void ui_power_off(void)
@@ -966,7 +1009,7 @@ void ui_run(screen_t *home)
             wait = (int32_t)(next_repeat - now) > 0 ? next_repeat - now : 0;
         if ((int32_t)(next_tick - now) < (int32_t)wait)
             wait = (int32_t)(next_tick - now) > 0 ? next_tick - now : 0;
-        if ((end_down || zero_down) && wait > 100)
+        if ((end_down || zero_down || closing) && wait > 100)
             wait = 100;
         if (center_down && wait > 50)
             wait = 50;
@@ -995,8 +1038,13 @@ void ui_run(screen_t *home)
             next_repeat = now + REPEAT_EVERY;
             dispatch(&rep);
         }
-        if (end_down && now - end_down >= END_HOLD_MS)
-            ui_power_off();
+        if (end_down && now - end_down >= END_HOLD_MS) {
+            end_down = 0;
+            end_in_game = false;
+            if (!close_top_app(now))
+                ui_power_off();
+        }
+        closing_tick(now);
         if (center_down && now - center_down >= PANEL_HOLD_MS) {
             center_down = 0;            /* held: the quick panel, not a press */
             ui_buzz(4, 40);

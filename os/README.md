@@ -727,6 +727,38 @@ right once they did (`tests/nes-apu-test.c` holds them to it), a few more of
 its bugs, and this phone's speed (the frame RGB565 as it stands, the 6502's
 fetches inlined, a line read into the cache before it is drawn).
 
+## Duke Nukem 3D
+
+`Duke 3D.app` is upstream's jfduke3d, jfbuild and jfmact on the game kit, for
+`DUKE3D.GRP` beside it or in `/games/duke3d`. Licences: `ports/duke/README.md`.
+
+| Key | In the game | In the menus |
+|---|---|---|
+| D-pad | move and turn | up, down |
+| Center | fire | select |
+| LSoft | open, use | yes |
+| RSoft | the menu | back, no |
+| Dial | run on / off | |
+| 5, 8 | jump, crouch | |
+| 1, 3 | strafe left, right | |
+| 4, 6 | weapon before, after | |
+| 7, 9 | item before, after | |
+| 0 | use the item | |
+| \* | quick kick | |
+| # | the map | |
+| END | quit (asks; LSoft: yes) | |
+
+**How it is built** (`ports/duke/`): `layer.c` is the engine's platform layer
+on the kit, `duke_sound.c` the part of JonoF's audiolib that the game's own `sounds.c`
+uses, on the kit's mixer: distance, priorities and loops are upstream's, and sounds
+play from the tile cache, no copy. Upstream's tables
+come to 5.6 MB, sized for the biggest maps Build ever had; `prepare.py` cuts them to
+1.6 MB for what Duke's maps need (its list says what and why), and a movie the tile
+cache has no room for is skipped.
+`ldiv.S` is a faster 64-bit divide for `divscale` and `scale` (libgcc's took an eighth
+of the game's instructions). The card log says every 10 s what the worst frame was made
+of: walls, sprites, card reads and the frame's way to the LCD.
+
 ## Wolfenstein 3D
 
 `wolf3d.app` is upstream Wolf4SDL (under the GPL, its other licence, id's,
@@ -891,6 +923,9 @@ in its folder: the list, the ROM's options (changed, kept in `.opt`), the
 game (frames, a screenshot with its colours, keys), END asking (the game
 waits; RSoft plays on), END twice back to the list in a fresh app with
 Apps never on the way, Back out of it, the heap back where it was.
+`test-duke.py --grp <DUKE3D.GRP>` goes through the logos and menus to a new
+game (a map loaded, the view changing as it walks), then quits and checks the
+unload, the heap and the log.
 `test-wolf.py` puts Wolf3D and its data in its folder: the title, the
 menu, a new game, a turn (the view changes), END and yes, the unload,
 the heap and the log.
@@ -1059,6 +1094,17 @@ main.c          start-up; selftest.c: the boot self-test
   phone, Up while recording the radio blocked the UI, the recording and
   END for minutes. As a failsafe the END thread powers off by itself when
   END is held for 8 s (the UI does it at 2 s).
+- **END held 2 s on an app** closes the app, not the phone (with no app on the
+  screen stack it powers off, as above). Its screens go, which asks it to end, so
+  a game saves; after 1.5 s more its threads are ended where they are (a mutex of
+  the app's own is let go; a thread holding one of the OS's ends when it lets go
+  of that), and it is unloaded as usual. `test-duke.py` hangs a game to check it.
+- **A lost key release**: the keypad interrupt cleared every edge after reading them,
+  so a release arriving just then was lost and the key's next press was taken for the
+  same one (QEMU: 4 keys wrong in 400 with the card busy). It clears only what it read.
+  Do not end a held key by the scan's silence after a card transfer: tried on
+  2026-11-08, and on the phone it dropped keys still held (Doom's walking, a list's
+  scrolling), so the scan does not always report them again.
 - The torch pin is set up (off) at boot, as Rockbox's power_init does:
   configured only on the first toggle, that toggle was lost on the phone.
 - Log lines written while USB storage has the card are kept and written

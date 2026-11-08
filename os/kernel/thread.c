@@ -449,6 +449,57 @@ thread_t *thread_self(void)
     return kernel_current;
 }
 
+/* Interrupts off, t not the current thread */
+static void kill_thread(thread_t *t)
+{
+    mutex_t *waited = t->state == T_BLOCKED ? t->blocked_on : NULL;
+
+    if (t->state == T_READY)
+        ready_remove(t);
+    else {
+        if (t->waitq)
+            waitq_remove(t);
+        if (t->timed)
+            timeout_remove(t);
+    }
+    t->blocked_on = NULL;
+    t->state = T_DEAD;
+    t->next = zombies;
+    zombies = t;
+    if (waited && waited->owner)
+        k_set_prio(waited->owner, k_mutex_ceiling(waited->owner));
+    if (t->owner && thread_owned_exit)
+        thread_owned_exit();
+}
+
+int thread_kill_owned(const void *owner, const void *lo, const void *hi)
+{
+    uint32_t s = arch_irq_save();
+    int left = 0;
+
+    for (thread_t *t = all_threads; t; t = t->all_next) {
+        mutex_t *m, *next;
+
+        if (t->owner != owner || t->state == T_DEAD || t == kernel_current)
+            continue;
+        for (m = t->held; m; m = next) {
+            next = m->next_held;
+            if ((const void *)m >= lo && (const void *)m < hi)
+                k_mutex_drop(t, m);
+        }
+        if (t->held) {
+            t->kill_pending = true;
+            left++;
+        } else {
+            kill_thread(t);
+        }
+    }
+    k_set_prio(kernel_current, k_mutex_ceiling(kernel_current));
+    k_preempt();
+    arch_irq_restore(s);
+    return left;
+}
+
 int thread_count_owned(const void *owner)
 {
     uint32_t s = arch_irq_save();

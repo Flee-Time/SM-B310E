@@ -89,8 +89,11 @@ void *memset(void *dst, int c, size_t n)
  * one card command (the SD driver's largest), and the next small reads
  * are there already (a WAD's sprites, its patches, lie one after
  * another). A read of CACHE or more goes to the card as it is. Every card
- * command costs about a millisecond on the phone, whatever its size. */
+ * command costs about a millisecond on the phone, whatever its size, and
+ * then 16 KB about 5 ms, in the middle of a frame: a small read after a seek
+ * (a tile, from anywhere in the file) takes what it needs, or SEEK_READ. */
 #define CACHE (16 * 1024)
+#define SEEK_READ (4 * 1024)
 
 static struct {
     void *fil;                          /* the OS's open file, or NULL */
@@ -100,6 +103,7 @@ static struct {
     uint8_t *cache;                     /* CACHE bytes, or NULL until used */
     unsigned long cache_at;             /* the file offset of cache[0] */
     unsigned cache_n;                   /* bytes in it */
+    unsigned long read_end;             /* where the last read ended */
 } files[MAX_FILES];
 
 /* the log: stdout and stderr, a line at a time */
@@ -210,14 +214,20 @@ int _close(int fd)
 }
 
 /* the card reads a game made: how many, how much (kit_io_report) */
-static unsigned io_reads, io_kb, io_asked;
+static unsigned io_reads, io_kb, io_asked, io_ms;
+
+unsigned kit_io_kb(void) { return io_kb; }
+unsigned kit_io_ms(void) { return io_ms; }
 
 static int card_read(void *f, unsigned long pos, void *buf, unsigned n, unsigned *got)
 {
+    uint32_t start = kit_ms();
+
     io_reads++;
     if (kos_seek(f, pos) || kos_read(f, buf, n, got))
         return -1;
     io_kb += (*got + 512) / 1024;
+    io_ms += kit_ms() - start;
     return 0;
 }
 
@@ -232,7 +242,7 @@ void kit_io_report(const char *when)
 
 static int read_cached(int fd, void *f, char *buf, unsigned n)
 {
-    unsigned done = 0, got;
+    unsigned done = 0, got, want;
 
     while (done < n) {
         unsigned long pos = files[fd].pos;
@@ -245,6 +255,7 @@ static int read_cached(int fd, void *f, char *buf, unsigned n)
             memcpy(buf + done, files[fd].cache + (pos - files[fd].cache_at), k);
             done += k;
             files[fd].pos += k;
+            files[fd].read_end = files[fd].pos;
             continue;
         }
         if (n - done >= CACHE || (!files[fd].cache && !(files[fd].cache = malloc(CACHE)))) {
@@ -252,12 +263,20 @@ static int read_cached(int fd, void *f, char *buf, unsigned n)
             if (card_read(f, pos, buf + done, n - done, &got))
                 return done ? (int)done : -1;
             files[fd].pos += got;
+            files[fd].read_end = files[fd].pos;
             return (int)(done + got);
         }
         files[fd].cache_at = pos & ~511ul;     /* from its sector on */
         files[fd].cache_n = 0;
         got = 0;
-        if (card_read(f, files[fd].cache_at, files[fd].cache, CACHE, &got))
+        want = CACHE;
+        if (pos != files[fd].read_end) {
+            want = (unsigned)(pos - files[fd].cache_at) + (n - done);
+            want = want < SEEK_READ ? SEEK_READ : (want + 511) & ~511u;
+            if (want > CACHE)
+                want = CACHE;
+        }
+        if (card_read(f, files[fd].cache_at, files[fd].cache, want, &got))
             return done ? (int)done : -1;
         files[fd].cache_n = got;
         if (pos >= files[fd].cache_at + got)
@@ -551,6 +570,16 @@ clock_t _times(struct tms *t)
         t->tms_stime = t->tms_cutime = t->tms_cstime = 0;
     }
     return now;
+}
+
+/* Only the card's side: the game may have been stopped inside its malloc */
+void kit_close_files(void)
+{
+    for (int fd = 3; fd < MAX_FILES; fd++)
+        if (files[fd].fil) {
+            kos_close(files[fd].fil);
+            files[fd].fil = NULL;
+        }
 }
 
 static jmp_buf exit_jmp;

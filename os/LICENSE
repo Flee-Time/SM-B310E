@@ -1,3 +1,21 @@
+B310E OS is free software under the GNU General Public License, version 2 or
+(at your option) any later version; the licence's text follows these additional
+permissions, which the copyright holder of this code gives under section 10's spirit
+and which any later version's "additional permissions" clause also covers.
+
+Additional permissions
+
+1. Apps. A loadable app (a .app file) that uses the OS only through the app
+   interface in include/os/app.h (os_api_t) is a separate work, not a work based
+   on the OS, whatever its licence. The OS and such an app may be distributed
+   together on one medium.
+
+2. The Build engine. The game kit (ports/kit) and the Duke Nukem 3D port (ports/duke)
+   may be linked with Ken Silverman's Build engine, under the Build licence
+   (buildlic.txt), and the result distributed as that licence allows, without
+   the Build engine's source having to come under the GPL. You may leave these
+   permissions out of your own versions of this code.
+
 		    GNU GENERAL PUBLIC LICENSE
 		       Version 2, June 1991
 

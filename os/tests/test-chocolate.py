@@ -194,7 +194,7 @@ def main():
 
     img = card.read_bytes()
     log = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
-    result['log'] = [l.strip() for l in log.splitlines() if f'{args.game}:' in l][:40]
+    result['log'] = [l.strip() for l in log.splitlines() if f'{args.game}:' in l][-40:]
     result['config'] = bool(card_file(img, f'{folder}/{cfg}'))
     print(json.dumps(result, indent=2))
     assert any(f'{args.game}: ended (0)' in l for l in result['log']), result

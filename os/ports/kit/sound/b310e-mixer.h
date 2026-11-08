@@ -7,6 +7,8 @@ extern "C" {
 #endif
 void b310e_mixer_init(void);
 void b310e_mixer_hook(void (*render)(int16_t *, unsigned));
+int b310e_sample_file_borrow(int channel, const uint8_t *data, unsigned bytes, int volume, int separation, int pitch);
+void b310e_sample_loop(int channel, bool loop);
 int b310e_sample_borrow(int channel, const uint8_t *data, unsigned bytes,
                         unsigned rate, int volume, int separation, int pitch);
 int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,

@@ -11,7 +11,7 @@ static struct voice {
     uint8_t *data;
     unsigned size, position, fraction, step;
     int left, right;
-    bool active, borrowed;              /* borrowed: data is the caller's */
+    bool active, borrowed, loop;        /* borrowed: data is the caller's */
 } voices[VOICES];
 static unsigned allocated;
 static int next_voice;
@@ -25,7 +25,10 @@ static void render(int16_t *out, unsigned frames) {
         for (unsigned ch=0; ch<VOICES; ch++) {
             struct voice *v = &voices[ch];
             if (!v->active) continue;
-            if (v->position >= v->size) { v->active=false; continue; }
+            if (v->position >= v->size) {
+                if (!v->loop) { v->active=false; continue; }
+                v->position=0;
+            }
             /* Gains are Q8: no software division in the sample loop. */
             int value = (int)v->data[v->position]-128;
             left += value*v->left; right += value*v->right;
@@ -44,6 +47,9 @@ void b310e_mixer_init(void) {
 }
 void b310e_mixer_hook(void (*fn)(int16_t *, unsigned)) {
     int old=b310e_irq_save(); extra_render=fn; b310e_irq_restore(old);
+}
+void b310e_sample_loop(int channel, bool loop) {
+    if ((unsigned)channel < VOICES) voices[channel].loop=loop;
 }
 void b310e_sample_stop(int channel) {
     if ((unsigned)channel >= VOICES) return;
@@ -80,7 +86,7 @@ int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,
     int old = b310e_irq_save();
     uint8_t *previous = v->data;
     allocated = allocated-v->size+bytes;
-    v->active=false; v->data=copy; v->size=bytes; v->position=v->fraction=0;
+    v->active=false; v->loop=false; v->data=copy; v->size=bytes; v->position=v->fraction=0;
     v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
     b310e_sample_volume(channel,volume,separation); v->active=true;
     b310e_irq_restore(old); free(previous); return channel;
@@ -94,7 +100,7 @@ int b310e_sample_borrow(int channel, const uint8_t *data, unsigned bytes,
     int old = b310e_irq_save();
     uint8_t *previous = v->borrowed ? NULL : v->data;
     if (previous) allocated -= v->size;
-    v->active=false; v->borrowed=true; v->data=(uint8_t *)data; v->size=bytes;
+    v->active=false; v->borrowed=true; v->loop=false; v->data=(uint8_t *)data; v->size=bytes;
     v->position=v->fraction=0;
     v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
     b310e_sample_volume(channel,volume,separation); v->active=true;
@@ -102,7 +108,24 @@ int b310e_sample_borrow(int channel, const uint8_t *data, unsigned bytes,
 }
 static unsigned le16(const uint8_t *p) { return p[0]|p[1]<<8; }
 static unsigned le32(const uint8_t *p) { return le16(p)|le16(p+2)<<16; }
+/* A VOC or WAV: copied (channel may be -1), or, from b310e_sample_file_borrow,
+ * played where it lies */
+static int (*start)(int, const uint8_t *, unsigned, unsigned, int, int, int) = b310e_sample_play;
+static int file_pitch = 128;
+
+static int sample_file(int channel, const uint8_t *data, unsigned bytes, int volume, int separation);
+
 int b310e_sample_file(int channel, const uint8_t *data, unsigned bytes, int volume, int separation) {
+    start = b310e_sample_play;
+    file_pitch = 128;
+    return sample_file(channel,data,bytes,volume,separation);
+}
+int b310e_sample_file_borrow(int channel, const uint8_t *data, unsigned bytes, int volume, int separation, int pitch) {
+    start = b310e_sample_borrow;
+    file_pitch = pitch;
+    return sample_file(channel,data,bytes,volume,separation);
+}
+static int sample_file(int channel, const uint8_t *data, unsigned bytes, int volume, int separation) {
     if (!data) return -1;
     if (bytes >= 26 && !memcmp(data,"Creative Voice File",19)) {
         unsigned pos = le16(data+20), rate = 0;
@@ -112,10 +135,10 @@ int b310e_sample_file(int channel, const uint8_t *data, unsigned bytes, int volu
             if (n > bytes-pos) return -1;
             if (type == 1 && n >= 2 && data[pos+1] == 0) {
                 rate = 1000000u/(256-data[pos]);
-                return b310e_sample_play(channel,data+pos+2,n-2,rate,volume,separation,128);
+                return start(channel,data+pos+2,n-2,rate,volume,separation,file_pitch);
             }
             if (type == 9 && n >= 12 && data[pos+4] == 8 && data[pos+5] == 1 && le16(data+pos+6) == 0)
-                return b310e_sample_play(channel,data+pos+12,n-12,le32(data+pos),volume,separation,128);
+                return start(channel,data+pos+12,n-12,le32(data+pos),volume,separation,file_pitch);
             if (!type) break;
             pos += n;
         }
@@ -128,7 +151,7 @@ int b310e_sample_file(int channel, const uint8_t *data, unsigned bytes, int volu
             if (!memcmp(data+pos,"fmt ",4) && n >= 16 && le16(p) == 1) {
                 channels=le16(p+2); rate=le32(p+4); bits=le16(p+14);
             } else if (!memcmp(data+pos,"data",4) && channels == 1 && bits == 8)
-                return b310e_sample_play(channel,p,n,rate,volume,separation,128);
+                return start(channel,p,n,rate,volume,separation,file_pitch);
             pos += 8+n+(n&1);
         }
     }

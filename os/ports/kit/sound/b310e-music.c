@@ -112,9 +112,12 @@ static void midi_event(struct track *t) {
     } else {t->done=true;return;}
     if (!t->done) t->next+=vlq(t);
 }
-bool b310e_music_start(const void *data, unsigned size, bool loop) {
+static bool borrowed;
+static void release(uint8_t *data, bool is_borrowed) { if (!is_borrowed) free(data); }
+static bool start_song(const void *data, unsigned size, bool loop, bool borrow) {
     if (!data || size<16 || size>256*1024) return false;
-    uint8_t *copy=malloc(size); if (!copy) return false; memcpy(copy,data,size);
+    uint8_t *copy=borrow?(uint8_t *)data:malloc(size); if (!copy) return false;
+    if (!borrow) memcpy(copy,data,size);
     struct track parsed[TRACKS]; unsigned count=0, div=0; bool ismus=false;
     if (!memcmp(copy,"MUS\x1a",4)) {
         unsigned len=le16(copy+4), start=le16(copy+6);
@@ -124,23 +127,28 @@ bool b310e_music_start(const void *data, unsigned size, bool loop) {
     } else if (!memcmp(copy,"MThd",4) && be32(copy+4)>=6 && be32(copy+4)<=size-8) {
         div=be16(copy+12); unsigned pos=8+be32(copy+4);
         unsigned declared=be16(copy+10),format=be16(copy+8);
-        if (format>1 || !declared || declared>TRACKS || (format==0 && declared!=1)) {free(copy);return false;}
+        if (format>1 || !declared || declared>TRACKS || (format==0 && declared!=1)) {release(copy,borrow);return false;}
         if (div && !(div&0x8000)) while (pos+8<=size && count<TRACKS) {
             unsigned len=be32(copy+pos+4);
             if (len>size-pos-8 || memcmp(copy+pos,"MTrk",4)) break;
             parsed[count].start=copy+pos+8; parsed[count].end=copy+pos+8+len; count++; pos+=8+len;
         }
-        if (count!=declared) {free(copy);return false;}
+        if (count!=declared) {release(copy,borrow);return false;}
     }
-    if (!count || !div) {free(copy);return false;}
-    int old=b310e_irq_save(); uint8_t *previous=song;
+    if (!count || !div) {release(copy,borrow);return false;}
+    int old=b310e_irq_save(); uint8_t *previous=song; bool was=borrowed;
+    borrowed=borrow;
     song=copy; song_size=size; division=div; ntracks=count; mus=ismus;
     memcpy(tracks,parsed,count*sizeof(parsed[0])); looping=loop; paused=false; reset(); playing=true;
-    b310e_irq_restore(old); free(previous); return true;
+    b310e_irq_restore(old); release(previous,was); return true;
 }
+bool b310e_music_start(const void *data, unsigned size, bool loop) { return start_song(data,size,loop,false); }
+/* As b310e_music_start, without a copy: the data must stay until the song stops */
+bool b310e_music_start_borrowed(const void *data, unsigned size, bool loop) { return start_song(data,size,loop,true); }
 void b310e_music_stop(void) {
     int old=b310e_irq_save(); playing=false; memset(notes,0,sizeof(notes));
-    uint8_t *previous=song; song=NULL; song_size=0; b310e_irq_restore(old); free(previous);
+    uint8_t *previous=song; bool was=borrowed; song=NULL; song_size=0; borrowed=false;
+    b310e_irq_restore(old); release(previous,was);
 }
 void b310e_music_pause(bool value) {paused=value;}
 void b310e_music_volume(int value) {
