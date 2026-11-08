@@ -157,35 +157,62 @@ void b310e_music_volume(int value) {
     b310e_irq_restore(old);
 }
 bool b310e_music_playing(void) {return playing;}
-int b310e_music_sample(void) {
-    if (!playing || paused) return 0;
-    if (tick!=scanned) {                /* the tracks only when the clock has moved: a few
-                                         * hundred times a second, not 22050 */
-        unsigned done=0;
-        scanned=tick;
-        for (unsigned i=0; i<ntracks; i++) {
-            struct track *t=&tracks[i]; unsigned budget=512;
-            while (!t->done && t->next<=tick && budget) {
-                budget--;
-                if (mus) mus_event(t); else midi_event(t);
+/* One note over k samples, added to out. Most samples need nothing but the wave:
+ * those run with the note in registers; the few where its envelope or its end may
+ * change (each 32nd while released, a drum's end) go the long way. */
+static void note_render(struct note *n, int *out, unsigned k) {
+    const bool drum=mus?n->channel==15:n->channel==9, two=programs[n->channel]<8;
+    unsigned ph=n->phase, age=n->age; const unsigned st=n->step;
+    int gain=n->gain;
+    while (k) {
+        unsigned run=k;
+        if (n->release && 31-(age&31)<run) run=31-(age&31);
+        if (drum) { unsigned to=age>=RATE/5?0:RATE/5-age; if (to<run) run=to; }
+        k-=run; age+=run;
+        if (two) for (;run;run--,out++) {
+            ph+=st;
+            int wave=(b310e_sine[ph>>24]*3+b310e_sine[(ph>>23)&255])/4;
+            *out+=(wave*gain)/1024;
+        } else for (;run;run--,out++) {
+            ph+=st;
+            *out+=(b310e_sine[ph>>24]*gain)/1024;
+        }
+        if (!k) break;
+        ph+=st; age++; k--;
+        if (n->release && (age&31)==0 && n->velocity) {n->velocity--;note_gain(n);gain=n->gain;}
+        if (!n->velocity || (drum && age>RATE/5)) {n->active=false;break;}
+        int wave=b310e_sine[ph>>24];
+        if (two) wave=(wave*3+b310e_sine[(ph>>23)&255])/4;
+        *out+=(wave*gain)/1024; out++;
+    }
+    n->phase=ph; n->age=age;
+}
+/* frames samples added to out */
+void b310e_music_render(int *out, unsigned frames) {
+    if (paused) return;
+    while (frames && playing) {
+        if (tick!=scanned) {            /* the tracks only when the clock has moved: a few
+                                         * hundred times a second */
+            unsigned done=0;
+            scanned=tick;
+            for (unsigned i=0; i<ntracks; i++) {
+                struct track *t=&tracks[i]; unsigned budget=512;
+                while (!t->done && t->next<=tick && budget) {
+                    budget--;
+                    if (mus) mus_event(t); else midi_event(t);
+                }
+                if (!budget) t->done=true; /* malformed zero-delay event chains are bounded */
+                done+=t->done;
             }
-            if (!budget) t->done=true; /* malformed zero-delay event chains are bounded */
-            done+=t->done;
+            if (done==ntracks) {
+                if (looping) reset(); else {playing=false;return;}
+            }
         }
-        if (done==ntracks) {
-            if (looping) reset(); else {playing=false;return 0;}
-        }
+        /* samples until the clock moves (one after a restart: it looks at once) */
+        unsigned k=tick!=scanned?1:step?(65535-phase+step)/step:frames;
+        if (k>frames) k=frames;
+        phase+=step*k; tick+=phase>>16; phase&=65535;
+        for (unsigned i=0; i<NOTES; i++) if (notes[i].active) note_render(&notes[i],out,k);
+        out+=k; frames-=k;
     }
-    phase+=step; tick+=phase>>16; phase&=65535;
-    int sample=0;
-    for (unsigned i=0; i<NOTES; i++) {
-        struct note *n=&notes[i]; if (!n->active) continue;
-        n->phase+=n->step; n->age++;
-        if (n->release && (n->age&31)==0 && n->velocity) {n->velocity--;note_gain(n);}
-        if (!n->velocity || ((mus?n->channel==15:n->channel==9) && n->age>RATE/5)) {n->active=false;continue;}
-        int wave=b310e_sine[n->phase>>24];
-        if (programs[n->channel]<8) wave=(wave*3+b310e_sine[(n->phase>>23)&255])/4;
-        sample+=(wave*n->gain)/1024;
-    }
-    return sample;
 }

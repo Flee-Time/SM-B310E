@@ -756,7 +756,8 @@ come to 5.6 MB, sized for the biggest maps Build ever had; `prepare.py` cuts the
 1.6 MB for what Duke's maps need (its list says what and why), and a movie the tile
 cache has no room for is skipped.
 `ldiv.S` is a faster 64-bit divide for `divscale` and `scale` (libgcc's took an eighth
-of the game's instructions). The card log says every 10 s what the worst frame was made
+of the game's instructions), and `draw4.S` the wall and floor loops, a word to the frame
+for each four pixels. The card log says every 10 s what the worst frame was made
 of: walls, sprites, card reads and the frame's way to the LCD.
 
 ## Wolfenstein 3D

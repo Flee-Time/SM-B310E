@@ -10,7 +10,7 @@ void b310e_music_stop(void);
 void b310e_music_pause(bool pause);
 void b310e_music_volume(int volume);
 bool b310e_music_playing(void);
-int b310e_music_sample(void);
+void b310e_music_render(int *out, unsigned frames);   /* added to out */
 #ifdef __cplusplus
 }
 #endif

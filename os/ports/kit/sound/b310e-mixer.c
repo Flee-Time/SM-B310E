@@ -16,27 +16,45 @@ static struct voice {
 static unsigned allocated;
 static int next_voice;
 static void (*extra_render)(int16_t *, unsigned);
-static void render(int16_t *out, unsigned frames) {
-    int16_t extra[320];
-    if (extra_render) extra_render(extra,frames);
-    for (unsigned i=0; i<frames; i++) {
-        int left=b310e_music_sample(), right=left;
-        if (extra_render) { left+=extra[i*2]; right+=extra[i*2+1]; }
-        for (unsigned ch=0; ch<VOICES; ch++) {
-            struct voice *v = &voices[ch];
-            if (!v->active) continue;
-            if (v->position >= v->size) {
-                if (!v->loop) { v->active=false; continue; }
-                v->position=0;
-            }
-            /* Gains are Q8: no software division in the sample loop. */
-            int value = (int)v->data[v->position]-128;
-            left += value*v->left; right += value*v->right;
-            v->fraction += v->step;
-            v->position += v->fraction >> 16; v->fraction &= 65535;
+#define BLOCK 160
+/* A voice over n samples, added to left and right; its state in registers */
+static void voice_render(struct voice *v, int *left, int *right, unsigned n) {
+    const uint8_t *data=v->data;
+    const unsigned size=v->size, step=v->step;
+    unsigned position=v->position, fraction=v->fraction;
+    const int l=v->left, r=v->right;
+    for (unsigned i=0; i<n; i++) {
+        if (position >= size) {
+            if (!v->loop) { v->active=false; break; }
+            position=0;
         }
-        out[i*2] = MIN(32767, MAX(-32768,left));
-        out[i*2+1] = MIN(32767, MAX(-32768,right));
+        /* Gains are Q8: no software division in the sample loop. */
+        int value = (int)data[position]-128;
+        left[i] += value*l; right[i] += value*r;
+        fraction += step;
+        position += fraction >> 16; fraction &= 65535;
+    }
+    v->position=position; v->fraction=fraction;
+}
+static void render(int16_t *out, unsigned frames) {
+    while (frames) {
+        const unsigned n=frames<BLOCK?frames:BLOCK;
+        int16_t extra[BLOCK*2];
+        int left[BLOCK], right[BLOCK];
+        memset(left,0,n*sizeof(left[0]));
+        b310e_music_render(left,n);
+        memcpy(right,left,n*sizeof(left[0]));
+        if (extra_render) {
+            extra_render(extra,n);
+            for (unsigned i=0; i<n; i++) { left[i]+=extra[i*2]; right[i]+=extra[i*2+1]; }
+        }
+        for (unsigned ch=0; ch<VOICES; ch++)
+            if (voices[ch].active) voice_render(&voices[ch],left,right,n);
+        for (unsigned i=0; i<n; i++) {
+            out[i*2] = MIN(32767, MAX(-32768,left[i]));
+            out[i*2+1] = MIN(32767, MAX(-32768,right[i]));
+        }
+        out+=n*2; frames-=n;
     }
 }
 void b310e_mixer_init(void) {

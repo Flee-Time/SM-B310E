@@ -26,7 +26,9 @@ each checked. Upstream sizes its tables for the biggest maps Build ever had:
     the cache's room for 5120 objects (it holds a few hundred). 551 KB became 900.
 11. Walls and sprites four columns at a time (upstream's way with x86 assembly, off in its C
     code), floors the same: a word to the frame for each four pixels. The PSRAM takes
-    each write by itself: the D-cache does not fetch a line to write to it.
+    each write by itself: the D-cache does not fetch a line to write to it. The two
+    loops that draw most of the screen are in ARM code (draw4.S, checked pixel for
+    pixel against the C); a compiler keeps a third more on the stack.
 10. See-through effects as a chessboard, not a blend for each pixel: less than half the
     work where it hurts most, and the screen's own halving of the columns blends them.
 
@@ -105,6 +107,13 @@ void vlineasm4(int cnt, void *p);'''),
 void mvlineasm4(int cnt, void *p);'''),
     ],
     'a-c.c': [
+        ('''void hlineasm4(int cnt, int skiploadincs,''', '''/* (ports/duke/draw4.S; its offsets) */
+struct wall4 { unsigned int v[4]; int inc[4]; const void *buf[4]; int shift, step; };
+struct floor4 { unsigned int bx, by; int bxinc, byinc; const void *buf, *pal; int xshift, yup, yshift; };
+void draw4_wall(int rows, void *pp, const void *pal, struct wall4 *w);
+void draw4_floor(int groups, void *pp, struct floor4 *f);
+
+void hlineasm4(int cnt, int skiploadincs,'''),
         ('''void vlineasm1(int vinc, void *paloffs, int cnt, unsigned int vplc, void *bufplc, void *p)
 {
 	unsigned char *pp;
@@ -156,6 +165,14 @@ void vlineasm4(int cnt, void *p)
 	const int i0 = vince[0], i1 = vince[1], i2 = vince[2], i3 = vince[3], sh = glogy, step = bpl;
 	unsigned char *pp = (unsigned char *)p;
 
+	if (cnt > 0 && !(((intptr_t)pp | step) & 3) && p0 == p1 && p0 == p2 && p0 == p3)
+	{
+		struct wall4 w = { { v0, v1, v2, v3 }, { i0, i1, i2, i3 }, { b0, b1, b2, b3 }, sh, step };
+
+		draw4_wall(cnt, pp, p0, &w);
+		vplce[0] = w.v[0]; vplce[1] = w.v[1]; vplce[2] = w.v[2]; vplce[3] = w.v[3];
+		return;
+	}
 	if (((intptr_t)pp | step) & 3)
 	{
 		for(;cnt>0;cnt--,pp+=step)
@@ -258,6 +275,16 @@ void mvlineasm4(int cnt, void *p)
 		bx -= gbxinc;
 		by -= gbyinc;
 		pp--;
+	}
+	if (cnt>=3)
+	{
+		struct floor4 f = { bx, by, gbxinc, gbyinc, gbuf, palptr, 32-glogx, glogy, 32-glogy };
+		int groups = (cnt+1)>>2;
+
+		draw4_floor(groups, pp-3, &f);
+		bx = f.bx; by = f.by;
+		pp -= groups<<2;
+		cnt -= groups<<2;
 	}
 	for(;cnt>=3;cnt-=4,pp-=4)
 	{					/* a word to the frame, not four bytes */

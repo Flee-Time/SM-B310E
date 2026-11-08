@@ -25,7 +25,7 @@ DUKE_GAME_SRC := game actors gamedef global menues player premap sector rts conf
 DUKE_ARM := a-c engine pragmas cache1d
 DUKE_OBJS := $(DUKE_ENGINE_SRC:%=$(DUKE_OUT)/engine/%.o) $(DUKE_MACT_SRC:%=$(DUKE_OUT)/mact/%.o) \
 	$(DUKE_GAME_SRC:%=$(DUKE_OUT)/game/%.o) $(DUKE_OUT)/port/layer.o $(DUKE_OUT)/port/duke_sound.o \
-	$(DUKE_OUT)/port/kplib_none.o $(DUKE_OUT)/port/ldiv.o \
+	$(DUKE_OUT)/port/kplib_none.o $(DUKE_OUT)/port/ldiv.o $(DUKE_OUT)/port/draw4.o \
 	$(DUKE_OUT)/port/duke_os.o $(KIT_OBJS)
 DUKE_CFLAGS := $(KIT_CFLAGS) -std=gnu99 -DUSE_POLYMOST=0 -DUSE_OPENGL=0 -DUSE_ASM=0 \
 	-DB_LITTLE_ENDIAN=1 -DB_BIG_ENDIAN=0 -DB_ENDIAN_C_INLINE=1 -include $(DUKE_PORT)/duke_compat.h \
@@ -63,7 +63,7 @@ $(DUKE_OUT)/port/layer.o $(DUKE_OUT)/port/duke_sound.o $(DUKE_OUT)/port/kplib_no
 	@mkdir -p $(dir $@)
 	$(CC) $(DUKE_CFLAGS) -Wall -Wno-unused-parameter -Wno-sign-compare -MMD -MP -c $< -o $@
 
-$(DUKE_OUT)/port/ldiv.o: $(DUKE_PORT)/ldiv.S
+$(DUKE_OUT)/port/ldiv.o $(DUKE_OUT)/port/draw4.o: $(DUKE_OUT)/port/%.o: $(DUKE_PORT)/%.S
 	@mkdir -p $(dir $@)
 	$(CC) $(ARCH_FLAGS) -marm -c $< -o $@
 
