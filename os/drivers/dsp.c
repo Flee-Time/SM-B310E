@@ -125,6 +125,13 @@
 #define FN_MOD          0x297000u       /* hyperframe */
 #define FI_IDLE         0u
 #define FI_POWER        11u
+#define FI_FCCH         9u
+#define FI_SCH          10u
+#define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
+#define RX_SLOTS        6u
+#define RX_SIZE         72u
+#define RX_IN           0x5bcu
+#define RX_OUT          0x5beu
 #define FI_ASK_MORE     0x8200u
 
 /* ---- the image in NOR (e52q7a) -------------------------------------------- */
@@ -958,6 +965,72 @@ static void fi_init(uint16_t fi[11], uint16_t ext[3], unsigned type)
     fi[0] = (uint16_t)(type & 0x1f);
     fi[1] = (uint16_t)(((frame_number >> 16) & 0x7f) << 9);
     fi[2] = (uint16_t)frame_number;
+}
+
+/* FUN_0005096e (the search before camping) for types 9 and 10: word 1 bits 7:4
+ * = 1, word 4 = no serving cell (0xff), word 6 = index | setting << 10,
+ * word 10 = cell << 10 and, for type 10, FUN_0006188a's value (1 with the
+ * stock's 0x0422f036 = 2) in bits 9:8 over a low byte of 0xff. */
+static void fi_cell(uint16_t fi[11], uint16_t index, uint8_t gain, int cell)
+{
+    fi[1] |= 0x10;
+    fi[4] = 0x00ff;
+    fi[6] = (uint16_t)((index & 0x3ffu) | (uint16_t)(gain & 0x3f) << 10);
+    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x3ff);
+}
+
+/* Type 9 covers window frames and carries the last one's number. */
+int l1_fcch_post(uint16_t index, uint8_t gain, int window, int cell)
+{
+    uint16_t fi[11], ext[3];
+    uint32_t saved = frame_number;
+    int rc;
+
+    if (window < 1 || window > 0xfff)
+        return DSP_ECMD;
+    frame_number = (frame_number + (uint32_t)window - 1) % FN_MOD;
+    fi_init(fi, ext, FI_FCCH);
+    fi_cell(fi, index, gain, cell);
+    fi[3] = (uint16_t)window;
+    if ((rc = post_fi(fi, ext)) != DSP_OK)
+        frame_number = saved;
+    return rc;
+}
+
+int l1_sch_post(uint16_t index, uint8_t gain, int cell)
+{
+    uint16_t fi[11], ext[3];
+
+    fi_init(fi, ext, FI_SCH);
+    fi_cell(fi, index, gain, cell);
+    fi[10] = (uint16_t)((fi[10] & 0xfc00u) | 0x100u | 0xffu);
+    return post_fi(fi, ext);
+}
+
+/* FUN_0005f692 / FUN_0005f674: "in" is the slot written last; the bytes from
+ * +0x12 come swapped pairwise, so each data halfword is high byte first. */
+int l1_rx_read(l1_rx_t *rx)
+{
+    uint32_t in, out, base;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    in = sm_r16(RX_IN);
+    out = sm_r16(RX_OUT);
+    if (in >= RX_SLOTS || out >= RX_SLOTS || in == out)
+        return 0;
+    out = (out + 1) % RX_SLOTS;
+    base = RX_BASE + out * RX_SIZE;
+    for (int i = 0; i < 9; i++)
+        rx->hdr[i] = sm_r16(base + i * 2);
+    for (int i = 0; i < (int)sizeof(rx->data) / 2; i++) {
+        uint16_t v = sm_r16(base + 0x12 + i * 2);
+
+        rx->data[i * 2] = (uint8_t)(v >> 8);
+        rx->data[i * 2 + 1] = (uint8_t)v;
+    }
+    sm_w16(RX_OUT, (uint16_t)out);
+    return 1;
 }
 
 /* FUN_0005f208(n): one instruction, n slots back from the last written, asks

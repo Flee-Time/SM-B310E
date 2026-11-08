@@ -804,6 +804,83 @@ the DSP downloaded but took no command, so there was no frame clock and no
 scan. Compare a scan with the stock firmware's field-test screen (serving
 ARFCN and RXLEV) to settle the band order and the rxlev sense.
 
+**First scan with the DSP running (phone, 2026-11-08)** [C]
+- 90 frames at 4617 µs; 486 power-measurement frames, 2913 results of
+  2916 asked.
+- **Every result was status 3, on all 971 indexes.** The 6-bit field was
+  sent as 32, raised by 8 on each status 3 (to 56).
+
+**The 6-bit field is one of three stock settings** [C]
+- RAM 0x0422f030 / 31 / 32 hold **10 / 25 / 40**. They were read live from
+  stock running in QEMU, and are the same from 5 s to 60 s. The next three
+  bytes are 20 / 50 / 80; what they are for is unknown.
+- FUN_0005c0b8 starts every channel at f031 (25).
+- FUN_0005c3e2 (power sweep) and FUN_0005c8ba (camped):
+  - status 2: measure again at f032 (40); status 2 at 40 is an error;
+  - status 3: measure again at f030 (10); status 3 at 10 is taken as
+    rxlev 0, meaning nothing is there.
+- So status 3 is "too weak", and the first scan's 32→56 moved the wrong
+  way, outside the stock's values.
+- Radio status now uses the stock rule: start at 25, 3 → 10, 2 → 40.
+  Results of status 3 at 10 are counted as `floor`.
+
+**Second scan, with the stock rule (phone, 2026-11-08)** [C for the numbers]
+- 2913 results: 1713 valid, 969 status 3 (measured again at 10), 231
+  status 3 at 10 (rxlev 0), no status 2. 863 indexes gave a valid reading.
+- Per band, by the [G] index order: 900 median 26, max 39; 1800 median 15,
+  max 38; **1900 median 0, max 15; 850 median 1, max 14**.
+- 1900 and 850 are not used here and read at the floor. That settles two
+  guesses [L, close to C]:
+  - the band order of the arfcn index (`l1_arfcn_index()`) is right;
+  - bits 11:4 are rxlev in the GSM sense: bigger is stronger, and
+    rxlev = dBm + 110.
+- Strongest on 900: ARFCN 122 (39), 54 and 56 (38, valid at the default
+  setting 25), then 70, 82, 85 and 87 (34–35). These are the likely GSM
+  cells [L].
+- 1800: ARFCN 844–883 read a flat 34–36 across about 40 channels. That is
+  wideband, most likely an LTE carrier at 1872–1879 MHz, not GSM [G].
+- Confirming a GSM cell needs the FCCH/SCH stage (types 9 and 10, above),
+  or the stock firmware's field-test screen at the same spot.
+
+### First cell sync (phone, 2026-11-08)
+
+`l1_fcch_post()` / `l1_sch_post()` / `l1_rx_read()` in dsp.c. They build
+types 9 and 10 as FUN_0005096e does (before camping):
+- word 1 |= 0x10; word 3 = window (26); word 4 = 0x00ff;
+- word 6 = index | setting << 10;
+- word 10 = cell << 10 | 0x3ff, and for type 10 bits 9:8 = 1 over a low
+  byte of 0xff (FUN_0006188a returns 1 with 0x0422f036 = 2).
+
+The frame number of a type 9 is its window's last frame. The rx ring is read
+as FUN_0005f692 does; data from +0x12 is swapped, so each halfword is high
+byte first.
+
+The test (Radio status, "syncing"): for the 3 strongest 900 channels, one
+type 9 over 26 frames, then a type 10 in each of the next 51 frames.
+
+**Result** [C]
+- **ARFCN 56: one good SCH** (rx type 1, bfi 0), raw data `69 80 45 af`.
+- That decodes to **BSIC 26 (NCC 3, BCC 2)**, T1 768, T2 17, T3' 3, so
+  **FN 1019113**. The decode is consistent: FN mod 26 = 17 = T2, and
+  FN mod 51 = 31, an SCH frame.
+- So the OsmocomBB bit order for SCH data is right, and the SCH arrives
+  after a type 9 without any timing command from the ARM: the DSP aligns
+  itself after the FCCH [L].
+- Header of that block: `0001 0000 0271 0000 1a03 0000 0000 0000 00ff`.
+  - hdr[2] = 0x271 is our own frame count (625), not the cell's.
+  - hdr[4] = 0x1a03: its high byte is 26, the BSIC [G].
+- ARFCN 122 and 73 gave no SCH. 122 reads strong, so it may be a non-GSM
+  carrier, or it needs a second try [G].
+- **153 DSP messages during sync = 3 x 51, one per type 10.** The DSP kept
+  running. The codes were not saved; log `msg_first` / `msg_last` next
+  time [G: a per-SCH report].
+- Only 1 rx block in the whole step: a type 9 itself returns nothing on
+  the rx ring [L].
+
+**Next:** read BCCH (type 2 bursts, tag 7 or 8) on ARFCN 56 at the SCH-
+derived frame offsets (BCCH is at FN mod 51 = 2..5). That gives System
+Information: MCC/MNC, LAC and cell id.
+
 ## Milestones
 
 1. **M0:** confirm the carrier still runs 2G, and that stock calls and

@@ -162,4 +162,21 @@ typedef struct {
 
 int l1_pm_read(l1_pm_t *out, int max);  /* results waiting, oldest first */
 
+/* Sync, receive only (docs/gsm-plan.md, "Next stage"). Type 9: an FCCH
+ * search over window frames (26 before camping, 13 camped); type 10: one SCH
+ * read. cell: the cell-table index the result is tagged with. */
+int l1_fcch_post(uint16_t index, uint8_t gain, int window, int cell);
+int l1_sch_post(uint16_t index, uint8_t gain, int cell);
+
+/* One received block (+0x40c ring). hdr[0] type (1 SCH, 7 CCCH/BCCH block,
+ * 9 ...), hdr[1] bfi (0 good), hdr[2] frame number low, hdr[3] bits 7:0
+ * frame number high and 12:8 the cell; hdr[4..8] partly unknown. data: SCH
+ * 4 bytes, blocks 23. */
+typedef struct {
+    uint16_t hdr[9];
+    uint8_t data[54];
+} l1_rx_t;
+
+int l1_rx_read(l1_rx_t *rx);            /* 1 one block, 0 none, or an error */
+
 #endif
