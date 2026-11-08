@@ -74,7 +74,11 @@
 #define OS_API_MAJOR 2
 /* 2.9 (2026-11-08): ui_present, after app_reload: from a full-screen draw(),
  * a whole frame sent where it lies, no copy. */
-#define OS_API_MINOR 9
+/* 2.10 (2026-11-08): volume_register, after ui_present: a volume of the app's
+ * own in the quick panel's Sound page (os/audio.h). Older apps get one
+ * too: audio_play uses a tag under the app's name, and VOL_APP from an app
+ * means its own. */
+#define OS_API_MINOR 10
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -335,6 +339,11 @@ struct os_api {
     bool (*app_reload)(const char *arg);
     bool (*ui_present)(const uint16_t *px);
 
+    /* 2.10: a volume of the app's own under this name, listed from now on
+     * and used for its audio_play; returns the category for volume_level,
+     * volume_set and volume_use. A second name is a second tag: volume_use
+     * picks which audio_play takes. Not needed just to have one. */
+    int (*volume_register)(const char *name);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */
@@ -355,6 +364,9 @@ thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *
 /* Read only the header (for listings); 0, or -1 when it is not an app. */
 int app_peek(const char *path, app_file_t *out);
 const char *app_name(const app_t *a);
+int app_volume_cat(void);               /* the volume the calling app plays at */
+int app_volume_register(const char *name);
+void app_volume_choose(int cat);        /* a tag: its next audio_play takes it */
 /* The icon an app declared (API 2.3 and later), read from its file. */
 bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out);
 /* Unload the apps that have no screen on the stack (the UI loop calls it). */

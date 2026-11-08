@@ -100,6 +100,11 @@ void timer_restart(uint32_t cycles)
     cur = low = cycles;
 }
 
+void timer_skip(uint32_t cycles)
+{
+    base += cycles;
+}
+
 uint32_t timer_load(void)
 {
     return period;

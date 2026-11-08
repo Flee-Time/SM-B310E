@@ -369,6 +369,50 @@ udelay:
 boot_control:                   /* the CP15 control register at entry */
     .space  4
 
+/* ---- the stop of a sleep (sleep.c) ----------------------------------------
+ * Copied to IRAM and run there, interrupts off, no PSRAM access. r0: 0 the
+ * system may stop (once the memory controller is idle, a bounded wait; stock
+ * waits for ever), 1 the core only. Stock's sequence (NOR 0x12e1c4). The WFI
+ * is ours: on the chip the wake's line is pending, so it passes at once;
+ * QEMU does not model the stop bit and waits there. */
+    .section .text.sleep_stop, "ax", %progbits
+    .global sleep_stop_code
+    .global sleep_stop_end
+sleep_stop_code:
+    mov     r1, #0
+    mcr     p15, 0, r1, c7, c10, 4      /* drain the write buffer */
+    cmp     r0, #0
+    bne     3f
+    ldr     r1, =0x20000008
+    mov     r2, #0x10000
+1:  ldr     r3, [r1]
+    tst     r3, #4
+    beq     2f
+    subs    r2, r2, #1
+    bne     1b
+2:  ldr     r1, =0x205000d4
+    ldr     r3, [r1]
+    orr     r3, r3, #0x18
+    str     r3, [r1]
+3:  mov     r1, #0x20
+4:  subs    r1, r1, #1
+    bne     4b
+    ldr     r1, =0x205000d0
+    ldr     r3, [r1]
+    orr     r3, r3, #2
+    str     r3, [r1]
+    nop
+    nop
+    nop
+    mov     r1, #0x20
+5:  subs    r1, r1, #1
+    bne     5b
+    mov     r1, #0
+    mcr     p15, 0, r1, c7, c0, 4
+    bx      lr
+    .ltorg
+sleep_stop_end:
+
 /* ---- chain to another image (arch_chain, power.c) -----------------------
  * Copied to IRAM and run there: r0 the image, r1 its bytes (a multiple of
  * 4), r2 where it goes and is entered (0x04000000, over this OS). The

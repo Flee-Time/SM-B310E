@@ -10,11 +10,34 @@
 #include "os/art.h"
 #include "apps/wavio.h"
 
-/* PCM playback for apps: at the apps' volume */
+/* PCM playback for apps: each at its own volume */
 static int app_audio_play(unsigned rate, audio_fill_fn fill, void *ctx)
 {
-    volume_use(VOL_APP);
+    volume_use(app_volume_cat());
     return audio_play(rate, fill, ctx);
+}
+
+/* VOL_APP from an app is its own (so its keys never move the others') */
+static int own_cat(int cat)
+{
+    return cat == VOL_APP ? app_volume_cat() : cat;
+}
+
+static int app_volume_level(int cat)
+{
+    return volume_level(own_cat(cat));
+}
+
+static void app_volume_set(int cat, int level)
+{
+    volume_set(own_cat(cat), level);
+}
+
+static void app_volume_use(int cat)
+{
+    cat = own_cat(cat);
+    app_volume_choose(cat);
+    volume_use(cat);
 }
 
 void *app_malloc(size_t size);
@@ -118,9 +141,9 @@ const os_api_t os_api = {
     .power_off = ui_power_off,
     .reboot = ui_reboot,
     .fs_info = fs_info,
-    .volume_level = volume_level,
-    .volume_set = volume_set,
-    .volume_use = volume_use,
+    .volume_level = app_volume_level,
+    .volume_set = app_volume_set,
+    .volume_use = app_volume_use,
     .audio_play = app_audio_play,
     .audio_play_stop = audio_play_stop,
     .audio_playing = audio_playing,
@@ -207,4 +230,5 @@ const os_api_t os_api = {
     .app_dir = app_dir,
     .app_reload = app_reload,
     .ui_present = ui_present,
+    .volume_register = app_volume_register,
 };

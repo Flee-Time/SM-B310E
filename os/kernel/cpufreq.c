@@ -42,6 +42,7 @@ void cpufreq_window(uint32_t busy)
 {
     int l = clock_level(), want = l;
 
+    clock_account();
     if (!clock_scalable())
         return;
     if (busy > 700) {
@@ -59,6 +60,11 @@ void cpufreq_window(uint32_t busy)
         quiet = 0;
     }
     apply(want);
+}
+
+int cpufreq_holds(void)
+{
+    return holds;
 }
 
 void cpufreq_set_mode(int m)

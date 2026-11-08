@@ -39,6 +39,7 @@ typedef struct {
     uint32_t ui_light;              /* 0 on, 1 dim, 2 dark (panel asleep) */
     uint32_t apps_loaded;           /* loadable apps in memory */
     uint32_t cpu_mhz;               /* the CPU clock now */
+    uint32_t audio_icon;            /* the status bar: 0 speaker, 1 headphones, 2 headset, 3 muted */
 } os_status_t;
 
 extern volatile os_status_t os_status;

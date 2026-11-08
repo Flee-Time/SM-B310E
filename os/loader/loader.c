@@ -24,6 +24,7 @@ struct app {
     char dir[96];                       /* the folder its .app is in (2.6) */
     char path[96];                      /* its .app */
     bool reload;                        /* load it again once it has gone (2.7) */
+    int vol_cat;                        /* its volume tag (2.10); 0: none yet */
     char *reload_arg;
 };
 
@@ -204,6 +205,41 @@ bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out)
 const char *app_name(const app_t *a)
 {
     return a->name;
+}
+
+/* ---- per-app volume (2.10) ----------------------------------------------- */
+static const icon_t *own_icon(const app_t *a)
+{
+    return a->info->api_minor >= 3 ? a->info->icon : NULL;
+}
+
+int app_volume_cat(void)
+{
+    app_t *a = app_self();
+
+    if (!a)
+        return VOL_APP;
+    if (!a->vol_cat)
+        a->vol_cat = volume_tag(a->name, own_icon(a));
+    return a->vol_cat;
+}
+
+int app_volume_register(const char *name)
+{
+    app_t *a = app_self();
+    int cat = volume_tag(name, a ? own_icon(a) : NULL);
+
+    if (a && !a->vol_cat)
+        a->vol_cat = cat;
+    return cat;
+}
+
+void app_volume_choose(int cat)
+{
+    app_t *a = app_self();
+
+    if (a && cat >= VOL_COUNT)
+        a->vol_cat = cat;
 }
 
 static void unload(app_t *a)

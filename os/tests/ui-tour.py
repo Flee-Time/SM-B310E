@@ -30,7 +30,7 @@ symbol, status, string, free_port = boot['symbol'], boot['status'], boot['string
 MENU, SETTINGS = boot['MENU'], boot['SETTINGS']
 MODULES = ['alarm', 'calc', 'notes', 'radio', 'recorder', 'stopwatch']
 APPS = ['Alarm', 'Calculator', 'Notes', 'FM radio', 'Recorder', 'Stopwatch']   # the card's order
-TOOLS = ['Torch', 'SIM cards', 'USB', 'DSP boot']
+TOOLS = ['Torch', 'SIM cards', 'USB', 'DSP boot', 'Sleep test']
 
 
 def main():

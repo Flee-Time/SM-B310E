@@ -9,9 +9,10 @@
 #include "os/ui.h"
 #include "os/usb.h"
 
-enum { T_TORCH, T_SIM, T_USB, T_DSP, T_COUNT };
+enum { T_TORCH, T_SIM, T_USB, T_DSP, T_SLEEP, T_COUNT };
 
 screen_t *app_dspboot(void);        /* apps/dspboot.c */
+void app_sleep_test(void);          /* apps/sleeptest.c */
 
 static list_t list;
 
@@ -30,13 +31,16 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     case T_DSP:
         snprintf(text, (size_t)tn, "DSP boot");
         break;
+    case T_SLEEP:
+        snprintf(text, (size_t)tn, "Sleep test");
+        break;
     }
 }
 
 static const icon_t *tool_icon(void *ctx, int i)
 {
     static const icon_t *const icons[] = {
-        &icon_torch, &icon_sim, &icon_usb, &icon_cpu,
+        &icon_torch, &icon_sim, &icon_usb, &icon_cpu, &icon_power,
     };
 
     return icons[i];
@@ -67,6 +71,8 @@ static void key(screen_t *s, const key_event_t *ev)
             ui_push(app_usb_menu());
         } else if (list.sel == T_DSP) {
             ui_push(app_dspboot());
+        } else if (list.sel == T_SLEEP) {
+            app_sleep_test();
         }
     } else if (ev->code == KEY_RSOFT) {
         ui_pop();

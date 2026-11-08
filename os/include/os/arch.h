@@ -67,6 +67,8 @@ int clock_level(void);
 int clock_mhz(void);
 int clock_level_mhz(int level);
 void clock_set_level(int level);
+void clock_account(void);           /* irqs off: count the time at this level */
+uint32_t clock_level_ms(int level); /* ms at that level since start */
 
 /* ---- analog die through the ADI mailbox (arch/sc6530c/adi.c) ----------- */
 uint32_t adi_read(uint32_t addr);
@@ -77,6 +79,16 @@ bool adi_write(uint32_t addr, uint32_t value);
 void timer_init(unsigned hz, void (*tick)(void));
 uint32_t timer_count(void);         /* the tick's 26 MHz down-counter */
 uint32_t timer_cycles(void);        /* 26 MHz cycles since start (irqs off) */
+void timer_skip(uint32_t cycles);   /* time that passed with the timer stopped */
+
+/* Chip sleep (arch/sc6530c/sleep.c) */
+#define SLEEP_DCXO_ID 0x1130c000u   /* this phone's analog die */
+uint32_t sleep_analog_id(void);
+void sleep_chip_init(void);         /* at boot: nothing playing; it waits */
+void sleep_stop(int level);         /* 0 the system may stop, 1 the core only */
+uint32_t sleep_counter_ms(void);    /* runs on through a sleep */
+void sleep_timer_start(uint32_t ms);
+uint32_t sleep_timer_stop(void);
 void timer_restart(uint32_t cycles);    /* a new period from now (irqs off) */
 uint32_t timer_load(void);          /* its reload value */
 uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */

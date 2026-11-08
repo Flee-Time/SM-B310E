@@ -279,7 +279,7 @@ def main():
         key('left', 'Quick panel')
         key('ret', 'Quick panel')                             # Pause
         result['panel_pause'] = state_is(3)
-        key('down', 'Quick panel')                            # Music volume
+        key('down', 'Quick panel')                            # Sound
         shot('panel-volume')
         key('f2', 'B310E OS')                                 # Close
         key('ret', 'Menu')                                    # a short press still opens the Menu

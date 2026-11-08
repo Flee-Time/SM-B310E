@@ -64,6 +64,7 @@ bool notify_owned(const void *app);     /* the loader keeps such an app */
 void notify_drop_owner(const void *app);    /* an app unloaded anyway */
 void notify_run(notify_t *n, int action);   /* n->act as its app */
 screen_t *ui_panel(void);               /* ui/panel.c */
+screen_t *ui_sound(void);               /* its Sound page: every volume */
 void ui_panel_host(screen_t *s);        /* held Center there opens the panel */
 
 #endif

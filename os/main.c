@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
+#include "os/dsp.h"
 #include "os/drivers.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -49,6 +50,7 @@ void kmain(void)
     dma_quiesce();                      /* channels left by the firmware before
                                          * us wrote into our memory */
     clock_init();
+    dsp_hold_reset();                   /* unused: its boot ROM need not run */
     torch_set(false);                   /* the pin set up once, as Rockbox does
                                          * in power_init: the first toggle was
                                          * lost on the phone otherwise */
@@ -64,6 +66,7 @@ void kmain(void)
 
     timer_init(1000, kernel_tick);
     keypad_init();
+    sleep_chip_init();                  /* the chip's power set-up, as stock's boot */
     thread_create("ui", PRIO_NORMAL, 6144, main_thread, NULL);
     kernel_start();
 }

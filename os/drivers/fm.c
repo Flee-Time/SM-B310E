@@ -465,7 +465,6 @@ int fm_on(void)
 
     if (!fm_present())
         return -1;
-    volume_use(VOL_MUSIC);              /* the radio is listened to as music */
     mutex_lock(&lock, WAIT_FOREVER);
     if (!is_on) {
         if (power_up()) {
@@ -525,6 +524,11 @@ void fm_off(void)
     }
     mutex_unlock(&lock);
     audio_power(false);
+}
+
+bool fm_muted(void)
+{
+    return is_on && muted;
 }
 
 bool fm_is_on(void)

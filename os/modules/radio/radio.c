@@ -3,7 +3,7 @@
  *
  * Keys: Left/Right tune 100 kHz, Up/Down seek (a channel per tick, so the
  * UI never waits; any key stops it), Center mute, * and # (or the headset's
- * - and +) the music volume, 1..9 the presets, LSoft the menu: record
+ * - and +) its volume, 1..9 the presets, LSoft the menu: record
  * the radio to a WAV (32 kHz), the presets, save one, turn the radio off.
  * RSoft goes back and the radio plays on (a recording too).
  *
@@ -151,21 +151,23 @@ static void tune(int khz)
     state = NULL;
 }
 
+static int vol_cat;                     /* "FM radio" in the Sound page */
+
 static void change_volume(int d)
 {
-    int v = volume_level(VOL_MUSIC) + d;
+    int v = volume_level(vol_cat) + d;
 
     if (v < 0 || v > VOL_LEVELS)
         return;
-    volume_use(VOL_MUSIC);
-    volume_set(VOL_MUSIC, v);
+    volume_use(vol_cat);
+    volume_set(vol_cat, v);
 }
 
 static void draw(screen_t *s)
 {
     char buf[32];
     int f = fm_frequency(), x = UI_PAD, w = LCD_WIDTH - 2 * UI_PAD, p = preset_of(f);
-    int vol = volume_level(VOL_MUSIC);
+    int vol = volume_level(vol_cat);
 
     labels(s);
     snprintf(buf, sizeof(buf), "%d.%d", f / 1000, f % 1000 / 100);
@@ -217,6 +219,7 @@ static void tick(screen_t *s)
         bool was_on = fm_is_on();
 
         starting = false;
+        volume_use(vol_cat);
         state = !fm_present() ? "no tuner found" : fm_on() ? "tuner did not start" : NULL;
         if (!state && !was_on && saved_freq)
             fm_tune(saved_freq);
@@ -450,6 +453,7 @@ static screen_t screen = {
 static screen_t *start(void)
 {
     conf_load();
+    vol_cat = volume_register("FM radio");
     seek_dir = 0;
     muted = false;
     rssi = -1;

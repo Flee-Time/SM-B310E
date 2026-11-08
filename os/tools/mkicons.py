@@ -224,6 +224,26 @@ def speaker(d):
     d.arc(P(6, 3.5, 12, 10.5), start=-60, end=60, fill=255, width=round(1.2 * S))
 
 
+def speaker_off(d):
+    d.polygon([tuple(P(*p)) for p in ((1, 5), (4, 5), (7.5, 2), (7.5, 12), (4, 9), (1, 9))], fill=255)
+    line(d, [(9.2, 5.2), (13, 9)], 1.3)
+    line(d, [(13, 5.2), (9.2, 9)], 1.3)
+
+
+def headphones(d):
+    d.arc(P(2, 1.5, 12, 11.5), start=180, end=360, fill=255, width=round(1.4 * S))
+    rrect(d, 1.2, 6.5, 3.9, 12, 1)
+    rrect(d, 10.1, 6.5, 12.8, 12, 1)
+
+
+def headset(d):
+    d.arc(P(2, 0.5, 12, 10.5), start=180, end=360, fill=255, width=round(1.4 * S))
+    rrect(d, 1, 4.5, 3.9, 9, 1)
+    rrect(d, 10.1, 4.5, 13, 9, 1)
+    line(d, [(2.4, 9), (2.4, 11), (6, 11.6)], 1.2)
+    d.ellipse(P(5.8, 10.2, 8.8, 13), fill=255)
+
+
 def card(d):
     d.polygon([tuple(P(*p)) for p in ((3, 1), (9.5, 1), (12, 3.5), (12, 13), (3, 13))], fill=255)
     for x in (5, 7, 9):
@@ -232,7 +252,7 @@ def card(d):
 
 ICONS = [apps, folder, file, music, radio, tools, chart, gear, power, torch, vibrate,
          sim, usb, clock, sun, screen, cpu, info, play, record, mic, restart,
-         calc, notes, alarm, dot_on, dot_off, speaker, card]
+         calc, notes, alarm, dot_on, dot_off, speaker, card, speaker_off, headphones, headset]
 
 
 def main():

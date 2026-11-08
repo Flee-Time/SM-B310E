@@ -1,6 +1,7 @@
 /* B310E OS — WAV playback and recording through a ring buffer (wavio.h).
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include "os/app.h"
 #include "os/audio.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -159,7 +160,7 @@ const char *wav_play_file(const char *path)
     total_bytes = 0;
     snprintf(name, sizeof(name), "%s", path);
     refill();
-    volume_use(VOL_APP);                /* recordings play at the apps' level */
+    volume_use(app_volume_cat());       /* the Recorder's own level */
     if (audio_play(rate, fill, NULL)) {
         wav_stop();
         return "audio did not start";

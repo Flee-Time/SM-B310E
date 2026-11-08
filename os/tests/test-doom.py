@@ -265,6 +265,9 @@ def main():
         time.sleep(0.8)
         chord('Quick panel')
         shot('doom-panel')
+        # its sound, started on its own thread, has a volume of its own
+        result['volume_tag'] = string(qt, symbol(elf, 'tags'))
+        assert result['volume_tag'] == 'Doom', result
         stopped = settled()                                   # not walking on
         time.sleep(1.0)
         result['panel_still'] = [stopped, (var('viewx'), var('viewy'))]
@@ -278,6 +281,10 @@ def main():
         key('f1')
         wait_for(qt, base, lambda s: string(qt, s['ui_title']) == 'Apps', 20, 'not back in Apps')
         wait_for(qt, base, lambda s: s['apps_loaded'] == 0, 10, 'Doom still loaded')
+        # The game's sound left the codec on until power-off once: off after 5 s
+        time.sleep(7)
+        assert qt.read(symbol(elf, 'initialized')) & 0xff == 0, 'codec still on after the game'
+        assert qt.read(symbol(elf, 'holds')) == 0, 'the clock still held after the game'
         time.sleep(1.5)
         result['heap_after'] = status(qt, base)['heap_free']
         shot('doom-after')

@@ -81,7 +81,8 @@ extern const icon_t icon_apps, icon_folder, icon_file, icon_music, icon_radio,
     icon_tools, icon_chart, icon_gear, icon_power, icon_torch, icon_vibrate,
     icon_sim, icon_usb, icon_clock, icon_sun, icon_screen, icon_cpu, icon_info,
     icon_play, icon_record, icon_mic, icon_restart,
-    icon_calc, icon_notes, icon_alarm, icon_dot_on, icon_dot_off, icon_speaker, icon_card;
+    icon_calc, icon_notes, icon_alarm, icon_dot_on, icon_dot_off, icon_speaker, icon_card,
+    icon_speaker_off, icon_headphones, icon_headset;
 
 /* ---- screens (ui/ui.c) -------------------------------------------------- */
 typedef struct screen screen_t;

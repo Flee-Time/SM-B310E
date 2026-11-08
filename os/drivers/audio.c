@@ -15,6 +15,7 @@
  */
 #include "os/arch.h"
 #include "os/audio.h"
+#include "os/fs.h"
 #include "os/drivers.h"
 #include "os/kernel.h"
 #include "drivers/audio_internal.h"
@@ -30,7 +31,7 @@ static bool force_speaker;              /* the speaker even with headphones in *
 static uint16_t rec_mic_path;           /* +0x64 bits: 0xc0 phone, 0x0c headset */
 static bool rec_fm_mix;
 static unsigned current_rate = 44100;
-static int volume = -200;               /* tenths of a dB, -1000 = mute */
+static int codec_db10 = -200;               /* tenths of a dB, -1000 = mute */
 static int mic_gain = 10, line_gain[2] = { 8, 8 };
 static int headset_mic_raw = -2;
 static bool hs_powered;                 /* the headset buttons keep the codec on */
@@ -136,19 +137,19 @@ bool audio_rate_ok(unsigned rate)
  * stock PA gain; the rest is digital attenuation in pcm.c. */
 static unsigned headphone_code(void)
 {
-    return 4 + (volume > 0 ? (unsigned)(volume + 29) / 30 : 0);
+    return 4 + (codec_db10 > 0 ? (unsigned)(codec_db10 + 29) / 30 : 0);
 }
 
 static void apply_volume(void)
 {
     int gain = speaker_enabled ? 0 : ((int)headphone_code() - 4) * 30;
-    int digital = volume - gain;
+    int digital = codec_db10 - gain;
 
     if (digital > 0)
         digital = 0;
-    pcm_set_attenuation(volume <= -1000 ? -1000 : digital);
+    pcm_set_attenuation(codec_db10 <= -1000 ? -1000 : digital);
     if (fm_routed)
-        fm_set_volume_db10(volume < 0 ? volume : 0);
+        fm_set_volume_db10(codec_db10 < 0 ? codec_db10 : 0);
     if (!speaker_enabled && initialized)
         adi_update(CODEC + 0x94, 0xff, (uint16_t)(headphone_code() * 0x11));
 }
@@ -310,14 +311,36 @@ static void codec_close(void)
 
 /* ---- the public side ---------------------------------------------------- */
 
+static unsigned idle_seconds;
+
 void audio_power(bool on)
 {
     enter();
-    if (on)
+    if (on) {
+        idle_seconds = 0;               /* its user starts in a moment */
         codec_init();
-    else if (!fm_routed && !recording_on && !pcm_busy() && !hs_powered)
+    } else if (!fm_routed && !recording_on && !pcm_busy() && !hs_powered) {
         codec_close();
+    }
     leave();
+}
+
+/* Nothing else powers the codec off after an app's sound (the app API has
+ * audio_play_stop only) or a pause: on the phone (2026-11-08) a game with sound
+ * left it on until power-off, its rails, bias and DAC, with the 104 MHz floor
+ * it holds, so the screen dark all night stayed at 104 MHz. Waking it again
+ * is what the next audio_play() does anyway. */
+void audio_idle_tick(void)
+{
+    if (!initialized || fm_routed || recording_on || pcm_busy() || hs_powered) {
+        idle_seconds = 0;
+        return;
+    }
+    if (++idle_seconds >= 5) {
+        idle_seconds = 0;
+        klog("audio: unused for 5 s: codec off");
+        audio_power(false);
+    }
 }
 
 /* The headset check needs the mic bias, which needs the codec powered
@@ -351,7 +374,7 @@ void audio_set_volume(int db10)
     enter();
     if (db10 < -1000) db10 = -1000;
     if (db10 > 240) db10 = 240;
-    volume = db10;
+    codec_db10 = db10;
     if (initialized) {
         bool change = !speaker_enabled;
         bool muted = (VBC_DP_CTL & CODEC_MUTE) == CODEC_MUTE;
@@ -369,7 +392,7 @@ void audio_set_volume(int db10)
 
 int audio_get_volume(void)
 {
-    return volume;
+    return codec_db10;
 }
 
 bool audio_speaker(void)
@@ -597,6 +620,16 @@ static uint32_t hs_when, cand_since;
 static bool hook_enabled;
 static int hook_idle, hook_raw = -1;
 static unsigned cand, cand_n, hook_btn;
+static volatile bool hs_idle;           /* screen dark */
+static bool hs_quiet;                   /* buttons off for it: codec, bias off */
+
+/* With the screen dark and nothing to hear, the buttons are not worth the
+ * codec, its bias, the ADC reads and the 104 MHz floor the codec holds. They
+ * come back with the screen, or as soon as something plays. */
+void audio_headset_idle(bool idle)
+{
+    hs_idle = idle;
+}
 
 static int headset_line(void)
 {
@@ -626,6 +659,7 @@ unsigned audio_headset_tick(bool hook, uint32_t now)
         if (hs_state != HS_OUT) {
             hs_state = HS_OUT;
             hook_enabled = false;
+            hs_quiet = false;
             hook_btn = cand = cand_n = 0;
             mic_bias(BIAS_HOOK, false);
             follow_jack(false);
@@ -666,6 +700,24 @@ unsigned audio_headset_tick(bool hook, uint32_t now)
             hook_btn = cand = cand_n = 0;
             break;
         }
+        if (hs_idle && !fm_routed && !pcm_busy()) {
+            if (!hs_quiet) {
+                hs_quiet = true;
+                hook_btn = cand = cand_n = 0;
+                mic_bias(BIAS_HOOK, false);
+                hs_power(false);
+            }
+            break;
+        }
+        if (hs_quiet) {                 /* bias on again: 100 ms to settle */
+            hs_quiet = false;
+            hs_power(true);
+            mic_bias(BIAS_HOOK, true);
+            hs_when = now + 100;
+            break;
+        }
+        if ((int32_t)(now - hs_when) < 0)
+            break;
         {
             unsigned c;
 

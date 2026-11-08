@@ -31,7 +31,7 @@
 
 ui_settings_t ui_settings = {
     60, 30, 0, 1, 0, 7 * 60,
-    { 7, 6, 9, 8, 1 },               /* music, apps, alarm, calls; tactile light */
+    VOL_DEFAULTS,
     1, 0,
     0, 1,                            /* UTC until set; the clock from the network */
 };
@@ -283,6 +283,21 @@ int ui_depth(void)
 
 /* ---- drawing --------------------------------------------------------------- */
 
+/* 0 speaker, 1 headphones, 2 headset with a mic, 3 muted. Muted is the level
+ * of what is playing, or with nothing playing the music's, or the radio's
+ * own mute. */
+static int audio_status_icon(void)
+{
+    audio_headset_info_t h;
+
+    if (volume_level(volume_current()) == 0 || fm_muted())
+        return 3;
+    if (audio_forced_speaker() || !audio_headphones())
+        return 0;
+    audio_headset_info(&h);
+    return h.buttons ? 2 : 1;
+}
+
 static void draw_status(void)
 {
     char buf[16];
@@ -323,6 +338,16 @@ static void draw_status(void)
     if (torch_get()) {                  /* a lit square */
         x -= 8;
         gfx_fill(x, (UI_STATUS_H - 4) / 2, 4, 4, C_WARN);
+    }
+    {                                   /* where the sound goes, or muted */
+        int a = audio_status_icon();
+        static const icon_t *const icons[] = {
+            &icon_speaker, &icon_headphones, &icon_headset, &icon_speaker_off,
+        };
+
+        os_status.audio_icon = (uint32_t)a;
+        x -= ICON_SIZE + 2;
+        gfx_icon(x, 0, icons[a], a == 3 ? C_WARN : C_DIM);
     }
     {                                   /* the notifications' icons after the time */
         int ix = UI_PAD + 2 + gfx_text_width("00:00", FONT_SMALL, 1) + 5;
@@ -412,6 +437,7 @@ void ui_power_off(void)
 {
     splash("Powering off");
     klog("power off");
+    volume_save();
     rtc_save();
     fs_sync();
     thread_sleep(300);
@@ -528,6 +554,7 @@ void ui_reboot(void)
 {
     splash("Restarting");
     klog("reboot to the boot menu");
+    volume_save();
     rtc_save();
     fs_sync();
     thread_sleep(300);
@@ -566,9 +593,11 @@ static void set_light(int level)
         backlight_set(0);
         keylight_set(false);
         lcd_sleep();
+        audio_headset_idle(true);
         return;
     }
     if (light == 2) {
+        audio_headset_idle(false);
         light = level;
         redraw();                       /* the frame the panel wakes to */
         lcd_wake();
@@ -714,8 +743,11 @@ static bool chord(const key_event_t *ev, uint32_t now)
     center_down = zero_down = 0;
     if (top_mode() & UI_MODE_RAW_KEYS)
         raw_release_all(s, now);        /* the first of the two, and the rest */
-    if (s == ui_panel()) {
-        ui_pop();
+    if (s == ui_panel() || s == ui_sound()) {
+        if (s == ui_sound())
+            ui_pop();
+        if (stack[depth - 1] == ui_panel())
+            ui_pop();
     } else {
         ui_buzz(4, 40);
         ui_push(ui_panel());
@@ -815,14 +847,30 @@ static void drain_log(uint32_t now)
 {
     rtc_datetime_t t;
     uint32_t load = 1000 - kernel_idle_permille();
+    static uint32_t last_ms[CLOCK_LEVELS], last_irqs, last_now;
+    uint32_t pct[CLOCK_LEVELS], span = 0, irqs = irq_count;
 
+    for (int i = 0; i < CLOCK_LEVELS; i++) {
+        uint32_t ms = clock_level_ms(i);
+
+        pct[i] = ms - last_ms[i];
+        last_ms[i] = ms;
+        span += pct[i];
+    }
+    for (int i = 0; i < CLOCK_LEVELS; i++)
+        pct[i] = span ? (uint32_t)((uint64_t)pct[i] * 100 / span) : 0;
     rtc_get(&t);
-    klog("battery: %d mV %d%%%s, load %lu.%lu%%, %d MHz, screen %s, rtc %02d:%02d:%02d, up %lu s",
+    klog("battery: %d mV %d%%%s, load %lu.%lu%%, %d MHz, 26/104/208 MHz %lu/%lu/%lu%%, "
+         "holds %d, %lu irqs/s, screen %s, rtc %02d:%02d:%02d, up %lu s",
          bat_mv, battery_percent(bat_mv),
          charging == CHARGE_CHARGING ? ", charging" : charging == CHARGE_DONE ? ", charged" : "",
          (unsigned long)(load / 10), (unsigned long)(load % 10), clock_mhz(),
+         (unsigned long)pct[0], (unsigned long)pct[1], (unsigned long)pct[2], cpufreq_holds(),
+         (unsigned long)((irqs - last_irqs) / ((now - last_now) / 1000u + 1u)),
          light == 0 ? "on" : light == 1 ? "dim" : "dark", t.hour, t.min, t.sec,
          (unsigned long)(now / 1000));
+    last_irqs = irqs;
+    last_now = now;
 }
 
 static void every_second(uint32_t now)
@@ -835,13 +883,16 @@ static void every_second(uint32_t now)
     alarm_check(h, m);
     usb_auto_tick();
     notify_tick();
+    audio_idle_tick();
+    volume_save();
     if (n % 30 == 0) {                  /* the ADC is slow: twice a minute */
         charging = charge_state();
         bat_mv = battery_mv();
         os_status.battery_mv = (uint32_t)bat_mv;
     }
-    if (n && n % 600 == 0)              /* the drain log: every 10 minutes
-                                         * (not at boot: its load is boot work) */
+    if (n == 180 || (n && n % 600 == 0)) /* the drain log: at 3 minutes, then
+                                         * every 10 (not at boot: its load is
+                                         * boot work) */
         drain_log(now);
     if (n && n % 600 == 0)
         rtc_save();
@@ -892,6 +943,7 @@ void ui_run(screen_t *home)
     thread_owned_exit = app_thread_ended;
 
     settings_load();
+    volume_load();
     rtc_restore();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
     kernel_set_tickless(ui_settings.deep_idle);

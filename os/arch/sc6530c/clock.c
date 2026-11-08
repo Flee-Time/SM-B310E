@@ -38,6 +38,8 @@ static const struct {
 
 uint32_t udelay_shift = 6;
 static int level = -1;                  /* -1: unknown boot clock, fixed */
+static uint64_t level_cycles[CLOCK_LEVELS];
+static uint32_t level_mark;
 
 static void settle(void)
 {
@@ -104,6 +106,28 @@ int clock_level_mhz(int l)
     return levels[l].mhz;
 }
 
+/* Time at each speed, for the drain log. The governor's window calls this
+ * often enough that the 32-bit cycle count cannot wrap between calls. */
+void clock_account(void)
+{
+    uint32_t now = timer_cycles();
+
+    if (level >= 0)
+        level_cycles[level] += now - level_mark;
+    level_mark = now;
+}
+
+uint32_t clock_level_ms(int l)
+{
+    uint32_t s = arch_irq_save();
+    uint64_t c;
+
+    clock_account();
+    c = level_cycles[l];
+    arch_irq_restore(s);
+    return (uint32_t)(c / (TIMER_HZ / 1000u));
+}
+
 void clock_set_level(int to)
 {
     uint32_t s;
@@ -111,6 +135,7 @@ void clock_set_level(int to)
     if (level < 0 || to < 0 || to >= CLOCK_LEVELS || to == level)
         return;
     s = arch_irq_save();
+    clock_account();
     while (level != to)
         step(level < to ? level + 1 : level - 1);
     arch_irq_restore(s);

@@ -177,6 +177,9 @@ def main():
             wait_for(qt, base, lambda s: s['ui_depth'] == 1, 60, 'no UI')
             t0 = time.monotonic()
             time.sleep(1.5)                     # the headset check: 400 ms
+            # the status bar's symbol: a headset with a mic
+            s = wait_for(qt, base, lambda s: s['audio_icon'] == 2, 3, 'no headset symbol')
+            result['status_icon_headset'] = s['audio_icon']
 
             # headset centre button
             qmp.hmp('sendkey h 300')
@@ -284,6 +287,8 @@ def main():
             radio_option('Use speaker')
             time.sleep(0.3)
             result['speaker_forced'] = flag(s_speaker)
+            s = wait_for(qt, base, lambda s: s['audio_icon'] == 0, 3, 'no speaker symbol')
+            result['status_icon_forced'] = s['audio_icon']
             shot('radio-speaker')
             radio_option('Use speaker')         # "Use headphones" in its place
             time.sleep(0.3)
@@ -370,10 +375,14 @@ def main():
     result['fm_log'] = 'fm: ' + fm_lines[0]
     assert 'present 1' in result['fm_log'], result
 
-    # the music volume one down (7 -> 6), the preset kept
+    # the radio's own volume one down (from the Apps level, 6), the music's
+    # left alone, the Recorder's tag as well; the preset kept
     settings = (card_file(image, '/b310e-os/settings.txt') or b'').decode().splitlines()
     result['vol_music'] = [l for l in settings if l.startswith('vol_music')]
-    assert result['vol_music'] == ['vol_music=6'], result
+    assert result['vol_music'] in ([], ['vol_music=7']), result     # no change: no file
+    tags = (card_file(image, '/b310e-os/volumes.txt') or b'').decode().splitlines()
+    result['volumes'] = [(l.split(' ', 2)[0], l.split(' ', 2)[2]) for l in tags]
+    assert ('5', 'FM radio') in result['volumes'] and ('6', 'Recorder') in result['volumes'], result
     radio = (card_file(image, '/b310e-os/radio.txt') or b'').decode().splitlines()
     result['radio_file'] = radio
     assert f'p1={result["station_khz"]}' in radio and f'freq={result["station_khz"]}' in radio, result

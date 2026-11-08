@@ -43,7 +43,7 @@ spec.loader.exec_module(capture)
 FIELDS = ('magic ticks idle_permille selftest_done selftest_pass pi_wait_ms '
           'sem_rounds_per_s keys last_key worker_loops heap_free stray_irqs cycles idle_cycles '
           'sd_code fs_mounted fs_free_kib sd_retries sd_failures fs_write_kib_per_s '
-          'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz').split()
+          'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz audio_icon').split()
 MAGIC = 0x534f3342
 MENU = ['Apps', 'Files', 'Tools', 'System', 'Settings', 'Power']
 SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'USB', 'Storage', 'About']

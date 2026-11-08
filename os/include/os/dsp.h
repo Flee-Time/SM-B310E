@@ -57,6 +57,9 @@ extern volatile dsp_info_t dsp_info;
 
 int dsp_boot(void);             /* DSP_OK or an error; holds 104 MHz+ */
 void dsp_stop(void);            /* reset held, interrupt off, clock released */
+void dsp_hold_reset(void);      /* at boot: the OS does not use the DSP. The chip
+                                 * lets it go at power-on, and nobody else stops
+                                 * its boot ROM. dsp_boot() releases it again. */
 const char *dsp_strerror(int err);
 
 /* ---- layer 1, receive only ---------------------------------------------- */

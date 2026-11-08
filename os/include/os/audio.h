@@ -17,6 +17,7 @@
 
 /* ---- codec (drivers/audio.c) -------------------------------------------- */
 void audio_power(bool on);          /* off only when nothing uses it */
+void audio_idle_tick(void);         /* once a second: off when unused for 5 s */
 bool audio_rate_ok(unsigned rate);  /* 8000 .. 96000, the codec's list */
 void audio_set_rate(unsigned rate);
 void audio_set_volume(int db10);    /* tenths of a dB, -1000 (mute) .. 240 */
@@ -48,19 +49,42 @@ typedef struct {
     unsigned held;                  /* AUDIO_HS_* */
 } audio_headset_info_t;
 void audio_headset_info(audio_headset_info_t *out);
+void audio_headset_idle(bool idle);     /* dark: no codec just for its buttons */
 
 /* ---- volume by category (ui/volume.c) ------------------------------------- */
 /* Each kind of sound has its own level, 0 (mute) .. VOL_LEVELS, kept in the
  * settings; whoever starts a sound says which kind it is (volume_use) and
  * the codec takes that level. VOL_TACTILE is the key feedback's vibration
- * strength, 0 (off) .. 3, not a codec level. */
+ * strength, 0 (off) .. 3, not a codec level.
+ *
+ * Apps have a level each on top of these: a tag, a category numbered from
+ * VOL_COUNT that works in all the calls below. An app gets one under its own
+ * name the first time it plays (so one that makes no sound is not listed),
+ * or sooner, or under a name of its choice, with volume_register (app API
+ * 2.10). Tags are kept in /b310e-os/volumes.txt with the app's icon, so they
+ * stay listed while the app is not loaded. A new one starts at VOL_APP's
+ * level, which is also what plays when the OS itself plays for no app. */
 enum { VOL_MUSIC, VOL_APP, VOL_ALARM, VOL_CALL, VOL_TACTILE, VOL_COUNT };
 #define VOL_LEVELS 10
+#define VOL_DEFAULTS { 7, 6, 9, 8, 1 }  /* by category; tactile light */
 int volume_level(int cat);
 void volume_set(int cat, int level);    /* saved; heard at once if that kind plays */
 void volume_use(int cat);               /* a sound of this kind starts */
 int volume_active(void);                /* the kind playing (last used) */
 int volume_db10(int level);             /* the codec's tenths of a dB for a level */
+int volume_current(void);               /* the kind playing, else music: what the
+                                         * panel's Sound row and the status bar go by */
+int volume_tag(const char *name, const void *icon);     /* found or added; VOL_APP when
+                                                         * full. icon: icon_t, or NULL */
+int volume_tags(void);                  /* how many are listed */
+int volume_tag_at(int i);               /* the i-th of them, as a category */
+void volume_reset(void);                /* every level to its default, the list of apps
+                                         * cleared but for what is playing; an app
+                                         * comes back when it next plays */
+const char *volume_name(int cat);
+const void *volume_icon(int cat);       /* icon_t */
+void volume_load(void);                 /* at boot, after the settings */
+void volume_save(void);                 /* if changed; once a second and before power-off */
 
 /* ---- playback and recording (drivers/pcm.c) ----------------------------- */
 /* Fill up to frames stereo frames (L, R interleaved); return how many were
@@ -87,6 +111,7 @@ bool fm_station(int rssi);          /* strong enough to stop a seek */
 int fm_rssi(void);
 bool fm_stereo(void);
 void fm_mute(bool mute);
+bool fm_muted(void);                /* on, and muted */
 void fm_set_speaker(bool on);       /* the speaker even with the headset in */
 bool fm_speaker(void);
 

@@ -128,6 +128,7 @@ void kernel_irq_exit(void);
 void kernel_tick(void);
 void kernel_irq_entry(void);        /* every interrupt, first */
 void kernel_set_tickless(bool on);  /* tickless idle (on by default) */
+int cpufreq_holds(void);            /* holds keeping the clock up (the drain log) */
 
 /* CPU clock governor (kernel/cpufreq.c) */
 enum { CPUFREQ_AUTO, CPUFREQ_MAX };

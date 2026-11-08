@@ -6,7 +6,7 @@
  * saved at once (ui_settings_save) and heard or seen at once.
  *
  *   Display             brightness, screen off after, keypad light
- *   Sound & touch   the volume of music, apps, the alarm, calls; the
+ *   Sound & touch   the volume of music, the alarm, calls, each app; the
  *                       keys' tactile feedback
  *   Power               CPU speed, deep idle
  *   Date & time         (apps/clock.c)
@@ -20,6 +20,7 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
+#include "os/notify.h"
 #include "os/rtc.h"
 #include "os/ui.h"
 #include "build_info.h"
@@ -113,6 +114,11 @@ static void set_tactile(int v)
     }
 }
 
+static void open_app_volumes(void)
+{
+    ui_push(ui_sound());
+}
+
 static const char *const cpu_names[] = { "Auto", "Always 208 MHz" };
 static int get_cpu(void) { return ui_settings.cpu_max; }
 static void set_cpu(int v)
@@ -200,10 +206,11 @@ static const setting_t display_rows[] = {
 };
 static const setting_t sound_rows[] = {
     { .name = "Music", .icon = &icon_music, .kind = S_PICK, .options = volume_names, .n = 11, .get = get_vol_music, .set = set_vol_music },
-    { .name = "Apps", .icon = &icon_apps, .kind = S_PICK, .options = volume_names, .n = 11, .get = get_vol_app, .set = set_vol_app },
+    { .name = "Other apps", .icon = &icon_apps, .kind = S_PICK, .options = volume_names, .n = 11, .get = get_vol_app, .set = set_vol_app },
     { .name = "Alarm", .icon = &icon_alarm, .kind = S_PICK, .options = volume_names, .n = 11, .get = get_vol_alarm, .set = set_vol_alarm },
     { .name = "Calls", .icon = &icon_sim, .kind = S_PICK, .options = volume_names, .n = 11, .get = get_vol_call, .set = set_vol_call },
     { .name = "Tactile", .icon = &icon_vibrate, .kind = S_PICK, .options = tactile_names, .n = 4, .get = get_tactile, .set = set_tactile },
+    { .name = "Each app", .icon = &icon_speaker, .kind = S_ACTION, .act = open_app_volumes },
 };
 static const setting_t power_rows[] = {
     { .name = "CPU speed", .icon = &icon_cpu, .kind = S_PICK, .options = cpu_names, .n = 2, .get = get_cpu, .set = set_cpu },
@@ -295,7 +302,7 @@ static void about(void)
 
 static const category_t categories[] = {
     { .title = "Display", .icon = &icon_screen, .rows = display_rows, .n = 3 },
-    { .title = "Sound & touch", .icon = &icon_speaker, .rows = sound_rows, .n = 5 },
+    { .title = "Sound & touch", .icon = &icon_speaker, .rows = sound_rows, .n = 6 },
     { .title = "Power", .icon = &icon_power, .rows = power_rows, .n = 2 },
     { .title = "Date & time", .icon = &icon_clock, .rows = time_rows, .n = 3 },
     { .title = "USB", .icon = &icon_usb, .rows = usb_rows, .n = 1 },

@@ -37,6 +37,49 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
   it off), END polled every 100 ms with the panel asleep, the charger's
   charging / charged lines in the status bar, and a battery line in the
   card log every 10 minutes.
+- **Deep sleep, in progress** (2026-11-08). On the phone, dark at 0.1% load,
+  the battery fell from 93% to 68% in 10.5 h, about 19 mA from 800 mAh: idle
+  is a WFI with the PLL, the crystal and every rail up. The drain log now has
+  the time at each clock speed, the holds keeping the clock up and interrupts
+  a second. A 4-pole headset no longer keeps the codec, its bias and 104 MHz
+  on while the screen is dark and nothing plays (its buttons are off then).
+  Tools -> Sleep test tries the chip's sleep levels one by one and logs the
+  result (`apps/sleeptest.c`, `arch/sc6530c/sleep.c`); the idle loop does not
+  use them until the phone has shown they work. What the stock firmware does:
+  - the core stops by 0x205000d0 bit 1; with 0x18 in 0x205000d4 the system may
+    stop too. Run from IRAM, interrupts off, no PSRAM command at all;
+  - timer 0 (32768 Hz, 0x81000000, IRQ 4) and the 1 ms counter (0x81003000) run
+    on; timer 2 (26 MHz, our tick) stops, so time must come from the counter;
+  - this board has no 32 kHz crystal. This phone's analog id is 0x1130c000
+    (read 2026-11-08), for which stock forces the oscillator on at boot (NOR
+    0x1a4f4), so the slow clock has a source; `sleep_chip_init()` does the same
+    in the same order, and the test checks the slow clock before going on;
+  - at reset the rails' sleep register 0x82001160 holds 0xfb79, which by the
+    closest chip's names would cut the flash, the oscillator, the SD card and RF
+    in a deep sleep; stock's table (NOR 0xca38c) leaves 0x1340;
+  - on the phone: a core stop woken by timer 0 works (1001 ms, 26 MHz ran), and
+    so does system sleep after the set-up, every step coming back; in system
+    sleep with all clocks open timer 2 still counted the whole second, so
+    26 MHz ran. Timing each wake on a slow timer, no step woke late, with the
+    clocks closed or the DSP held in reset (0 slow ticks late): the oscillator
+    never stops. Stock's sleep path has nothing more; on stock the DSP's own
+    program is running, and the status word's DSP bits never show a stop here;
+  - the DSP's reset is not held after power-on (the word reads 0), and nothing
+    gives its boot ROM a program. The OS now holds it from boot
+    (`dsp_hold_reset()`); `dsp_boot()` releases it. Music, FM and recording work
+    with it held (phone, 2026-11-08). With the program running (booted, not
+    started as layer 1) the oscillator still does not stop, so this phone's
+    deepest sleep so far is the system sleep without it;
+  - a game with sound left the codec on until power-off: `audio_play_stop()`
+    does not power it down and apps cannot. It holds 104 MHz, which is what
+    the log showed all night. `audio_idle_tick()` now powers it off after 5 s
+    unused, a paused track too, and stock's power set-up runs at boot;
+  - stock always boots the DSP; whether a DSP that never ran lets the chip stop
+    is not known. The status words in the test's log (0x20500100, 0x8b000120)
+    should show it.
+- **Status bar**: a symbol for where the sound goes (speaker, headphones, a
+  headset with a mic) or a muted speaker: the level of what is playing, with
+  nothing playing the music's, or the radio's own mute.
 - **More apps** (2026-11-07, in QEMU; not yet on the phone): Calculator,
   Alarm (one daily alarm with snooze; rings while the OS runs), Notes
   (multi-tap text entry), and rename / delete in Files.
@@ -97,12 +140,29 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 - **Quick panel and notifications** (2026-11-07, in QEMU; not yet on the
   phone): Center held on Home or the Menu opens the quick panel: the
   notifications (newest first, up to three buttons each: Left/Right picks,
-  Center presses), then the volumes, tactile feedback, brightness and the
-  torch. Apps post their own (API 2.4, `os/notify.h`); an app with one up
+  Center presses), then Sound, brightness and the torch. Apps post their own (API 2.4, `os/notify.h`); an app with one up
   stays loaded, so its buttons work with no screen of it open. Music posts
   the track with |< Pause >| and its progress, FM radio the station with
   Mute and Turn off, background USB a Stop. Their icons show in the status
   bar. A short Center press on Home and the Menu acts when it is let go.
+- **Sound page and a volume for each app** (2026-11-08, in QEMU; not yet on
+  the phone): the panel's Sound row changes what is playing with Left/Right
+  (nothing playing: the music) and Center opens the page, with every level:
+  music, alarm, calls, tactile, other apps, then one row per app with sound,
+  with its icon. Over a game the page opens on the game's row. Settings ->
+  Sound & touch -> Each app opens the same page.
+
+  An app needs nothing for this: the first `audio_play` makes a tag under its
+  name, at the "Other apps" level, so old builds get one too and an app with
+  no sound is not listed. `volume_register("name")` (API 2.10) lists it from
+  the start or names it itself; FM radio uses it. A tag works in
+  `volume_level`, `volume_set` and `volume_use`, and `VOL_APP` from an app
+  means its own. There is still one level at a time: the codec's, for whoever
+  last started a sound; there is no mixer. `/b310e-os/volumes.txt` keeps the
+  tags ("level icon name" a line, 24 at most, then new apps share "Other
+  apps"). LSoft on the page resets: every level back to its default and the
+  app rows cleared, but for what is playing; an app comes back when it next
+  plays, at the "Other apps" level.
 - **The clock** (2026-11-07, in QEMU; not yet on the phone): the phone's
   RTC read 2015-01-01 after some restarts: a reset (the watchdog's, power
   off) clears it, the stock firmware then boots (no key held) and sets its
@@ -758,6 +818,8 @@ python os/tests/test-audio.py
 python os/tests/test-sim.py
 python os/tests/test-rtc.py --build build/os
 python os/tests/test-tickless.py
+python os/tests/test-sleep.py
+python os/tests/test-volume.py
 python os/tests/test-apps.py
 python os/tests/test-net.py
 ```

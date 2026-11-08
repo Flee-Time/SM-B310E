@@ -436,6 +436,11 @@ int dsp_boot(void)
     return DSP_OK;
 }
 
+void dsp_hold_reset(void)
+{
+    REG32(APB_EB0_SET) = DSP_RESET;
+}
+
 void dsp_stop(void)
 {
     irq_stop();
