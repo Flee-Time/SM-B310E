@@ -11,9 +11,8 @@ for firmware. The native firmware build does not require Bash or Make.
 Arm GNU Toolchain 14.2.Rel1 and 15.3.Rel1 have been tested. The clean Windows
 setup was validated with MSYS2 host GCC 16.2.0 and ARM GCC 15.3.1.
 
-Menu/game/Rockbox builds also need Bash, Make and the standard POSIX tools
-(`sed`, `perl`, `curl`, `tar`). Games need 7-Zip for the pinned
-upstream release binaries. Rockbox needs `zip`. Install these dependencies
+OS and Rockbox builds also need Bash, Make and the standard POSIX tools
+(`sed`, `perl`, `curl`, `tar`). Rockbox needs `zip`. Install these dependencies
 before building; the scripts do not install packages or request elevation.
 
 On Windows, ports use MSYS2. The entry point detects `D:/Toolchains/msys64`
@@ -80,9 +79,8 @@ therefore required for the first build; later invocations reuse the checkout.
 .\build.ps1 doctor               # show detected tools
 .\build.ps1 os                   # B310E OS: sdcard/payloads/b310e-os.bin
 .\build.ps1 boot                 # NOR boot loader: build/boot/b310e-boot.bin (docs/sdboot.md)
-.\build.ps1 games                # all supported game ports from pinned sources
 .\build.ps1 rockbox              # player binary and matching .rockbox runtime
-.\build.ps1 sdcard               # complete card: OS + menu + games + Rockbox
+.\build.ps1 sdcard               # complete card: OS + its apps and games + Rockbox
 .\build.ps1 sd-image             # FAT32 emulator image with stereo test.wav
 .\build.ps1 qemu                # emulator: build/qemu/build/qemu-system-arm.exe
 .\build.ps1 qemu --qemu-headless # smaller build for automated tests
@@ -115,15 +113,13 @@ For Make aliases use `make os`, `make rockbox`, etc. Set `PYTHON` if necessary:
 - `build/os/`: B310E OS objects, ELF, map and image.
 - `build/boot/`: the NOR boot loader (`b310e-boot.bin`) and its QEMU test output.
 - `build/bin/`: the Rockbox package.
-- `build/games/`: build outputs.
-- `build/fpdoom/`, `build/rockbox/`, `build/qemu/`: upstream source/build caches.
+- `build/rockbox/`, `build/qemu/`: upstream source/build caches.
 - `build/logs/`: complete logs, one per target.
 - `build/qemu-desktop/`, `build/qemu-desktop.zip`: portable Windows GUI package.
 - `sdcard/`: generated card staging plus your local music, ROMs and settings.
 
 The upstream revisions are checked before use and existing checkouts are never
-automatically reset: fpdoom `04f19d6d54430693d00029970c51cd988c083b05`,
-Rockbox `ecdeb02dda6dbb94c1c3b01b8406203eda225f9f`, QEMU v11.1.0
+automatically reset: Rockbox `ecdeb02dda6dbb94c1c3b01b8406203eda225f9f`, QEMU v11.1.0
 `84f07211cc5b4fc6a371559bf8a5de4fb068e648`.
 
 Native firmware is compiled fresh each invocation; objects never go into source
@@ -135,12 +131,9 @@ to also remove the three upstream caches inside this checkout's `build/`;
 external `--qemu-source` trees are retained. Rockbox packaging updates runtime
 files without deleting your saved configuration, playlists or music.
 
-All 16 game binaries now compile from pinned source with the B310E save/audio
-overlay. `ports/games/fetch.py` fetches the additional cores, then
-`ports/games/prepare.py` creates an isolated `build/game-ports/` tree. Cached
-upstream sources stay unchanged. Every variant is cleaned before compilation;
-only the declared outputs are staged, so old prebuilt binaries cannot silently
-replace an updated port. See [game controls, data and testing](game-ports.md).
+Games and emulators are apps of B310E OS on its game kit, from pinned upstream
+sources (`os/ports/sources.py` fetches them; `os/README.md` has the controls, the
+data each needs and the tests).
 
 `sd-image` needs the staged menu and Rockbox files. Existing images are protected;
 pass `--force` only when you want to replace the generated image. The image

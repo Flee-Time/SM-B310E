@@ -10,8 +10,7 @@ embedded PSRAM, no Linux, no vendor SDK, no off-the-shelf BSP.
   files; Chocolate Doom is one ([os/README.md, "Doom"](os/README.md#doom);
   in QEMU so far).
 - **A Rockbox port** for music, recording and FM radio.
-- **An SD boot menu** that launches either, the stock firmware, and the
-  fpdoom game ports.
+- **An SD boot menu** that launches either, and the stock firmware.
 
 The low-level code is modeled on
 [fpdoom](https://github.com/ilyakurdyukov/fpdoom)'s public-domain SC6530
@@ -35,9 +34,9 @@ code (Unlicense).
   (B310E OS, Rockbox) and the stock firmware; programs can ask it for the
   menu or a payload across a watchdog reset. It replaced fpdoom's sdboot
   and fpmain menu (2026-11-07).
-- **Ports on the SD card**: fpdoom + chocolate-doom/heretic/hexen, gnuboy,
-  retris, infones, fpsw, fpduke3d, snes9x — and a working **Rockbox port**
-  for the SC6530C.
+- **Games as apps of B310E OS**, from upstream sources: Doom, Heretic and Hexen
+  (Chocolate Doom), Wolfenstein 3D, Duke Nukem 3D, Game Boy and NES emulators,
+  on `os/ports/kit`. And a working **Rockbox port** for the SC6530C.
 - **USB mass storage in Rockbox** (verified on hardware; reads about
   230 KB/s, writes up to about 700 KB/s):
   the SD card appears as a drive on a PC. See [docs/usb.md](docs/usb.md).
@@ -87,16 +86,16 @@ Start with [the build guide](docs/build.md) for dependencies and tool detection.
 .\build.ps1 doctor
 .\build.ps1 os          # B310E OS -> sdcard/payloads/b310e-os.bin
 .\build.ps1 boot        # NOR boot loader -> build/boot/b310e-boot.bin
-.\build.ps1 sdcard      # OS + JSON menu + games + Rockbox runtime
+.\build.ps1 sdcard      # OS + its apps and games + Rockbox runtime
 .\build.ps1 sd-image    # FAT32 emulator image with stereo test audio
 .\build.ps1 qemu        # pinned GTK/SDL desktop emulator and Windows package
 .\build.ps1 clean       # preserves card data and downloaded caches
 ```
 
 On Linux use `bash build.sh <target>`. Individual targets include `os`,
-`boot`, `games` and `rockbox`. All generated
+`boot` and `rockbox`. All generated
 build files stay under `build/`; the scripts stage phone files in `sdcard/`.
-Bring your own game data files (WADs/ROMs/GRPs); the generated game README
+Bring your own game data files (WADs/ROMs/GRPs); [os/README.md](os/README.md)
 explains where they go. Normal builds need no private DSP dump.
 
 ## Testing

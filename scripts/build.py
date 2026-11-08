@@ -9,7 +9,7 @@ import sys
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ('os', 'boot', 'games', 'rockbox', 'qemu', 'sdcard', 'sd-image',
+TARGETS = ('os', 'boot', 'rockbox', 'qemu', 'sdcard', 'sd-image',
            'clean', 'doctor', 'stockram', 'stockram-diag')
 
 
@@ -114,7 +114,7 @@ class Builder:
         shutil.copy2(source, dest)
 
     def target(self, name):
-        if name in ('games', 'rockbox', 'os', 'boot'):
+        if name in ('rockbox', 'os', 'boot'):
             if not self.args.dry_run and (not self.arm or (not self.host and name not in ('os', 'boot'))):
                 raise RuntimeError('ARM and host GCC are required; use --toolchain and --host-cc.')
             if name == 'rockbox' and self.arm and ' ' in str(self.arm):
@@ -130,7 +130,7 @@ class Builder:
                 self.shell('scripts/targets/qemu.sh', 'qemu', str(self.qemu_source), str(self.args.jobs),
                            'headless' if self.args.qemu_headless else 'desktop')
         elif name == 'sdcard':
-            for target in ('os', 'games', 'rockbox'):
+            for target in ('os', 'rockbox'):
                 self.target(target)
             if not self.args.dry_run:
                 for folder in ('doom1', 'doom2', 'duke3d', 'sw', 'heretic', 'hexen', 'wolf3d', 'blood', 'retris', 'snes', 'gameboy', 'nes'):
@@ -150,7 +150,8 @@ class Builder:
             if build_root.is_symlink() or build_root.resolve() != ROOT.resolve() / 'build':
                 raise RuntimeError(f'Refusing to clean redirected build root: {build_root}')
             # bin, firmware and host held the old test OS's output
-            folders = ['os', 'boot', 'bin', 'firmware', 'host', 'fpmain', 'games', 'logs', 'qemu-desktop']
+            folders = ['os', 'boot', 'bin', 'firmware', 'host', 'fpmain', 'games', 'game-ports', 'logs',
+                       'qemu-desktop']
             if self.args.downloads:
                 folders += ['fpdoom', 'rockbox', 'qemu']
             for folder in folders:

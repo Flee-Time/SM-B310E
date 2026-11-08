@@ -92,6 +92,26 @@ CHANGES = {
     'InfoNES.cpp': [
         ('APU_Reg[ 0x4015 ] |= 0x40;', 'APU_Reg[ 0x15 ] |= 0x40;'),
         ('pPoint[ nX ] & 0x8000', 'pPoint[ nX ] & 0x0020'),
+        # A line with no sprite (most are) clears no sprite buffer and walks no 256 pixels
+        ('''    // Reset sprite buffer
+    InfoNES_MemorySet( pSprBuf, 0, sizeof pSprBuf );
+''', ''),
+        ('''      // Holizontal Sprite Count +1
+      ++nSprCnt;
+''', '''      // Holizontal Sprite Count +1
+      if ( !nSprCnt++ )
+        InfoNES_MemorySet( pSprBuf, 0, sizeof pSprBuf );
+'''),
+        ('''    for ( nX = 0; nX < NES_DISP_WIDTH; ++nX )
+    {
+      nSprData = pSprBuf[ nX ];
+''', '''    for ( nX = nSprCnt ? 0 : NES_DISP_WIDTH; nX < NES_DISP_WIDTH; ++nX )
+    {
+      nSprData = pSprBuf[ nX ];
+'''),
+        # Most games' mappers do nothing here: no call for each tile of each line
+        ('void (*MapperPPU)( WORD wAddr );',
+         'void (*MapperPPU)( WORD wAddr );\nvoid Map0_PPU( WORD wAddr );'),
         ('BYTE *ROMBANK0;\nBYTE *ROMBANK1;\nBYTE *ROMBANK2;\nBYTE *ROMBANK3;\n',
          'BYTE *ROMBANK[ 4 ];\n'),
         ('WORD WorkFrame[ NES_DISP_WIDTH * NES_DISP_HEIGHT ];',
@@ -207,7 +227,9 @@ REPLACE_ALL = {
     ] + [(f'event = ApuWriteWave{n}( cycles, event );',
           f'if ( event < cur_event ) event = ApuWriteWave{n}( cycles, event );') for n in range(1, 6)],
     'InfoNES.cpp': [('pPointTop = &WorkFrame[ PPU_Scanline * NES_DISP_WIDTH ];',
-                     'pPointTop = LineBuf[ PPU_Scanline & 1 ];')],
+                     'pPointTop = LineBuf[ PPU_Scanline & 1 ];'),
+                    ('MapperPPU( PATTBL( pbyChrData ) );',
+                     'if ( MapperPPU != Map0_PPU ) MapperPPU( PATTBL( pbyChrData ) );')],
     'K6502.cpp': [('K6502_Read( PC++ )', 'K6502_Fetch()')],
     'InfoNES_Mapper_135.cpp': [('byData%0x07', 'byData&0x07')],
     'InfoNES_Mapper_140.cpp': [('byData%0xF0', 'byData&0xF0')],

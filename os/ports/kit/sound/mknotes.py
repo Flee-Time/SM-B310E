@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The synth's note steps and sine (b310e-notes.h), as ports/games/prepare.py
-makes them for the boot menu's games. SPDX-License-Identifier: GPL-2.0-or-later"""
+"""The synth's note steps and sine (b310e-notes.h).
+SPDX-License-Identifier: GPL-2.0-or-later"""
 import math
 import sys
 

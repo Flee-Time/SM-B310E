@@ -17,6 +17,8 @@
 #include "b310e-mixer.h"
 #include "b310e-music.h"
 
+void kit_log(const char *s);            /* (kit_os.c) */
+
 #define VOICES 8
 
 static void (*callback)(unsigned int);
@@ -240,5 +242,8 @@ void MUSIC_RegisterTimbreBank(unsigned char *timbres) { (void)timbres; }
 
 int MUSIC_PlaySong(void *song, unsigned int length, int loopflag)
 {
-    return b310e_music_start_borrowed(song, length, loopflag != 0) ? MUSIC_Ok : MUSIC_Error;
+    if (b310e_music_start_borrowed(song, length, loopflag != 0))
+        return MUSIC_Ok;
+    kit_log("a song the player did not take");
+    return MUSIC_Error;
 }

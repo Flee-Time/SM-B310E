@@ -26,10 +26,6 @@ tools/stockram/*.bin
 tools/stockram/*.o
 # stock-spy payload build dir
 tools/stock-spy/build/
-# pack_reloc host tool - Linux binary
-tools/pack_reloc/pack_reloc
-# pack_reloc host tool - Windows binary
-tools/pack_reloc/pack_reloc.exe
 # ported menu + game outputs
 # libc_server test-loop runtime dir (doom1.wad, locally provisioned)
 tools/libc_server/workdir/

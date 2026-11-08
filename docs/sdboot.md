@@ -540,9 +540,8 @@ payloads/autoboot.txt   autoboot (optional; the loader writes it on LSOFT)
 ```
 
 Rename an old card's `progs/` to `payloads/` (the loader still reads
-`progs/` while there is no `payloads/`). `fpbin/` is not used any more. The
-fpdoom game ports (`.\build.ps1 games`) still stage into `sdcard/fpbin/`,
-but nothing can start them without the fpdoom menu.
+`progs/` while there is no `payloads/`). `fpbin/` is not used any more: the
+games are apps of B310E OS (os/README.md).
 
 ---
 

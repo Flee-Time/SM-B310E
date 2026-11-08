@@ -5,10 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 #define RATE 22050u
-#define TRACKS 16
+#define TRACKS 32                       /* Duke's songs have up to 23 */
 #define NOTES 24
 static uint8_t *song;
-static unsigned song_size, division, tempo, tick, phase, step;
+static unsigned song_size, division, tempo, tick, phase, step, scanned;
 static bool mus, playing, paused, looping;
 static int volume = 80;
 static struct track { const uint8_t *p, *end, *start; unsigned next; uint8_t status; bool done; } tracks[TRACKS];
@@ -54,7 +54,7 @@ static void control(unsigned ch, unsigned cc, unsigned value) {
     if (cc==120 || cc==123) for (unsigned i=0; i<NOTES; i++) if (notes[i].channel==ch) notes[i].release=true;
 }
 static void reset(void) {
-    tick=phase=0; memset(notes,0,sizeof(notes));
+    tick=phase=0; scanned=~0u; memset(notes,0,sizeof(notes));
     memset(velocity,64,sizeof(velocity)); memset(programs,0,sizeof(programs)); memset(channel_volume,127,sizeof(channel_volume));
     tempo=mus?1000000:500000; timing();
     for (unsigned i=0; i<ntracks; i++) {
@@ -159,18 +159,22 @@ void b310e_music_volume(int value) {
 bool b310e_music_playing(void) {return playing;}
 int b310e_music_sample(void) {
     if (!playing || paused) return 0;
-    unsigned done=0;
-    for (unsigned i=0; i<ntracks; i++) {
-        struct track *t=&tracks[i]; unsigned budget=512;
-        while (!t->done && t->next<=tick && budget) {
-            budget--;
-            if (mus) mus_event(t); else midi_event(t);
+    if (tick!=scanned) {                /* the tracks only when the clock has moved: a few
+                                         * hundred times a second, not 22050 */
+        unsigned done=0;
+        scanned=tick;
+        for (unsigned i=0; i<ntracks; i++) {
+            struct track *t=&tracks[i]; unsigned budget=512;
+            while (!t->done && t->next<=tick && budget) {
+                budget--;
+                if (mus) mus_event(t); else midi_event(t);
+            }
+            if (!budget) t->done=true; /* malformed zero-delay event chains are bounded */
+            done+=t->done;
         }
-        if (!budget) t->done=true; /* malformed zero-delay event chains are bounded */
-        done+=t->done;
-    }
-    if (done==ntracks) {
-        if (looping) reset(); else {playing=false;return 0;}
+        if (done==ntracks) {
+            if (looping) reset(); else {playing=false;return 0;}
+        }
     }
     phase+=step; tick+=phase>>16; phase&=65535;
     int sample=0;
