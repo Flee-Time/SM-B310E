@@ -149,6 +149,17 @@ start:
     mov     r1, #0x80000000
     str     r2, [r1, #0x0C]
 
+    /* IRAM banks 1..3 on (0x8b0001a0 bits 21:19, as fpdoom's entry.c).
+     * The fpdoom menu set them before it started Rockbox; the B310E NOR
+     * loader does not, and without them IRAM from about 0x4000c000 does
+     * not hold data. The SD bounce buffer is 0x4000b000..0x4000f000:
+     * reads of more than 8 blocks came back as garbage, and starting an
+     * MP3 (the codec loaded from the card) crashed the phone. */
+    ldr     r1, =0x8b0001a0
+    ldr     r2, [r1]
+    orr     r2, r2, #(7 << 19)
+    str     r2, [r1]
+
     /* BOOT MARKER (level 1 = dim): crt0 entered, SVC mode + INTC masked.
      * The user's HW hang report decodes by keylight brightness — see the
      * marker table in the rockbox-port learnings. */
