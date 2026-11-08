@@ -52,7 +52,8 @@ _start:
     /* IRAM banks 1..3 on (0x8b0001a0 bits 21:19, as fpdoom's entry.c). The
      * fpdoom menu set them before it started us; our NOR loader does not,
      * and without them IRAM from about 0x4000c000 does not hold data: the
-     * SD bounce buffer (0x4000b000, 16 KB) and the chain trampoline. */
+     * chain trampoline. The DSP needs them clear: drivers/dsp.c clears them
+     * while it runs, as stock does for good (NOR 0x1a7c0). */
     ldr     r0, =0x8b0001a0
     ldr     r1, [r0]
     orr     r1, r1, #(7 << 19)

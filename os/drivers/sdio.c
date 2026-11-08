@@ -8,7 +8,7 @@
  *    0x8c write allowed; 0x8c0002a4 hangs the phone;
  *  - every wait is bounded by iterations, never by the free-running
  *    counter;
- *  - DMA targets must be IRAM (sd.c bounces through 0x4000b000);
+ *  - DMA targets must be IRAM (sd.c bounces through 0x40004000);
  *  - the probe runs with interrupts masked (sd.c).
  * Long data waits (the card programming a block, up to 250-500 ms by the
  * SD spec) sleep 1 ms at a time once the scheduler runs.

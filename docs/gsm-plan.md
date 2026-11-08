@@ -241,16 +241,568 @@ the ones Ghidra gave. The OS side is `os/drivers/dsp.c`.
    runtime pointer [0x0422e598].
 5. The data-type stream (FUN_0004f580).
 
+### Is the DSP program running? (2026-11-08)
+
+The boot handshake only proves the **boot ROM** works: it answers before
+the program ever starts. The phone's 66 blocks and `ready 0001` say nothing
+about the program itself.
+
+**What the program's own code says** (Teak disassembly of the image, DSP
+address = word index in the program segment)
+- Share memory is DSP word address **0xa800**, so ARM offset n is
+  0xa800 + n/2 [C]. Immediates for all the ring indexes fit this one base
+  (the command-ring reader at 0x98ab reads 0xa9c6 / 0xa9c7, the response
+  writer at 0x1773 uses 0xa9f0 / 0xa9f1, the message routine uses 0xaff8–a).
+- **Correction:** the 2026-08 notes read 0x1000DC30 and 0x1000EB14 as DSP
+  memory, on the assumption of a 1:1 mapping. That assumption is wrong, so
+  "DLTA 02/10" was not evidence that the program ran. Only 4 KB is share
+  RAM, and nothing has shown what those addresses are [L].
+- After reset the program sets up its handlers (0x1907: 0x98ab for commands),
+  enables interrupts and waits on a flag at 0x1063 [C].
+- The message routine at 0x17df spins until 0xaffa (ARM +0xff4) is 1 [C], so
+  the ARM must set that ack first (stock FUN_0003ab7e does; the 2026-08
+  diagnostic and the first driver did not).
+- The parameter records hold function pointers (the pointer 0x628c, the
+  routine that writes 1 to 0xaff2, is inside them) [C]. So before the records
+  arrive much of the program can't work, including probably the ping [L].
+
+**Control block at +0xfe0** (pointer [0x0422e598]) [C]
+| Offset | Meaning |
+|---|---|
+| +0x00 | ARM: 3 asks for the ping and dump |
+| +0x02 | ARM: first DSP word of a dump block |
+| +0x04 | DSP: 1 answers the ping; non-zero ends a dump block |
+| +0x0e | ARM: words in a dump block (0x400) |
+| +0x10, +0x12 | DSP→ARM message code and parameter (FUN_0003ab0a; one code is a "DSP Assert ID") |
+| +0x14 | ARM sets 1 to acknowledge; the DSP clears it when it posts |
+| +0x1e | ARM: 0x8181 at layer-1 start; no direct reference found in the program |
+
+**Stock crash dump, usable as a read-back** [C]
+- FUN_0001a516 is the ping: +4 = 0, +0 = 3, `0x8b000160 |= 2` (fast interrupt
+  to the DSP), wait, then +4 must read 1.
+- FUN_000185fc is the dump: for 64 blocks, +2 = first word, +0xe = 0x400,
+  +4 = 0, wait for +4 non-zero, then read 1024 halfwords from 0x10000000.
+- Which DSP memory space it copies is not settled yet [G]. The dump is compared
+  with both the program and the records to find out.
+
+**Commands and responses** (corrects the note above) [C]
+- A command is 5 halfwords and word 0 is its id: 0 sends a parameter record,
+  with the length word in word 2. The stock wake sequence
+  (L1Main_ActiveDspByCmds, FUN_0002f11a) uses ids 2, 0x1b and 0x2f.
+- Responses (FUN_0005f722, read in FUN_0004ee54) are 5 halfwords; the low byte
+  of word 0 picks the handler in a jump table. For a record's answer the stock
+  (0x60618) looks at word 1 and sends the next record or raises an L1 event.
+
+**The check: `dsp_probe()`, Tools → DSP boot**
+
+It runs after the boot, bounded at every step. Only 0x10000000–0x10000fff is
+touched, and the radio is not used (idle frames only). Results are in
+`/b310e-os/dsp-report.txt`, with `dsp-share.bin` and `dsp-dump.bin` beside it.
+
+| Step | What a running program does | Why it counts |
+|---|---|---|
+| Watch 100 ms | writes share words | the boot ROM's area is below 0x808 |
+| Records | takes 50 commands, answers | needs the command handler at 0x98ab |
+| Idle frames | consumes the ring, about 4615 µs each | needs its frame timer; the period can't be faked |
+| Ping | +4 = 1 | weak alone: QEMU's model answers it too |
+| Dump | returns its memory, with the records' words at their addresses | the strongest: data it can only have stored itself |
+
+QEMU cannot show any of this, because its model runs no program. The test
+checks that the probe always ends and reports "ping only", never "runs".
+
+**First phone result (2026-11-08, three runs, all the same):** no freeze, and
+no sign of a running program.
+
+```
+verdict no answer
+boot: 66 blocks, 667 ms, ready 0001
+at start: 0 non-zero share words
+records 0 of 50, irqs 0, storms 0, status bits 00000000
+commands: in 1 out 0
+ping: before 0000, after 0000
+```
+
+The DSP never took the first command, raised no interrupt and did not answer
+the ping. Share memory held only what the ARM wrote (first record and command).
+
+**Where the first driver differed from the stock** (read again with objdump,
+since Ghidra stops at calls into PSRAM; all [C])
+- The stock's "sleep 13 ms" after BOOT_DONE was a misreading: `FUN_00010852(13)`
+  disables IRQ line 13. The stock goes straight on to the restart.
+- Before the restart `FUN_00060f0a` writes 0xffff to +0xfde, DSP 0xafef. The
+  program compares that word with 0xc396 to pick another start path (0x4540).
+  We never set it, so it held whatever the RAM contained.
+- `FUN_0003ad6e` clears **8 KB** at 0x10000000 under reset, not 20 bytes.
+- The ack at +0xff4 was not set (above).
+- Not a difference: the stock also downloads all 66861 words. The offset is
+  `(block & 0x3f) << 10`, so the last 1325 words have offsets that wrap to 0.
+  What the boot ROM does with that is not known [G], but it is the same for both.
+- The stock looks for the image in a NOR partition first (`FUN_000a03dc(3)`) and
+  falls back to 0xcc874. Whether this phone has that partition is unchecked [G].
+
+**Start-up trace** (`trace_program()` in `drivers/dsp.c`)
+
+The program is sent from a heap copy, so that copy carries 13 small stubs in an
+unused gap (0x5f77–0x5fff). Each writes a mark to DSP 0xafe0 + n (ARM +0xfc0 +
+2n) and carries on. The NOR is not touched. `trace` in the report is a bit mask:
+
+| Bit | Point | If it is the last one set |
+|---|---|---|
+| 0 | reset vector | the program runs; nothing else is proven |
+| 1 | data memory cleared, main called | |
+| 2, 3, 4 | main, then each init returned | stuck in the next init (0xbf2, 0x358e) |
+| 5, 7 | handlers installed, about to wait | |
+| 6 | fast-interrupt handler 0x3abe ran | the ping reached it |
+| 8 | the wait at 0x1907 ended | |
+| 9 | command handler 0x98ab ran | our doorbell reaches it |
+| 10, 11, 12 | interrupt vectors 0x6, 0xe, 0x16 | which interrupts fire |
+
+Bit 0 clear means the program never executes after the restart, so the fault is
+in the restart or the download, not in anything layer 1 does.
+
 **Not yet seen on the phone**
-- No DSP result of any kind has been observed on hardware: the 2026-08
-  diagnostic only showed DSP activity (2 of 10 share words changed).
-- The OS driver boots the DSP as verified (QEMU: all 66 blocks through
-  the model).
-- The record stream, the frame-instruction rings and POWERMONQ are
-  written from this analysis and need a phone run.
+- The trace and the stock-order fixes have not run on hardware.
+- POWERMONQ and the power-measurement instruction have never run. They can't
+  until the program answers commands.
 
 **Licensing:** never ship stock bytes. As the FM driver does with its init
 tables, read or patch them from the owner's own NOR or dump.
+
+### Next stage: sync and broadcast channels (stock reference, 2026-11-08)
+
+This section is incomplete: it was cut short when the work moved to the
+problem below. Word n means halfword n of the 22-byte instruction. Many
+trace calls (thunk 0xc02dc) are marked no-return in the Ghidra project,
+which cuts decompiles short; clearing that flag in a scratch script fixed
+most of them.
+
+**More frame types** (`frameinstrutil.c`) [C]
+- Type 1 is a multi-frame sleep (FUN_0004fc5c / FUN_0004fd7e).
+  - Word 3 bits 11:0 = the count, below 1000.
+  - The frame number is start + count − 1: the instruction covers the
+    whole span.
+  - When the ring is flushed (FUN_000601f4), the frame clock is wound
+    back by count − 1, the same as for type 9.
+- Type 2 receives a 4-burst block (FUN_000504f8; tables in FUN_00050f6a /
+  FUN_0005138e; CBCH in FUN_00051c0c). One instruction is posted per
+  burst.
+  - Word 1: bits 7:4 = RxChannelTag, bits 1:0 = burst 0–3.
+  - Word 3 bits 10:8 = a 3-bit cell value; word 4 bits 10:8 = another.
+    One of them is probably the TSC [G].
+  - Word 6 bits 9:0 = the serving arfcn index.
+  - Words 7–9 hold monitor channels (index | gain << 10; 0x3ff means
+    empty).
+  - Word 10: bits 15:10 = cell index, bits 9:8 = a card/band mask.
+  - AGCH, BCCH and PCH use tags 7, 8 and 9 (the assert at 0xc8130).
+    PCH = 9 [L]: the pch_delay path posts tag 9. Which of 7 and 8 is BCCH
+    is open [G]. CBCH uses tag 6; the tables also use 3 and 5.
+- Types 6 (FUN_0004fe0a) and 7 (FUN_00050426, which rewrites a type 2
+  instruction) also queue a TX buffer of type 0. They are not receive-only;
+  they are likely RACH [L]. Avoid them.
+- **Type 9 is the FCCH search** (FUN_000506e0, FUN_0005096e). The
+  instruction covers a window of frames.
+  - Word 3 bits 11:0 = the window: 13 when camped
+    (SEARCH_NUMBER_CAMPED), 26 before camping
+    (SEARCH_NUMBER_BEFORECAMPED; FUN_0005096e, no static callers found).
+  - The frame number is the window's last frame.
+  - Word 1 bits 7:4 = 1.
+  - Word 4 low byte = the serving cell index (0xff if none).
+  - Word 5 bit 0 = a flag (FUN_0005096e only).
+  - Word 6 = arfcn index | gain hint << 10 (gain from FUN_0005cafe).
+  - Word 8 = a per-cell halfword (cell table +0xb0, used when +0xae is
+    set). A good SCH resets it to 0xffff, so it is probably a timing or
+    frequency hint from an earlier search [G].
+  - Word 10 = cell index << 10 | the card mask in bits 9:8.
+- **Type 10 is the SCH read** (FUN_000506e0(cell, fn, 10, 0)): one
+  frame, the same fields as type 9 without words 3 and 8.
+  - It is posted at the frame the cell's SCH is due. FUN_000494a6 works
+    that frame out from the cell's frame offset.
+  - Word 7 bit 10 is set under a condition (FUN_0002f0c2 /
+    FUN_00049ab4).
+- Types 12 and 13 are handled like 9 when the ring is flushed: they are
+  the dedicated-mode BSIC search [L].
+
+**Results come back on the received-blocks ring (+0x40c), not as
+responses** [C]
+- The response handler (`dspintisr.c`, FUN_0004ee54) only accepts
+  word 0 low byte = 4.
+  - Word 1 bit 0 = "more frames needed": it sets 0x0422face and wakes
+    layer 1.
+  - Word 1 bits 1–5 are DSP error asserts.
+- Header of a received block (72 bytes, read by FUN_0005f692, swapped
+  pairwise from +0x12):
+
+| Offset | Field |
+|---|---|
+| +0x00 | type: 1 SCH, 7 CCCH/BCCH block, 6, 8, 9 (FUN_0004dd7c), 3/4/5/0xb/0x10–0x12 dedicated |
+| +0x02 | bfi: 0 good, 1 bad (blocks with 1 are dropped) |
+| +0x04 | frame number, low 16 bits |
+| +0x06 | bits 7:0 frame number high; bits 12:8 cell index (word 10 of the instruction) |
+| +0x08 | two bytes; hi − lo corrects the frame offset (calibration path FUN_000461e4) |
+| +0x0e | signed halfword, logged: SNR or frequency error [G] |
+| +0x10 | low byte logged: rxlev [G] |
+| +0x12 | data: SCH 4 bytes; blocks 23 bytes (0x17 in FUN_0004c8a0) |
+
+- SCH data: byte 0 bits 7:2 = BSIC (NCC 7:5, BCC 4:2); T1, T2 and T3'
+  follow in the standard SCH bit order. FUN_00061408 rebuilds
+  FN = 51·((T3 − T2) mod 26) + T3 + 1326·T1, with T3 = 10·T3' + 1.
+- A good SCH in idle mode (FUN_0004ce38) clears the cell's hint words. It
+  checks the BSIC against the expected one, reporting a change, and marks
+  the cell.
+- A block (FUN_0004d7c4 / FUN_0004d91a) with bfi ≠ 1 sends +0x12 to
+  layer 2: FUN_0004bd84(4, arfcn, data, crc_ok, fn) and
+  FUN_0004a87a(data, bfi, fn, cell).
+- Each layer-1 state has its own reader (FUN_0005a8ac … FUN_0005aa50),
+  which accepts only some of the types.
+
+**Timing and AFC** [L]
+- Each cell's frame number is the serving frame number plus a per-cell
+  offset (cell table 0x042841e8, 32 × 0xb4, offset at +0x1c;
+  FUN_000484e4).
+- No static writer of that offset was found, apart from ±1 helpers with no
+  callers (FUN_00048b1c / FUN_00048b56).
+- No command for timing or AFC was found: the only ids seen are 0 and
+  2/0x1b/0x2f.
+- So the DSP most likely keeps timing and frequency itself after FCCH and
+  SCH. Which ARM path sets the offset is still open.
+
+**Cell states and order** (`cellsyncinfo.c`, `gsmframegen.c`) [C]
+- Cell states (FUN_0004806e): 1 free; 2 FCCH needed; 4 after a type 9 is
+  posted; 0x20 after a type 10. When the ring is flushed, 9 goes back to
+  2 and 10 to 0x10. 8, 0x10 and 0x80 are synced states [L].
+- PLMN search (FUN_00054c8e): up to 8 type-11 power frames, then the
+  PCH/BCCH plan.
+- Camped idle (FUN_00054572), when spare frames allow:
+  1. Type 10 for neighbours whose SCH is due.
+  2. With more than 15 frames spare: 2 idle frames, type 9 (13 frames)
+     for the best state-2 cell (FUN_00048802), then 1 idle frame.
+- BCCH (FUN_00055534 / FUN_0005538a): type 2 bursts at the computed
+  delay.
+- The very first FCCH search before camping (window 26) was not traced
+  to its caller.
+
+**Needs the phone:** whether types 9 and 10 return anything except rx type
+1; what +0x08, +0x0e and +0x10 mean; and which tag (7 or 8) is BCCH.
+
+### Why the program may not start (stock comparison, 2026-11-08)
+
+On the phone: all 66 blocks went down and the ready word was 0001. After
+that the program wrote no share words, took no command (in 1, out 0),
+raised no IRQ 13 and did not answer the ping. Below, the stock path
+(FUN_0002e98e → FUN_00074b96 → FUN_0003aa76) is compared with
+`dsp_boot()` / `download()` / `l1_start()`. Read from the binary
+throughout [C].
+
+**Stock boot, in order** (FUN_0003aa76, FUN_0003ad16, FUN_0003a92a,
+FUN_0003a810; register helpers FUN_00067fc8 / FUN_00067fda / FUN_0006802a /
+FUN_00068042 / FUN_00067ffc)
+1. 0x8b000060 = 0x10000 (reset held). The IRQ 13 handler 0x3aa61 is
+   registered for the download: it sets a flag and writes 4 and then 8
+   to 0x8b000160.
+2. 400 busy loops; share memory cleared (FUN_0003ad6e); arm_ctl (+0) =
+   1 until it reads back.
+3. 0x8b000060 = 0x10000.
+4. 0x8b0001c0 bits 7:3 = 4.
+5. 0x8b0001a0 bits 15:0 = 0xa800. FUN_0003a9ec picks 0xa000 for chip ids
+   0 and 0x30001 and 0xa800 otherwise.
+6. 0x8b0001a0 |= 0x10000.
+7. 400 loops; arm_ctl = 1.
+8. 0x8b000064 = 0x10000.
+9. 0x8b000160 = 4; 0x80000008 |= 0x2000.
+10. Wait for dsp_ctl bit 0, then the blocks:
+    - Each block: dl_offset, size and data; arm_ctl = 3; wait for bit 1;
+      clear arm_ctl bit 1; set bit 2; wait for bit 2; wait for the
+      interrupt (event, or a poll of 0x8b000140 bit 2); 0x8b000160 = 4,
+      then = 8; clear arm_ctl bit 2.
+11. arm_ctl = 8.
+12. The handler is removed; +0xfde = 0xffff (FUN_00060f0a).
+13. 0x8b0001c0 bits 7:3 = 0.
+14. 0x8b0001a0 &= ~0x10000.
+15. 0x8b000060 = 0x10000; 99 busy loops; 0x8b000064 = 0x10000.
+
+`download()` makes the same register writes in the same order. The only
+register writes it leaves out are 0x80000008 bit 13 during the download
+(it polls instead) and the IRQ-handler registration.
+
+**The difference that matters: block offsets wrap at 64 K words** [C]
+- FUN_0003a92a computes each block's offset as `(block & 0x3f) << 10`.
+  It uses that one value both as dl_offset and as the source offset
+  into the program.
+- For 66861 halfwords (66 blocks) the stock sends:
+  - blocks 0–63 normally;
+  - block 64: dl_offset 0, 0x400 halfwords = program words 0–1023
+    again;
+  - block 65: dl_offset 0x400, 0x12d (301) halfwords = words
+    1024–1324 again.
+- So the boot ROM never receives words 65536–66860. Those are the
+  parameter-record tail (the 5a5a a5a5 mark is at word 65282) and go
+  later by command 0.
+- `download()` uses `off = b * 1024`. It writes `(uint16_t)off` (0 and
+  0x400) as dl_offset but copies `prog[off + i]`, that is words
+  65536–66860.
+- So **DSP program words 0–1324 are overwritten with record data**,
+  including the reset vector (word 0 should be 0x4180 br) and the trace
+  stub hooks at 0/6/0xe/0x16. That explains a program that never
+  executes an instruction of its own, and trace mask 0.
+
+**Other differences, in falling order of likelihood**
+1. **[C] the offset wrap above.** The fix: download only the first
+   65536 words, or copy stock and use `(b & 63) << 10` for both offsets.
+   Either way the records then go by command 0, as now.
+2. **[L] the trace stubs patch the program** (word 1 of the reset vector
+   and 12 other sites); the stock never does this. Once item 1 is fixed,
+   run once with the stubs off.
+3. **[G] timing:**
+   - The stock waits 400 busy loops (a few µs) after setting BOOT_EN
+     and before arm_ctl = 1 and the release. The driver goes straight
+     on.
+   - The final reset pulse is 99 loops in the stock and 10 µs in the
+     driver.
+   - The driver clears 4 and 8 with one write of 0xc; the stock writes
+     4 and then 8.
+   - None of these should stop the program.
+4. **[G] the boot vector:** the stock chooses 0xa000 or 0xa800 from the
+   chip id at 0x0422ca1c. 0xa800 fits the program's own immediates and
+   the handshake works, so this is unlikely.
+5. **Layer-1 start matches:** clear 0xfc0; FUN_0003abe6 (0x80000008 |=
+   0x2000, 0x80000028 |= 0x2000); FUN_0003ab7e (clear +0xfe0..+0xffd,
+   +0xff4 = 1); clear 0xfc0; +0xffe = 0x8181; then the records.
+
+**The state before the bringup differs too (2026-11-08).** The functions above
+match, so everything the stock does *before* them was compared: QEMU ran the
+stock image and every write up to the DSP's release was listed
+(`capture-stock.py`). [C] for what the stock writes; what the bits mean is [L].
+
+| Register | Stock when its DSP starts | Our OS on the phone |
+|---|---|---|
+| 0x8b0001a0 bits 21:19 | **clear** (PBL sets them, FUN_0001a7c0 clears them for good) | **set** (entry code, from fpdoom) |
+| 0x8b0000a8, APB gates | opens 0xc7ebefda | 0x17e982c0 |
+| 0x20500080, AHB gates | opens 0x1ddef | 0x000015e1 |
+| 0x205000c0 | 0x60 | not set |
+
+- Bits 21:19 are the main suspect. With them clear, IRAM above 0x4000c000 does
+  not hold ARM data (`sdboot.md`), and the stock dumper has an "IRAM Dsp"
+  region: those banks may be the DSP's memory [L].
+- 0x8b000040 also differs (stock 0x500c0005). Its extra bits belong to the
+  stock's clock-by-name functions, whose names are peripheral sources (26M_XTL,
+  CLK_104M ...), not a DSP clock [L]. Not changed.
+- The whole chip init is not replayed on purpose: its pinmap half is the known
+  0x8c landmine, so each difference is taken one at a time.
+- Calling the stock's own functions from NOR isn't practical: they use the stock
+  kernel in PSRAM (the `blx 0xc0xxx` thunks) and its RAM globals (0x0422e590 ...).
+
+**The SD bounce buffer moved** to 0x40004000 (was 0x4000b000), below the
+0x4000c000 limit, so that clearing the bits can't corrupt the card. Bits 21:19
+are clear only while the DSP runs; `dsp_stop()` sets them again.
+
+**Own-program self-test (`dsp_selftest()`, Tools → DSP boot).** About 60 words of
+hand-assembled TeakLite, nothing from the stock program, go through the same
+download. It writes marks, then loops writing a counter and echoing a word the
+ARM sets. It runs three ways: IRAM bits set; clear; clear with the stock's gates.
+
+| Result | Meaning |
+|---|---|
+| No marks in any case | the restart or the DSP's clock is at fault, not the stock program |
+| Marks in one case only | that case's state is what the DSP needs |
+| `mark0` but not `mark1` | the stock's first register writes (0xbd46..) break it |
+| Count moving | it runs; about 266 DSP cycles per count, so count / 20 ms gives its clock |
+| `idle` far below `busy` | ARM idle slows or stops the DSP |
+| Echo 0x1234 | it reads share memory as well as writing it |
+
+After that the stock program runs twice: first with start-up marks (`stock with
+marks` in the report), then unpatched with the full probe.
+
+### The DSP program runs (phone, 2026-11-08)
+
+**Cause: `0x8b0001a0` bits 21:19 were set.** Our entry code sets them (from
+fpdoom) and the stock clears them. With them clear the DSP executes; with them
+set it does not.
+
+```
+own program, IRAM bits set:   marks 0000 0000, echo 0000, count 0 busy 0 idle
+own program, IRAM bits clear: marks 5a01 5a02, echo 1234, count 1919 busy 1922 idle
+stock with marks: trace 00bf at start, 12bf after records
+records 50 of 50, replies 50 (each 000f 0000 0000 0000 0000)
+ping: before 0000, after 0001, 1 ms
+dump: 64 blocks, 37934 non-zero words, record words 1477 of 1477
+idle frames: 20 posted, 0 consumed
+```
+
+What this shows:
+- **The memory dump is DSP data memory** [C]: every one of the 1477 record words
+  is at the address its record names, checked again on a PC from
+  `dsp-dump.bin`. Only the program could have put them there and read them out.
+- **DSP clock about 26 MHz** [L]: 1919 counts per 20 ms at about 270 cycles each.
+  That is right after reset, before the program sets anything.
+- **ARM idle doesn't slow the DSP** [C]: the count is the same busy and idle.
+- **The stock's clock gates are not needed** [C]: the own program and the 50
+  records work without them (a Radio status run in the same log took the records
+  with the gates shut). `0x8b000040` was left alone too. So the gate test was
+  removed.
+- **The moved SD buffer works** on the phone: self-test ok, the dump was saved.
+- **Trace:** 0x00bf is points 0–5 and 7: reset, main, both inits, the handlers, and
+  the wait at 0x1907. 0x12bf adds 9 (command handler) and 12 (vector 0x16). Point
+  8, the wait ending, never came, which is why no frames were taken.
+- Trace reads 0 after the dump; why is not known. It doesn't affect the above.
+
+**What ends the wait: the start command** [C]
+- A command is word 0 = group, word 1 = type, word 2 = parameter. This corrects
+  the note above. Handler 0x9961 takes group 0.
+- Type 0 is a record. **Type 0x10 sets 0x1063 = 1, sets 0xbf41 bit 9 and enables
+  DSP interrupt 9.** Then 0x1907 returns and the rest of main runs.
+- The stock's list (NOR 0xc800c, sent by FUN_0004f580) is **0, 0x10, 1, 3, 4 … 15,
+  0x10**: the records, the start, the parameter blocks, the start again. A second
+  list at +0x44 repeats 1, 3 … 15, 0x10.
+
+**How the RF parameters reach the DSP** [C for the mechanism; what each block
+holds is open]
+- FUN_000606ea is a switch on the type. Each type copies a block to share memory
+  and sends `{0, type, byte, 0, 0}`, the byte coming from 0x0422fb75.
+- One block is 1012 bytes (0x3f4), the exact length of NV item 1, from FUN_0004e9e4.
+- Others go to +0x6f6 or +0xcf6 with sizes 0x25c, 0x7e, 0x46, 0x96, 0x78, 0x32.
+- Types 4–7 are conditional on flags. FUN_00060650 is type 0, the records.
+
+**Start command on the phone (2026-11-08):** taken. Trace 0x13bf adds point 8, the
+wait ended; the dump shows 0x1063 = 1, 0xbf43 = 0x2016, 0xbf45 = 0x40e8, so main went
+on through its interrupt set-up (0x4b3–0x4bb). But still **0 of 20 idle frames were
+taken**, and vectors 0x6 and 0xe (points 10, 11) never fired in 400 ms; only the
+doorbell vector 0x16 did. So its frame interrupt isn't running yet.
+
+**The whole parameter list, decoded** (jump table at FUN_000606ea) [C]
+
+Type 1 is all of NV item 1. The others are in NV item 2, behind its 2-byte version
+word (FUN_0004e9ee). Offsets below count from after that word; they fit end to end.
+Each goes to +0x6f6, then command `{0, type, byte, 0, 0}`:
+
+| Type | Offset | Bytes | Sent if |
+|---|---|---|---|
+| 3 | 0x0000 | 126 | always |
+| 4 | 0x007e | 792 | NV item 3 byte 42 |
+| 12 | 0x0396 | 640 | always |
+| 5 | 0x0616 | 792 | NV item 3 byte 44 |
+| 13 | 0x092e | 640 | always |
+| 6 | 0x0bae | 792 | NV item 3 byte 45 |
+| 14 | 0x0ec6 | 640 | always |
+| 7 | 0x1146 | 792 | NV item 3 byte 46 |
+| 15 | 0x145e | 640 | always |
+| 8, 9, 10, 11 | 0x300, 0x898, 0xe30, 0x13c8 | 70, 150, 120, 50 | always; they lie inside blocks above |
+
+- Type 2 (604 bytes to +0xcf6) is not in the start-up list.
+- On this phone all four flags are 1.
+- `byte` is 0x0422fb75. Its value at this point isn't known; 0 is sent [G].
+- `l1_start()` now sends the stock's list in order, read at run time from this
+  phone's fixed NV (0x680000). The stock reads NV through a helper that could return
+  another copy (the EFS area); whether the two differ is unchecked [G].
+
+**Wake commands** [C for the bytes, L for meaning]
+- L1Main_ActiveDspByCmds (FUN_0002f11a) sends `{2, 0xff}`, `{0x1b}`, waits for L1
+  event flag 2, then `{0x2f}`.
+- Command 2's handler (0x9a52) keeps a flag per bit of its parameter, at 0x1bf6–9.
+  Command 0x1b (0xa13b) calls through 0x116d and compares 0xfcce with 0x530c / 0x5310,
+  which look like RF chip ids.
+- `dsp_probe()` tries these only if idle frames aren't taken, then looks again.
+- From the stock's start-up: the default gain hint at 0x0422f030 is NV item 1's byte
+  at +0x58, halved (FUN_0004e8f4). The note on the power-measurement instruction above
+  calls this unknown.
+
+**Parameter list on the phone (2026-11-08):** all 14 blocks were taken, with the
+second start.
+- **Frames moved:** the saved share memory shows the ring at in 20, out 20. The
+  report's "0 consumed" was a bug in the probe: it took its baseline after posting,
+  so frames taken before that were not counted. When and how fast they went is not
+  known, and they may have been flushed rather than run. The next run measures it,
+  with the ring kept topped up.
+- **Acks now carry data:** `000f <type> 530c 1345 f001`. Word 1 is the type answered.
+  0x530c is also in DSP memory at 0xfcce, which 0xa13b compares with 0x530c / 0x5310,
+  so it's probably an RF chip id [L]. 0x1345 and 0xf001 are unknown [G]. Before the
+  parameters, all these words were 0.
+- **Records:** 1461 of 1477 record words still match, against 1477 of 1477 before. The
+  program now changes some of its own data, which is expected of a running one [L].
+- **Interrupts:** 0xbf45 is 0x42e8 (bit 9 enabled), and 0xbf40 reads 0x200 at dump
+  time, so its interrupt 9 is pending [C]. The stub's run shows no vector 0x6 or 0xe
+  by the end of the frame phase, so no frame interrupt has been seen.
+- **One reply isn't an ack:** word 0 = 0, all words zero. Its meaning is unknown [G].
+- **Wake commands:** all three taken. 0x1bf6–9 and 0xebe2 read 0x32.
+
+**Measured on the phone (2026-11-08):** 0 frames taken in 400 ms, then 20 within
+the 40 ms after `{2, 0xff}`, then none, while 21 more sat in the ring. 20 frames in
+under 40 ms is faster than GSM timing (92 ms), so **command 2 flushes the ring; the
+frame clock was not running** [L]. The wake sequence was the wrong idea and is gone.
+
+**What starts the frame clock** [C] (0x5a874, also 0x2ea1a)
+1. Frame number 0.
+2. Four idle frames (FUN_0004fb10).
+3. FUN_0005f208(2): flag 0x8200 on the instruction 2 slots back from the last
+   written. Only one at a time: the first driver flagged many.
+4. Command `{1, 0}`. Its handler (0x9a20) sets bit 2 of 0xff72. `{1, 1}` is what the
+   stock sends elsewhere (it sets 0x193 instead).
+
+`l1_run()` does this. `l1_start()` does not call it, so that a caller has its first
+frames ready. Tools → Radio status does not call `l1_run()` yet.
+
+### The frame clock runs (phone, 2026-11-08)
+
+```
+run command taken; idle frames: 111 posted, 90 taken in 400 ms, 4617 us each (GSM: 4615)
+replies: 0004 0041 0000 0000 <frame number>
+```
+
+- **The DSP runs GSM frame timing on the phone** [C]: 90 instructions taken at
+  4617 µs each. The time comes from a 1 ms tick over the whole run, so that is
+  good to about 0.3%, and it can't be told from 4615. Only idle frames were posted.
+- **0xff72 reads 4** in the dump, the bit command `{1, 0}` sets [C].
+- **Replies report frames** [C for the words]: word 0 low byte = 4, word 1 = 0x41,
+  word 4 = a frame number, about 5 apart, following our ask-more flags. Word 1 bit 0
+  means "more frames needed" (above); bit 6 is unknown [G].
+- Points 10 and 11 (vectors 0x6, 0xe) still don't show in the trace, so frames do not
+  need them; point 12 (vector 0x16) does fire [C]. Which interrupt carries the frame
+  tick is not settled [G].
+
+**DSP assert 3: the response ring was full** [C for the site, L for the cause]
+- That run also got message `ffff0003`. FUN_0003ab0a treats code 0xffff as "DSP Assert
+  ID", and the stock would stop on it.
+- The DSP's response sender (0x171d) compares the next slot with "out" at 0x1788; if
+  equal it calls the assert function with 3 (0x178a, pointer 0x11cd = 0x1810).
+- The driver only drained the ring when polling, and it stops polling while it saves a
+  file, so the ring probably filled then. It is drained in the interrupt now, as the
+  stock does (FUN_0004ee54). The report says which phase the first message came in.
+
+**Confirmed on the phone:** with the ring drained in the interrupt, two runs gave
+`messages 0`, with frames at 4617 and 4611 µs (90 and 91 in 400 ms), so draining
+the ring did stop it [C]. Replies rose from 87 to 94 in the same test: none lost now.
+
+**Next** [L]
+- Layer 1 proper needs the frame clock kept fed by the "more frames" reply rather than
+  by a poll loop.
+- Still open: `byte` in the parameter commands (0 sent), and which NV copy the stock
+  reads.
+   - The driver does not set 0x80000028 bit 13 (FIQ). That changes only
+     how the interrupt is delivered, not whether the program runs.
+   - The stock also calls FUN_0003ab7e before the download; the driver's
+     fe0_init() does the same.
+
+No other clock, reset, ADI, remap or arbiter write was found on this
+path. The 0x8b00xxxx users are only the helpers listed above.
+
+**Fixed (2026-11-08):** `download()` now uses `(b & 63) << 10` for both
+the dl_offset and the source, as the stock does. Not yet run on the phone.
+
+### Tools / Radio status (2026-11-08)
+
+`os/apps/gsmstatus.c`, receive only. It checks:
+- each SIM (ready / PIN / none; nothing from the card is kept);
+- the DSP boot and `l1_start()`;
+- the frame clock (20 idle frames);
+- three power sweeps over all 971 arfcn indexes (type 11).
+
+Then it holds the DSP in reset again and writes
+`/b310e-os/radio-report.txt` (a summary, plus a CSV of every channel that
+answered). QEMU test: `os/tests/test-radio.py [--nor dump]`.
+
+The first phone run, before the download fix, gave: SIM 1 ready at 1.8 V;
+the DSP downloaded but took no command, so there was no frame clock and no
+scan. Compare a scan with the stock firmware's field-test screen (serving
+ARFCN and RXLEV) to settle the band order and the rxlev sense.
 
 ## Milestones
 

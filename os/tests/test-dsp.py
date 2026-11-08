@@ -11,7 +11,12 @@ Tools / DSP boot, waits for the attempt to finish and reads the driver's
     the image is found and decoded, the whole program (66861 halfwords,
     66 blocks) goes through the handshake, the DSP is started and then
     held in reset again; the model's trace shows 66 copies;
-  - Center runs it again, and the UI stays alive (power-off works).
+  - Center runs it again, and the UI stays alive (power-off works);
+  - dsp_probe() ends every time, and since the model runs no DSP program it
+    must not report one: no records taken, no replies, no messages, no frames
+    and no dump. The model does answer the ping (a shortcut for the stock
+    image), which is why the verdict never counts the ping alone. Whether a
+    real DSP answers is for the phone: /b310e-os/dsp-report.txt on its card.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -44,6 +49,13 @@ DSP_FIELDS = ('state error stage blocks program_words boot_ms irqs irq_storms re
 MAGIC = 0x534f3342
 ST_ALL = 0x3f
 NOR_SIZE = 8 << 20
+PROBE_FIELDS = ('phase early_words early_first records_total records_taken cmd_in cmd_out '
+                'int_sts replies msgs msg_first msg_last idle_posted idle_consumed frame_us '
+                'ping_before ping_after ping_ms dump_blocks dump_nonzero').split()
+SELFTEST_FIELDS = 'result mark0 mark1 echo busy idle mcu_ctl0 dsp_ctl0'.split()
+IRAM_BANKS = 7 << 19
+PROBE_DONE = 6
+PROBE_TRACE_END = 109       # word index: after reply[16][5] and three trace words
 DSP_OFF, DSP_FAILED = 0, 3
 DSP_EIMAGE = -1
 PROGRAM_HW, BLOCKS = 66861, 66
@@ -86,6 +98,8 @@ def run(args, name, nor):
     base = symbol(args.elf, 'os_status')
     info = symbol(args.elf, 'dsp_info')
     screen = symbol(args.elf, 'dspboot_status')
+    probe = symbol(args.elf, 'dsp_probe_info')
+    own = symbol(args.elf, 'dsp_selftest_info')
     card = out / 'card.img'
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
@@ -135,6 +149,11 @@ def run(args, name, nor):
                 d['runs'] = qt.read(screen)
                 d['busy'] = qt.read(screen + 4)
                 d['result'] = signed(qt.read(screen + 8))
+                d['probe'] = {f: qt.read(probe + 4 * i) for i, f in enumerate(PROBE_FIELDS)}
+                d['probe']['trace_end'] = qt.read(probe + 4 * PROBE_TRACE_END)
+                d['selftest'] = {
+                    n: {f: qt.read(own + 4 * (at + i)) for i, f in enumerate(SELFTEST_FIELDS)}
+                    for n, at in (('set', 0), ('clear', len(SELFTEST_FIELDS)))}
                 return d
 
             def wait(test, seconds, what):
@@ -175,7 +194,7 @@ def run(args, name, nor):
                     titles.append(t)
                     if t == want:
                         return True
-                    if t == 'Tools' and parent == 'Menu':
+                    if t == 'Tools' and parent == 'Menu' and want != 'Power':
                         if search(want, 'Tools', titles):
                             return True
                     if t != parent:
@@ -208,10 +227,25 @@ def run(args, name, nor):
                     assert d['blocks'] == BLOCKS and d['program_words'] == PROGRAM_HW, d
                     assert d['ready_word'] & 1, d
                     assert d['state'] == DSP_OFF, d        # held in reset after
+                    q = d['probe']
+                    assert q['phase'] == PROBE_DONE, d
+                    assert q['records_total'] > 0 and q['records_taken'] == 0, d
+                    assert q['replies'] == 0 and q['msgs'] == 0, d
+                    assert q['idle_consumed'] == 0, d
+                    assert q['ping_before'] == 0 and q['ping_after'] == 1, d
+                    assert q['dump_blocks'] == 0, d
+                    assert q['trace_end'] == 0, d          # no program runs here
                 else:
                     assert d['result'] == DSP_EIMAGE and d['stage'] == 0, d
                     assert d['blocks'] == 0 and d['state'] == DSP_FAILED, d
                     assert d['boot_ms'] < 1000, d
+                # The model loads our test program too, and runs nothing.
+                for n, c in d['selftest'].items():
+                    assert c['result'] == 0 and c['mark0'] == 0 and c['busy'] == 0, d
+                # IRAM bits as asked, then given back to the ARM.
+                assert d['selftest']['set']['mcu_ctl0'] & IRAM_BANKS == IRAM_BANKS, d
+                assert d['selftest']['clear']['mcu_ctl0'] & IRAM_BANKS == 0, d
+                assert qt.read(0x8b0001a0) & IRAM_BANKS == IRAM_BANKS, 'IRAM bits not restored'
             assert title() == 'DSP boot'
 
             press('esc', 'B310E OS')
@@ -243,8 +277,11 @@ def run(args, name, nor):
     result['trace_boots'] = boots
     if nor:
         assert copies >= 2 * BLOCKS, f'{copies} copies in the model trace'
+        image = card.read_bytes()
+        assert b'verdict ping only' in image, 'no probe report on the card'
     else:
-        assert copies == 0 and boots == 0, 'the DSP was touched without an image'
+        # only our own two-block self-test ran: 2 cases, 2 attempts
+        assert copies < BLOCKS, f'{copies} copies: the DSP was loaded without an image?'
     print('PASS ' + json.dumps(result), flush=True)
     return result
 

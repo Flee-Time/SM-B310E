@@ -65,6 +65,31 @@
 #define SHARE_START     0xffeu          /* stock writes 0x8181 here */
 #define START_MARK      0x8181u
 
+/* The control block at +0xfe0 (DSP address 0xaff0: share memory is DSP word
+ * address 0xa800, so ARM offset n is 0xa800 + n / 2). */
+#define FE0_CMD         0xfe0u          /* 3: the ping / dump request */
+#define FE0_START       0xfe2u          /* dump: first DSP word of the block */
+#define FE0_REPLY       0xfe4u          /* ping: the DSP writes 1 */
+#define FE0_COUNT       0xfeeu          /* dump: words per block */
+#define FE0_MSG         0xff0u          /* DSP->ARM message code */
+#define FE0_PARAM       0xff2u
+#define FE0_ACK         0xff4u          /* ARM sets 1: the DSP may post another */
+#define FE0_LEN         0x1eu
+#define SHARE_CLEAR_BOOT 0x2000u        /* FUN_0003ad6e: 8 KB, before the download */
+#define NORMAL_START    0xfdeu          /* DSP 0xafef: 0xc396 asks for another start
+                                         * path; the stock writes 0xffff (FUN_00060f0a) */
+
+/* The trace (see trace_program()): one word per point, DSP 0xafe0.. */
+/* dsp_set_trace(): off, the program goes unpatched, as the stock sends it. */
+#define TRACE_OFF       0xfc0u
+#define TRACE_DSP       0xafe0u
+#define TRACE_MARK(i)   (0x40u + (i))
+
+/* 0x8b0001a0 bits 21:19: stock's PBL sets them, then its boot clears them for
+ * good (NOR 0x1a7c0), so they are clear whenever stock's DSP runs. With them
+ * set, IRAM above 0x4000c000 holds the ARM's data. The OS sets them at entry. */
+#define IRAM_BANKS      (7u << 19)
+
 #define ARM_READY       0x0001u
 #define ARM_DATA_READY  0x0002u
 #define ARM_START_COPY  0x0004u
@@ -89,8 +114,14 @@
 #define PM_SLOTS        30u
 #define PM_IN           0x6b0u
 #define PM_OUT          0x6b2u
+#define RESP_BASE       0x390u          /* DSP->ARM responses: 8 x 10 bytes */
+#define RESP_SLOTS      8u
+#define RESP_IN         0x3e0u
+#define RESP_OUT        0x3e2u
 #define REC_DATA        0x6f6u          /* parameter record body */
 #define REC_MAX_HW      0x280u          /* up to 0xbf6, the next area */
+#define RESP_RECORD_ACK 0x000fu         /* a record's answer, word 0 */
+#define CMD_START       0x10u           /* command 0, word 1: see l1_start() */
 #define FN_MOD          0x297000u       /* hyperframe */
 #define FI_IDLE         0u
 #define FI_POWER        11u
@@ -116,12 +147,18 @@
 #define KEEPALIVE_US    1000u
 
 volatile dsp_info_t dsp_info;
+volatile dsp_probe_t dsp_probe_info;
 
 static uint16_t *records;               /* the image's parameter records */
 static uint32_t records_hw;
 static uint32_t frame_number;
 static bool irq_on, cpu_held;
 static uint32_t storm_tick, storm_count;
+static uint32_t block0_crc;             /* the program's first download block */
+
+static void trace_program(uint16_t *w);
+static bool trace_on;
+static bool banks_for_arm;              /* the self-test's "as we were" case */
 
 /* ---- helpers --------------------------------------------------------------- */
 
@@ -174,6 +211,15 @@ static void sm_clear(uint32_t off, uint32_t len)
         *sm(off + i) = 0;
 }
 
+/* Stock FUN_0003ab7e, before the download and again after it: the control
+ * block cleared and the ack set. The DSP's message routine (0x17df) spins
+ * until the ack is 1, so without this its first message hangs it. */
+static void fe0_init(void)
+{
+    sm_clear(FE0_CMD, FE0_LEN);
+    *sm(FE0_ACK) = 1;
+}
+
 /* Waits for a dsp_ctl bit, re-writing arm_ctl now and then (the SDK's
  * keep-alive rule, kept from the verified diagnostic). */
 static int wait_dsp(uint16_t mask, uint16_t keepalive, uint32_t budget_us)
@@ -212,6 +258,7 @@ static void hold_cpu(bool on)
 /* ---- interrupt ------------------------------------------------------------- */
 
 static sem_t dsp_sem;
+static void l1_service(void);
 
 static void dsp_isr(void)
 {
@@ -234,6 +281,9 @@ static void dsp_isr(void)
         irq_on = false;
         dsp_info.irq_storms++;
     }
+    /* As stock's (FUN_0004ee54): the responses are read here. The ring has 8
+     * slots, and the DSP asserts (id 3, at 0x178a) when it finds it full. */
+    l1_service();
     sem_post(&dsp_sem);
 }
 
@@ -298,6 +348,8 @@ static uint8_t *load_program(const uint16_t **seg, int *err)
     w = (const uint16_t *)(buf + off);
     if (w[0] != SEG_FIRST_WORD)
         goto bad;
+    if (trace_on)
+        trace_program((uint16_t *)w);
 
     /* The stock (FUN_00074430) scans the program for 5a5a a5a5: the
      * records after it are sent once layer 1 starts. */
@@ -324,6 +376,92 @@ bad:
     return NULL;
 }
 
+/* ---- start-up trace --------------------------------------------------------- */
+
+/* Is the program executing, and how far does it get? The program goes to the
+ * DSP from a heap copy, so that copy can carry small stubs (never the NOR):
+ * each writes one word to share memory and goes on as before. They sit in a
+ * gap of unused words below 0x6000. Nothing of the program is carried here:
+ * the instructions a stub replaces are read from the copy. */
+#define TRACE_STUBS     0x5f77u
+#define TRACE_STUBS_END 0x6000u
+
+enum { TR_VECTOR, TR_CALL, TR_POINTER };
+
+static const struct {
+    uint16_t at;
+    uint8_t kind;
+} trace_points[] = {
+    { 0x0000, TR_VECTOR },              /*  0 reset: it runs at all */
+    { 0x0329, TR_CALL },                /*  1 data memory cleared, main called */
+    { 0x0493, TR_CALL },                /*  2 main entered */
+    { 0x0495, TR_CALL },                /*  3 first init returned */
+    { 0x0497, TR_CALL },                /*  4 second init returned */
+    { 0x1919, TR_CALL },                /*  5 handlers installed */
+    { 0x1925, TR_POINTER },             /*  6 fast-interrupt handler 0x3abe ran */
+    { 0x1924, TR_CALL },                /*  7 about to wait, interrupts next */
+    { 0x0499, TR_CALL },                /*  8 the wait ended */
+    { 0x1916, TR_POINTER },             /*  9 command handler 0x98ab ran */
+    { 0x0006, TR_VECTOR },              /* 10 interrupt vector */
+    { 0x000e, TR_VECTOR },              /* 11 interrupt vector */
+    { 0x0016, TR_VECTOR },              /* 12 interrupt vector */
+};
+#define TRACE_POINTS (sizeof(trace_points) / sizeof(trace_points[0]))
+
+static void trace_program(uint16_t *w)
+{
+    uint32_t p = TRACE_STUBS;
+
+    for (uint32_t i = 0; i < TRACE_POINTS; i++) {
+        uint32_t at = trace_points[i].at, stub = p;
+        bool reset = at == 0;
+
+        if (p + 11 > TRACE_STUBS_END)
+            return;
+        if (!reset) {
+            w[p++] = 0x5e40;            /* push r0 */
+            w[p++] = 0x5e42;            /* push r2 */
+        }
+        w[p++] = 0x5e00;                /* mov addr, r0 */
+        w[p++] = (uint16_t)(TRACE_DSP + i);
+        w[p++] = (uint16_t)(0x2b00 | TRACE_MARK(i));    /* mov +mark, r2 */
+        w[p++] = 0x1840;                /* mov r2, [r0] */
+        if (!reset) {
+            w[p++] = 0x5e62;            /* pop r2 */
+            w[p++] = 0x5e60;            /* pop r0 */
+        }
+        switch (trace_points[i].kind) {
+        case TR_VECTOR:                 /* "br target": the stub, then target */
+            w[p++] = 0x4180;
+            w[p++] = w[at + 1];
+            w[at + 1] = (uint16_t)stub;
+            break;
+        case TR_POINTER:                /* a handler's address in a mov */
+            w[p++] = 0x4180;
+            w[p++] = w[at];
+            w[at] = (uint16_t)stub;
+            break;
+        case TR_CALL:                   /* a two-word instruction, moved here */
+            w[p++] = w[at];
+            w[p++] = w[at + 1];
+            w[p++] = 0x4580;            /* ret */
+            w[at] = 0x41c0;             /* call stub */
+            w[at + 1] = (uint16_t)stub;
+            break;
+        }
+    }
+}
+
+static uint32_t trace_read(void)
+{
+    uint32_t mask = 0;
+
+    for (uint32_t i = 0; i < TRACE_POINTS; i++)
+        if (sm_r16(TRACE_OFF + i * 2) == TRACE_MARK(i))
+            mask |= 1u << i;
+    return mask;
+}
+
 /* ---- boot ------------------------------------------------------------------- */
 
 static int download_block(const uint16_t *prog, uint32_t off, uint32_t n)
@@ -344,7 +482,8 @@ static int download_block(const uint16_t *prog, uint32_t off, uint32_t n)
         return -1;
     if (wait_dsp_irq(WAIT_BLOCK_US))
         return -1;
-    REG32(APB_INT_SET_CLR) = 4u | 8u;
+    REG32(APB_INT_SET_CLR) = 4u;        /* the stock clears one at a time */
+    REG32(APB_INT_SET_CLR) = 8u;
     sm_w16(0, sm_r16(0) & ~ARM_START_COPY);
     return 0;
 }
@@ -355,13 +494,19 @@ static int download(const uint16_t *prog, uint32_t words)
 
     /* reset held, control block cleared, ARM_READY */
     REG32(APB_EB0_SET) = DSP_RESET;
-    for (uint32_t i = 0; i < 10; i++)
-        sm_w16(i * 2, 0);
+    if (banks_for_arm)
+        REG32(APB_MCU_CTL0) |= IRAM_BANKS;
+    else
+        REG32(APB_MCU_CTL0) &= ~IRAM_BANKS;
+    for (uint32_t i = 0; i < SHARE_CLEAR_BOOT; i += 2)
+        *(volatile uint16_t *)(SHARE + i) = 0;
+    fe0_init();
     sm_w16(0, ARM_READY);
 
     REG32(APB_DSP_CTL0) = (REG32(APB_DSP_CTL0) & ~0xf8u) | (USER_RST_MODE << 3);
     REG32(APB_MCU_CTL0) = (REG32(APB_MCU_CTL0) & 0xffff0000u) | BOOT_VECTOR;
     REG32(APB_MCU_CTL0) |= 0x10000u;    /* ARM_BOOT_EN */
+    udelay(20);                         /* the stock: 400 loops here */
     sm_w16(0, ARM_READY);
     dsp_info.stage = 3;
 
@@ -372,24 +517,29 @@ static int download(const uint16_t *prog, uint32_t words)
     dsp_info.ready_word = sm_r16(2);
     dsp_info.stage = 4;
 
+    /* Stock FUN_0003a92a: offset (b & 0x3f) << 10 is both dl_offset and the
+     * source, so blocks 64 and 65 send words 0..1324 again and the boot ROM
+     * never gets words 65536.. (the parameter records, sent later by
+     * command 0). Copying from b * 1024 put the records over the reset
+     * vector. */
     for (uint32_t b = 0; b < blocks; b++) {
-        uint32_t off = b * BLOCK_HW;
-        uint32_t n = off + BLOCK_HW <= words ? BLOCK_HW : words - off;
+        uint32_t pos = b * BLOCK_HW;
+        uint32_t n = pos + BLOCK_HW <= words ? BLOCK_HW : words - pos;
 
-        if (download_block(prog, off, n))
+        if (download_block(prog, (b & 63u) * BLOCK_HW, n))
             return DSP_EBLOCK;
         dsp_info.blocks = b + 1;
-        dsp_info.program_words = off + n;
+        dsp_info.program_words = pos + n;
     }
     sm_w16(0, ARM_BOOT_DONE);
     dsp_info.stage = 5;
 
-    /* the stock sleeps 13 ms before changing the strap */
-    thread_sleep(13);
+    /* FUN_0003aa76 goes straight on (its "13" is the IRQ line it disables) */
+    *sm(NORMAL_START) = 0xffffu;
     REG32(APB_DSP_CTL0) = (REG32(APB_DSP_CTL0) & ~0xf8u) | (EXT_PROG_MODE << 3);
     REG32(APB_MCU_CTL0) &= ~0x10000u;
     REG32(APB_EB0_SET) = DSP_RESET;
-    udelay(10);
+    udelay(50);                         /* the stock: 99 loops; at least as long */
     REG32(APB_EB0_CLR) = DSP_RESET;     /* the program runs */
     dsp_info.stage = 6;
     return DSP_OK;
@@ -414,6 +564,8 @@ int dsp_boot(void)
     buf = load_program(&prog, &err);
     if (buf) {
         sm_clear(0, SHARE_CLEAR);       /* stock: before the download */
+        fe0_init();
+        block0_crc = crc32_msb((const uint8_t *)prog, BLOCK_HW * 2, 0xffffffffu);
         err = download(prog, SEG_HW);
         kfree(buf);
     }
@@ -441,6 +593,11 @@ void dsp_hold_reset(void)
     REG32(APB_EB0_SET) = DSP_RESET;
 }
 
+void dsp_set_trace(bool on)
+{
+    trace_on = on;
+}
+
 void dsp_stop(void)
 {
     irq_stop();
@@ -449,6 +606,7 @@ void dsp_stop(void)
         REG32(APB_MCU_CTL0) &= ~0x10000u;
         REG32(APB_INT_SET_CLR) = 4u | 8u;
     }
+    REG32(APB_MCU_CTL0) |= IRAM_BANKS;  /* the reset is held: the ARM's again */
     if (dsp_info.state != DSP_FAILED)
         dsp_info.state = DSP_OFF;
     hold_cpu(false);
@@ -500,11 +658,63 @@ static int post_cmd(const uint16_t cmd[5])
     return DSP_OK;
 }
 
-/* Taken: the DSP's "out" caught up, or it interrupted since. */
+/* What the stock's two DSP interrupts do (FUN_0004ee54, FUN_0003ab0a), by
+ * polling: the response ring read out and kept, a message on the control
+ * block taken and acknowledged, the status bits cleared. */
+static void l1_service(void)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    uint32_t irq = arch_irq_save();     /* the thread polls it, the interrupt too */
+    uint32_t in = sm_r16(RESP_IN), out = sm_r16(RESP_OUT);
+    uint32_t st = REG32(APB_INT_STS0);
+
+    if (in < RESP_SLOTS && out < RESP_SLOTS && in != out) {
+        while (out != in) {
+            out = (out + 1) & (RESP_SLOTS - 1);
+            /* kept unless it is an ack: there are 64 of those */
+            if (sm_r16(RESP_BASE + out * 10) == RESP_RECORD_ACK) {
+                for (uint32_t i = 0; i < 5; i++)
+                    p->last_ack[i] = sm_r16(RESP_BASE + out * 10 + i * 2);
+            } else if (p->reply_kept < DSP_PROBE_REPLIES) {
+                for (uint32_t i = 0; i < 5; i++)
+                    p->reply[p->reply_kept][i] = sm_r16(RESP_BASE + out * 10 + i * 2);
+                p->reply_kept++;
+            }
+            p->replies++;
+        }
+        sm_w16(RESP_OUT, (uint16_t)out);
+    }
+    if (sm_r16(FE0_ACK) == 0) {
+        uint32_t m = (uint32_t)sm_r16(FE0_MSG) << 16 | sm_r16(FE0_PARAM);
+
+        if (!p->msgs) {
+            p->msg_first = m;
+            p->msg_phase = p->phase;
+        }
+        p->msg_last = m;
+        p->msgs++;
+        *sm(FE0_ACK) = 1;
+    }
+    if (st & 8u)
+        REG32(APB_INT_SET_CLR) = 8u;
+    p->int_sts |= st;
+    arch_irq_restore(irq);
+}
+
+void l1_poll(void)
+{
+    l1_service();
+}
+
+/* Taken: the DSP's "out" caught up, or it answered, or it interrupted. */
 static int wait_cmd_taken(uint32_t irqs_before)
 {
+    uint32_t replies = dsp_probe_info.replies;
+
     for (uint32_t us = 0; us < WAIT_CMD_US; us += 100) {
-        if (sm_r16(CMD_OUT) == sm_r16(CMD_IN) || dsp_info.irqs != irqs_before)
+        l1_service();
+        if (sm_r16(CMD_OUT) == sm_r16(CMD_IN) || dsp_probe_info.replies != replies ||
+            dsp_info.irqs != irqs_before)
             return DSP_OK;
         udelay(100);
     }
@@ -541,6 +751,99 @@ static int send_records(void)
     return DSP_OK;
 }
 
+/* ---- the parameter blocks ----------------------------------------------------- */
+
+/* The fixed NV list (stock FUN_0002253c): after a 4-byte header, items of
+ * { u16 id, u16 bytes, data }, each padded to 4 bytes, up to id 0xffff. Read
+ * from this phone's own NOR: it is its calibration, and nothing of it is
+ * carried here. */
+#define NV_BASE         0x00680000u
+#define NV_SPAN         0x00020000u
+#define NV_RF_ID        1u              /* 1012 bytes, type 1 */
+#define NV_RF_BYTES     0x3f4u
+#define NV_CAL_ID       2u              /* types 3..15, after a version word */
+#define NV_CAL_BYTES    0x1784u
+#define NV_CLASS_ID     3u              /* bytes 42, 44..46: types 4..7 wanted */
+#define NV_CLASS_MIN    47u
+
+static const uint8_t *nv_item(uint32_t id, uint32_t min_bytes)
+{
+    uint32_t p = NV_BASE + 4;
+
+    while (p + 4 <= NV_BASE + NV_SPAN) {
+        uint32_t item = *(const uint16_t *)p, len = *(const uint16_t *)(p + 2);
+
+        if (item == 0xffffu)
+            return NULL;
+        if (item == id)
+            return len >= min_bytes ? (const uint8_t *)(p + 4) : NULL;
+        p = (p + 4 + len + 3) & ~3u;
+    }
+    return NULL;
+}
+
+/* FUN_000606ea: a block to +0x6f6, then command 0 with the type in word 1. */
+static int send_block(uint32_t type, const uint8_t *src, uint32_t bytes)
+{
+    const uint16_t *w = (const uint16_t *)src;
+    uint16_t cmd[5] = { 0, (uint16_t)type, 0, 0, 0 };
+    uint32_t irqs;
+    int rc;
+
+    for (uint32_t i = 0; i < bytes / 2; i++)
+        *sm(REC_DATA + i * 2) = w[i];
+    irqs = dsp_info.irqs;
+    rc = post_cmd(cmd);
+    if (rc == DSP_OK)
+        rc = wait_cmd_taken(irqs);
+    return rc;
+}
+
+/* The list's types 1, 3..15 (table at FUN_000606ea): type 1 is all of NV item
+ * 1. The rest lie end to end in NV item 2 behind its version word, in this
+ * order of offset: 3, 4, 12, 5, 13, 6, 14, 7, 15 (8..11 are parts of them). */
+static int send_parameters(void)
+{
+    static const struct {
+        uint8_t type, wanted_by;        /* a byte of NV item 3, or 0: always */
+        uint16_t offset, bytes;
+    } cal[] = {
+        { 3, 0, 0x0000, 126 }, { 4, 42, 0x007e, 792 }, { 5, 44, 0x0616, 792 },
+        { 6, 45, 0x0bae, 792 }, { 7, 46, 0x1146, 792 }, { 8, 0, 0x0300, 70 },
+        { 9, 0, 0x0898, 150 }, { 10, 0, 0x0e30, 120 }, { 11, 0, 0x13c8, 50 },
+        { 12, 0, 0x0396, 640 }, { 13, 0, 0x092e, 640 }, { 14, 0, 0x0ec6, 640 },
+        { 15, 0, 0x145e, 640 },
+    };
+    const uint8_t *rf = nv_item(NV_RF_ID, NV_RF_BYTES);
+    const uint8_t *calib = nv_item(NV_CAL_ID, NV_CAL_BYTES);
+    const uint8_t *cls = nv_item(NV_CLASS_ID, NV_CLASS_MIN);
+    int rc;
+
+    if (!rf || !calib || !cls)
+        return DSP_EIMAGE;
+    if ((rc = send_block(1, rf, NV_RF_BYTES)) != DSP_OK)
+        return rc;
+    dsp_info.param_blocks++;
+    for (uint32_t i = 0; i < sizeof(cal) / sizeof(cal[0]); i++) {
+        if (cal[i].wanted_by && !cls[cal[i].wanted_by])
+            continue;
+        rc = send_block(cal[i].type, calib + 2 + cal[i].offset, cal[i].bytes);
+        if (rc != DSP_OK)
+            return rc;
+        dsp_info.param_blocks++;
+    }
+    return DSP_OK;
+}
+
+static int send_start(void)
+{
+    static const uint16_t start[5] = { 0, CMD_START, 0, 0, 0 };
+    uint32_t irqs = dsp_info.irqs;
+    int rc = post_cmd(start);
+
+    return rc == DSP_OK ? wait_cmd_taken(irqs) : rc;
+}
+
 int l1_start(void)
 {
     int rc;
@@ -548,21 +851,37 @@ int l1_start(void)
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;
     dsp_info.records = dsp_info.cmds = dsp_info.frames_posted = 0;
+    dsp_info.started = 0;
+    dsp_info.param_blocks = 0;
     dsp_info.fi_moves = dsp_info.pm_results = 0;
     /* stock FUN_0002e98e: clear, interrupt on, clear, start marker */
     sm_clear(0, SHARE_CLEAR);
+    fe0_init();
     irq_start();
     sm_clear(0, SHARE_CLEAR);
-    sm_w16(SHARE_START, START_MARK);
+    *sm(SHARE_START) = START_MARK;      /* a plain store, as the stock's */
     frame_number = 0;
     dsp_info.fi_out = sm_r16(FI_OUT);
     rc = send_records();
+    /* The stock's list (NOR 0xc800c) is 0, 0x10, 1, 3..15, 0x10: the records,
+     * the start, the parameters, the start. The program sits in its wait at
+     * 0x1907 until command 0 with word 1 = 0x10 sets 0x1063 and enables its
+     * interrupt 9 (handler 0x9961); nothing else makes it go on. */
+    if (rc == DSP_OK) {
+        rc = send_start();
+        dsp_info.started = rc == DSP_OK;
+    }
+    if (rc == DSP_OK)
+        rc = send_parameters();
+    if (rc == DSP_OK)
+        rc = send_start();
     dsp_info.error = rc;
     if (rc == DSP_OK)
         dsp_info.stage = 7;
-    klog("dsp: layer 1 %s, %lu of %lu record halfwords sent, %lu irqs",
+    klog("dsp: layer 1 %s, %lu records, start %lu, %lu parameter blocks, %lu irqs",
          rc == DSP_OK ? "up" : dsp_strerror(rc), (unsigned long)dsp_info.records,
-         (unsigned long)records_hw, (unsigned long)dsp_info.irqs);
+         (unsigned long)dsp_info.started, (unsigned long)dsp_info.param_blocks,
+         (unsigned long)dsp_info.irqs);
     return rc;
 }
 
@@ -623,14 +942,6 @@ static int post_fi(const uint16_t fi[11], const uint16_t ext[3])
     sm_w16(FI_IN, (uint16_t)next);
     dsp_info.frames_posted++;
     frame_number = (frame_number + 1) % FN_MOD;
-
-    /* FUN_0005f208(3): ask the DSP for an interrupt three frames before
-     * the ring runs dry. */
-    if ((next + FI_SLOTS - out) % FI_SLOTS > 5) {
-        uint32_t slot = (next + FI_SLOTS - 3) % FI_SLOTS;
-
-        sm_w16(FI_BASE + slot * FI_SIZE, sm_r16(FI_BASE + slot * FI_SIZE) | FI_ASK_MORE);
-    }
     note_fi_out();
     return DSP_OK;
 }
@@ -647,6 +958,39 @@ static void fi_init(uint16_t fi[11], uint16_t ext[3], unsigned type)
     fi[0] = (uint16_t)(type & 0x1f);
     fi[1] = (uint16_t)(((frame_number >> 16) & 0x7f) << 9);
     fi[2] = (uint16_t)frame_number;
+}
+
+/* FUN_0005f208(n): one instruction, n slots back from the last written, asks
+ * the DSP for an interrupt when it gets there. */
+void l1_ask_more(int back)
+{
+    uint32_t in = sm_r16(FI_IN);
+    uint32_t slot;
+
+    if (in >= FI_SLOTS || back < 0 || back >= (int)FI_SLOTS)
+        return;
+    slot = (in + FI_SLOTS - (uint32_t)back) % FI_SLOTS;
+    sm_w16(FI_BASE + slot * FI_SIZE, sm_r16(FI_BASE + slot * FI_SIZE) | FI_ASK_MORE);
+}
+
+/* The stock's start of the frame clock (0x5a874, also 0x2ea1a): frame number 0,
+ * four idle frames, the ask-more flag two back, then command 1 with 0, whose
+ * handler (0x9a20) sets bit 2 of 0xff72. Frames go first: the DSP starts on
+ * them at once. */
+int l1_run(void)
+{
+    static const uint16_t go[5] = { 1, 0, 0, 0, 0 };
+    uint32_t irqs = dsp_info.irqs;
+    int rc;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    frame_number = 0;
+    if ((rc = l1_idle_post(4)) != DSP_OK)
+        return rc;
+    l1_ask_more(2);
+    rc = post_cmd(go);
+    return rc == DSP_OK ? wait_cmd_taken(irqs) : rc;
 }
 
 int l1_idle_post(int frames)
@@ -709,4 +1053,437 @@ int l1_pm_read(l1_pm_t *res, int max)
     dsp_info.pm_results += (uint32_t)n;
     note_fi_out();
     return n;
+}
+
+/* ---- our own small program --------------------------------------------------- */
+
+volatile dsp_selftest_t dsp_selftest_info;
+
+#define TINY_WORDS      (2 * BLOCK_HW)  /* two blocks: the path the real one takes */
+#define TINY_START      0x20u
+#define TINY_MARK0      0xfc0u          /* DSP 0xafe0: the first thing it does */
+#define TINY_MARK1      0xfc2u          /* 0xafe1: after stock's first set-up */
+#define TINY_COUNT      0xfc4u          /* 0xafe2: the running count */
+#define TINY_IN         0xfc6u          /* 0xafe3: it reads this ... */
+#define TINY_ECHO       0xfc8u          /* 0xafe4: ... and writes it here */
+
+/* Hand-assembled TeakLite, nothing from the stock program. The first set-up
+ * is the register writes stock's reset code starts with (0x2bc), in case the
+ * memory needs them; a mark on each side tells. Each pass of the loop takes
+ * about 266 DSP cycles, so the count gives the DSP's clock. */
+static void tiny_build(uint16_t *w)
+{
+    static const uint16_t setup[][2] = {
+        { 0xffff, 0xbd49 }, { 0x0000, 0xbd49 }, { 0x1387, 0xbd46 },
+        { 0x0001, 0xbd47 }, { 0x0800, 0xbdf0 }, { 0x0007, 0xbdf1 },
+    };
+    uint32_t p = TINY_START, loop;
+
+    memset(w, 0, TINY_WORDS * 2);       /* nop */
+    w[0] = 0x4180;                      /* br start */
+    w[1] = TINY_START;
+#define STORE(v, addr) do { w[p++] = 0x5e18; w[p++] = (v);  /* mov v, a0 */ \
+                            w[p++] = 0xd4bc; w[p++] = (addr); } while (0)
+    STORE(0x5a01, 0xafe0);
+    for (uint32_t i = 0; i < sizeof(setup) / sizeof(setup[0]); i++)
+        STORE(setup[i][0], setup[i][1]);
+    STORE(0x5a02, 0xafe1);
+#undef STORE
+    w[p++] = 0x6760;                    /* clr a0 */
+    loop = p;
+    w[p++] = 0x67d0;                    /* inc a0 */
+    w[p++] = 0xd4bc;                    /* mov a0l, [0xafe2] */
+    w[p++] = 0xafe2;
+    w[p++] = 0xd5b8;                    /* mov [0xafe3], a1 */
+    w[p++] = 0xafe3;
+    w[p++] = 0xd5bc;                    /* mov a1l, [0xafe4] */
+    w[p++] = 0xafe4;
+    w[p++] = 0x0cff;                    /* rep 0xff: */
+    w[p++] = 0x0000;                    /*   nop */
+    w[p++] = 0x4180;                    /* br loop */
+    w[p++] = (uint16_t)loop;
+}
+
+static void selftest_case(volatile dsp_selftest_case_t *r, bool arm_banks)
+{
+    uint16_t *w = kmalloc(TINY_WORDS * 2);
+    uint32_t c0, c1, c2, t;
+
+    if (!w) {
+        r->result = DSP_ENOMEM;
+        return;
+    }
+    tiny_build(w);
+    banks_for_arm = arm_banks;
+    r->result = download(w, TINY_WORDS);
+    kfree(w);
+    r->mcu_ctl0 = REG32(APB_MCU_CTL0);
+    r->dsp_ctl0 = REG32(APB_DSP_CTL0);
+    if (r->result == DSP_OK) {
+        *sm(TINY_IN) = 0x1234;
+        t = kernel_ticks();
+        while (kernel_ticks() - t < 5)
+            ;
+        r->mark0 = sm_r16(TINY_MARK0);
+        r->mark1 = sm_r16(TINY_MARK1);
+        r->echo = sm_r16(TINY_ECHO);
+        /* the count over 20 ms with the ARM busy, then with it idle */
+        c0 = sm_r16(TINY_COUNT);
+        t = kernel_ticks();
+        while (kernel_ticks() - t < 20)
+            ;
+        c1 = sm_r16(TINY_COUNT);
+        thread_sleep(20);
+        c2 = sm_r16(TINY_COUNT);
+        r->busy = (c1 - c0) & 0xffffu;
+        r->idle = (c2 - c1) & 0xffffu;
+    }
+    REG32(APB_EB0_SET) = DSP_RESET;
+    REG32(APB_MCU_CTL0) &= ~0x10000u;
+    REG32(APB_MCU_CTL0) |= IRAM_BANKS;
+    REG32(APB_INT_SET_CLR) = 4u;
+    REG32(APB_INT_SET_CLR) = 8u;
+    banks_for_arm = false;
+    klog("dsp: own program, IRAM bits %s: %d, marks %04lx %04lx, echo %04lx, "
+         "count %lu busy, %lu idle per 20 ms", arm_banks ? "set" : "clear", (int)r->result,
+         (unsigned long)r->mark0, (unsigned long)r->mark1, (unsigned long)r->echo,
+         (unsigned long)r->busy, (unsigned long)r->idle);
+}
+
+void dsp_selftest(void)
+{
+    if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING)
+        return;
+    memset((void *)&dsp_selftest_info, 0, sizeof(dsp_selftest_info));
+    hold_cpu(true);
+    selftest_case(&dsp_selftest_info.banks_set, true);
+    selftest_case(&dsp_selftest_info.banks_clear, false);
+    dsp_info.stage = 0;
+    dsp_info.blocks = dsp_info.program_words = 0;
+    dsp_info.ready_word = 0;
+    hold_cpu(false);
+}
+
+/* ---- does it run? ----------------------------------------------------------- */
+
+/* Compares a dumped block with the parameter records, which give each
+ * word's DSP address: the words the DSP holds that the ARM sent it. */
+static void compare_records(const uint16_t *block, uint32_t first)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    uint32_t r = 0;
+
+    while (r < records_hw) {
+        uint32_t n = records[r] & 0x7fffu;
+
+        if (!n || r + 1 + n > records_hw)
+            break;
+        for (uint32_t i = 1; i < n; i++) {
+            uint32_t addr = records[r + 1] + i - 1;
+
+            if (addr >= first && addr < first + BLOCK_HW) {
+                p->rec_words++;
+                if (block[addr - first] == records[r + 1 + i])
+                    p->rec_match++;
+            }
+        }
+        r += 1 + n;
+    }
+}
+
+static void save_file(const char *path, const void *data, uint32_t len, FIL *f, bool *open)
+{
+    UINT n;
+
+    if (!*open && f_open(f, path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+        *open = true;
+    if (*open && len)
+        f_write(f, data, len, &n);
+}
+
+/* The stock's crash dump (FUN_0001a516, FUN_000185fc): ask with 3 and the
+ * fast interrupt, the DSP answers 1; then for each of 64 blocks it copies
+ * 1024 words of its memory to the start of share memory. */
+static void ping_and_dump(void)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    uint16_t *block = kmalloc(BLOCK_HW * 2);
+    FIL *f = kmalloc(sizeof(FIL));
+    bool open = false;
+
+    p->phase = DSP_P_PING;
+    thread_sleep(250);                  /* the screen shows it, should this stall */
+    p->ping_before = sm_r16(FE0_REPLY);
+    *sm(FE0_REPLY) = 0;
+    *sm(FE0_CMD) = 3;
+    REG32(APB_INT_SET_CLR) |= 2u;       /* MCU_FRQ_SET, read-modify-write as stock */
+    for (uint32_t t = 0; t < 200; t++) {
+        thread_sleep(1);
+        l1_service();
+        p->ping_after = sm_r16(FE0_REPLY);
+        if (p->ping_after == 1) {
+            p->ping_ms = t + 1;
+            break;
+        }
+    }
+    if (p->ping_after != 1 || !block || !f)
+        goto done;
+
+    p->phase = DSP_P_DUMP;
+    thread_sleep(250);
+    for (uint32_t b = 0; b < 64; b++) {
+        uint32_t first = b * BLOCK_HW, t;
+
+        *sm(FE0_START) = (uint16_t)first;
+        *sm(FE0_COUNT) = BLOCK_HW;
+        *sm(FE0_REPLY) = 0;
+        for (t = 0; t < 100 && sm_r16(FE0_REPLY) == 0; t++)
+            thread_sleep(1);
+        if (t == 100)
+            break;
+        for (uint32_t i = 0; i < BLOCK_HW; i++) {
+            block[i] = sm_r16(i * 2);
+            if (block[i])
+                p->dump_nonzero++;
+        }
+        if (b == 0) {
+            for (uint32_t i = 0; i < 4; i++)
+                p->dump_head[i] = block[i];
+            p->dump_is_program = crc32_msb((const uint8_t *)block, BLOCK_HW * 2,
+                                           0xffffffffu) == block0_crc;
+        }
+        if (records)
+            compare_records(block, first);
+        save_file(OS_DIR "/dsp-dump.bin", block, BLOCK_HW * 2, f, &open);
+        p->dump_blocks = b + 1;
+    }
+done:
+    if (open)
+        f_close(f);
+    kfree(f);
+    kfree(block);
+}
+
+/* Share memory as it is, for reading on a PC. */
+static void save_share(void)
+{
+    uint16_t *copy = kmalloc(SHARE_CLEAR);
+    FIL *f = kmalloc(sizeof(FIL));
+    bool open = false;
+
+    if (copy && f) {
+        for (uint32_t i = 0; i < SHARE_CLEAR; i += 2)
+            copy[i / 2] = sm_r16(i);
+        save_file(OS_DIR "/dsp-share.bin", copy, SHARE_CLEAR, f, &open);
+        if (open)
+            f_close(f);
+    }
+    kfree(f);
+    kfree(copy);
+}
+
+const char *dsp_probe_verdict(void)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+
+    /* Only what the DSP itself must have produced. QEMU's model answers the
+     * ping and nothing else, and the ping alone is not counted. */
+    if (p->rec_words && p->rec_match * 2 > p->rec_words)
+        return "runs: memory matches";
+    if ((p->trace_start | p->trace_end) && !(p->replies || p->msgs || p->idle_consumed))
+        return "runs, stops early";
+    if (p->replies || p->msgs || p->records_taken)
+        return "runs: it answers";
+    if (p->ping_after != 1)
+        return "never started";
+    if (p->ping_after == 1)
+        return "ping only";
+    return "no answer";
+}
+
+static void save_report(void)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    char *t = kmalloc(2048);
+    FIL *f = kmalloc(sizeof(FIL));
+    bool open = false;
+    int n = 0;
+
+    if (t && f) {
+#define OUT(...) n += snprintf(t + n, 2048 - (size_t)n, __VA_ARGS__)
+        OUT("verdict %s\nphase %lu\nboot: %lu blocks, %lu ms, ready %04lx\n",
+            dsp_probe_verdict(), (unsigned long)p->phase, (unsigned long)dsp_info.blocks,
+            (unsigned long)dsp_info.boot_ms, (unsigned long)dsp_info.ready_word);
+        for (int i = 0; i < 2; i++) {
+            volatile dsp_selftest_case_t *r = i ? &dsp_selftest_info.banks_clear :
+                                                  &dsp_selftest_info.banks_set;
+
+            OUT("own program, %s: %d, marks %04lx %04lx, echo %04lx, count %lu busy "
+                "%lu idle, 1a0 %08lx 1c0 %08lx\n",
+                i ? "IRAM bits clear" : "IRAM bits set",
+                (int)r->result,
+                (unsigned long)r->mark0, (unsigned long)r->mark1, (unsigned long)r->echo,
+                (unsigned long)r->busy, (unsigned long)r->idle, (unsigned long)r->mcu_ctl0,
+                (unsigned long)r->dsp_ctl0);
+        }
+        OUT("stock with marks: trace %04lx at start, %04lx after records, %04lx at end\n",
+            (unsigned long)dsp_selftest_info.trace_start,
+            (unsigned long)dsp_selftest_info.trace_records,
+            (unsigned long)dsp_selftest_info.trace_end);
+        OUT("stock unpatched below%s\n", trace_on ? " (marks on)" : "");
+        OUT("at start: %lu non-zero share words, first %08lx\n",
+            (unsigned long)p->early_words, (unsigned long)p->early_first);
+        OUT("records %lu of %lu, irqs %lu, storms %lu, status bits %08lx\n",
+            (unsigned long)p->records_taken, (unsigned long)p->records_total,
+            (unsigned long)dsp_info.irqs, (unsigned long)dsp_info.irq_storms,
+            (unsigned long)p->int_sts);
+        OUT("start command %s\ncommands: in %lu out %lu\nreplies %lu, other than acks %lu\n",
+            dsp_info.started ? "taken" : "not taken", (unsigned long)p->cmd_in,
+            (unsigned long)p->cmd_out, (unsigned long)p->replies, (unsigned long)p->reply_kept);
+        for (uint32_t i = 0; i < p->reply_kept; i++)
+            OUT(" %04lx %04lx %04lx %04lx %04lx\n", (unsigned long)p->reply[i][0],
+                (unsigned long)p->reply[i][1], (unsigned long)p->reply[i][2],
+                (unsigned long)p->reply[i][3], (unsigned long)p->reply[i][4]);
+        OUT("messages %lu, first %08lx in phase %lu, last %08lx (ffff....: DSP assert)\n",
+            (unsigned long)p->msgs, (unsigned long)p->msg_first, (unsigned long)p->msg_phase,
+            (unsigned long)p->msg_last);
+        OUT("parameter blocks %lu\n", (unsigned long)dsp_info.param_blocks);
+        OUT("run command %s; idle frames: %lu posted, %lu taken in 400 ms, %lu us each "
+            "(GSM: 4615)\n", p->wake_taken ? "taken" : "not taken",
+            (unsigned long)p->idle_posted, (unsigned long)p->idle_consumed,
+            (unsigned long)p->frame_us);
+        OUT("last ack: %04lx %04lx %04lx %04lx %04lx\n", (unsigned long)p->last_ack[0],
+            (unsigned long)p->last_ack[1], (unsigned long)p->last_ack[2],
+            (unsigned long)p->last_ack[3], (unsigned long)p->last_ack[4]);
+        OUT("ping: before %04lx, after %04lx, %lu ms\n", (unsigned long)p->ping_before,
+            (unsigned long)p->ping_after, (unsigned long)p->ping_ms);
+        OUT("dump: %lu blocks, %lu non-zero words, head %04lx %04lx %04lx %04lx, "
+            "program %lu, record words %lu of %lu\n", (unsigned long)p->dump_blocks,
+            (unsigned long)p->dump_nonzero, (unsigned long)p->dump_head[0],
+            (unsigned long)p->dump_head[1], (unsigned long)p->dump_head[2],
+            (unsigned long)p->dump_head[3], (unsigned long)p->dump_is_program,
+            (unsigned long)p->rec_match, (unsigned long)p->rec_words);
+#undef OUT
+        save_file(OS_DIR "/dsp-report.txt", t, (uint32_t)n, f, &open);
+        if (open)
+            f_close(f);
+    }
+    kfree(f);
+    kfree(t);
+}
+
+/* The frame ring's "out", watched over several steps. The ring is kept topped
+ * up with idle frames, so the time per frame is a sustained rate: the DSP's
+ * frame clock if the frames are taken one by one, near nothing if it only
+ * flushes them. */
+static struct {
+    uint32_t out, moves, first, last;
+} watch;
+
+static void watch_start(void)
+{
+    watch.out = sm_r16(FI_OUT);         /* before anything is posted */
+    watch.moves = watch.first = watch.last = 0;
+}
+
+/* Frames taken in these ms. */
+static uint32_t watch_frames(uint32_t ms)
+{
+    uint32_t before = watch.moves;
+
+    for (uint32_t t = 0; t < ms; t++) {
+        uint32_t now;
+        int free_slots;
+
+        thread_sleep(1);
+        l1_service();
+        now = sm_r16(FI_OUT);
+        if (now < FI_SLOTS && now != watch.out) {
+            if (!watch.moves)
+                watch.first = kernel_ticks();
+            watch.last = kernel_ticks();
+            watch.moves += (now + FI_SLOTS - watch.out) % FI_SLOTS;
+            watch.out = now;
+        }
+        free_slots = l1_fi_free();
+        if (free_slots > 8 && l1_idle_post(free_slots - 4) == DSP_OK) {
+            dsp_probe_info.idle_posted += (uint32_t)(free_slots - 4);
+            l1_ask_more(3);
+        }
+    }
+    if (watch.moves > 1)
+        dsp_probe_info.frame_us = (watch.last - watch.first) * 1000 / (watch.moves - 1);
+    return watch.moves - before;
+}
+
+int dsp_probe(void)
+{
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    int rc;
+
+    memset((void *)p, 0, sizeof(*p));
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+
+    /* What it wrote on its own: everything above the download area was
+     * cleared before the download. */
+    p->phase = DSP_P_START;
+    thread_sleep(100);
+    p->trace_start = trace_read();
+    for (uint32_t i = 0x808; i < SHARE_CLEAR; i += 2) {
+        uint16_t v = sm_r16(i);
+
+        if (v) {
+            if (!p->early_words)
+                p->early_first = i << 16 | v;
+            p->early_words++;
+        }
+    }
+
+    p->phase = DSP_P_RECORDS;
+    for (uint32_t r = 0; r < records_hw; ) {
+        uint32_t n = records[r] & 0x7fffu;
+
+        if (!n || r + 1 + n > records_hw)
+            break;
+        p->records_total++;
+        r += 1 + n;
+    }
+    rc = l1_start();
+    p->records_taken = dsp_info.records;
+    p->cmd_in = sm_r16(CMD_IN);
+    p->cmd_out = sm_r16(CMD_OUT);
+
+    /* Idle frames only, so no radio use: the "out" index shows whether the
+     * DSP's frame clock runs, at one frame per 4.615 ms if it does. */
+    if (rc == DSP_OK && p->records_taken) {
+        p->phase = DSP_P_FRAMES;
+        thread_sleep(250);
+        watch_start();
+        if (l1_run() == DSP_OK) {
+            p->wake_taken = 1;
+            p->idle_posted = 4;
+            p->idle_consumed = watch_frames(400);
+        }
+    }
+
+    p->trace_records = trace_read();
+    save_share();
+    ping_and_dump();
+    l1_service();
+    p->trace_end = trace_read();
+    p->phase = DSP_P_DONE;
+    save_report();
+    klog("dsp: trace %04lx at start, %04lx after records, %04lx at end",
+         (unsigned long)p->trace_start, (unsigned long)p->trace_records,
+         (unsigned long)p->trace_end);
+    klog("dsp: probe: %s; records %lu/%lu, irqs %lu, replies %lu, messages %lu, "
+         "frames %lu at %lu us, ping %04lx, dump %lu blocks, record words %lu/%lu",
+         dsp_probe_verdict(), (unsigned long)p->records_taken,
+         (unsigned long)p->records_total, (unsigned long)dsp_info.irqs,
+         (unsigned long)p->replies, (unsigned long)p->msgs, (unsigned long)p->idle_consumed,
+         (unsigned long)p->frame_us, (unsigned long)p->ping_after,
+         (unsigned long)p->dump_blocks, (unsigned long)p->rec_match,
+         (unsigned long)p->rec_words);
+    return DSP_OK;
 }

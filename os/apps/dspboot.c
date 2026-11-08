@@ -1,8 +1,10 @@
 /* B310E OS — Tools / DSP boot: a boot check for os/drivers/dsp.c.
  *
- * Boots the DSP from this phone's NOR in a short-lived thread, shows how
- * far the download got (stage, blocks, the DSP_READY word, the time),
- * then holds the DSP in reset again. Nothing else is sent to it.
+ * Boots the DSP from this phone's NOR in a short-lived thread, then checks
+ * that the program really runs (dsp_probe(): its parameter records, idle
+ * frames, the stock's ping and memory dump), shows what came back and holds
+ * the DSP in reset again. Nothing uses the radio. The whole report and the
+ * dump are on the card: /b310e-os/dsp-report.txt, dsp-share.bin, dsp-dump.bin.
  * Center runs it again.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -21,13 +23,31 @@ volatile struct {
     int32_t result;                     /* dsp_boot() */
 } dspboot_status;
 
-static const char *const stages[] = {
-    "-", "image found", "decoded", "reset", "ROM ready", "downloaded", "started",
+static const char *const phases[] = {
+    "booting...", "started, watching", "sending records", "idle frames", "ping", "memory dump",
+    "saving",
 };
 
 static void worker(void *arg)
 {
+    dsp_probe_info.phase = 0;
+    /* Our own program first: does the DSP execute at all? */
+    dsp_selftest();
+    /* The stock program with start-up marks, then as the stock sends it (the
+     * report and the screen show this last run; the marks go in the report). */
+    dsp_set_trace(true);
+    if (dsp_boot() == DSP_OK) {
+        dsp_probe();
+        dsp_selftest_info.trace_start = dsp_probe_info.trace_start;
+        dsp_selftest_info.trace_records = dsp_probe_info.trace_records;
+        dsp_selftest_info.trace_end = dsp_probe_info.trace_end;
+    }
+    dsp_stop();
+    dsp_set_trace(false);
+    dsp_probe_info.phase = 0;
     dspboot_status.result = dsp_boot();
+    if (dspboot_status.result == DSP_OK)
+        dsp_probe();
     dsp_stop();
     dspboot_status.runs++;
     dspboot_status.busy = 0;
@@ -51,29 +71,47 @@ static void draw(screen_t *s)
 {
     char buf[24];
     int y = UI_TOP + 4, w = LCD_WIDTH - 2 * UI_PAD;
-    uint32_t stage = dsp_info.stage;
-    bool ok = dspboot_status.runs && !dspboot_status.busy && dspboot_status.result == DSP_OK;
+    volatile dsp_probe_t *p = &dsp_probe_info;
+    uint16_t c;
 
-    gfx_round(UI_PAD, y, w, 86, UI_RADIUS, C_CARD);
-    if (dspboot_status.busy)
-        snprintf(buf, sizeof(buf), "booting...");
-    else if (!dspboot_status.runs)
+    gfx_round(UI_PAD, y, w, 100, UI_RADIUS, C_CARD);
+    if (dspboot_status.busy) {
+        snprintf(buf, sizeof(buf), "%s", p->phase < 7 ? phases[p->phase] : "...");
+        c = C_TEXT;
+    } else if (!dspboot_status.runs) {
         snprintf(buf, sizeof(buf), "-");
-    else
-        snprintf(buf, sizeof(buf), "%s", ok ? "booted" : dsp_strerror(dspboot_status.result));
+        c = C_TEXT;
+    } else if (dspboot_status.result != DSP_OK) {
+        snprintf(buf, sizeof(buf), "%s", dsp_strerror(dspboot_status.result));
+        c = C_BAD;
+    } else {
+        const char *v = dsp_probe_verdict();
+
+        snprintf(buf, sizeof(buf), "%s", v);
+        c = v[0] == 'r' ? C_OK : C_WARN;
+    }
     /* the result alone on its line: an error's text is long */
-    gfx_text_centered(y + 6, buf, ok ? C_OK : dspboot_status.runs ? C_BAD : C_TEXT,
-                      FONT_SMALL, 1);
-    row(y + 20, "Stage", stages[stage < 7 ? stage : 0], C_TEXT);
-    snprintf(buf, sizeof(buf), "%lu", (unsigned long)dsp_info.blocks);
-    row(y + 34, "Blocks", buf, C_TEXT);
-    snprintf(buf, sizeof(buf), "%lu", (unsigned long)dsp_info.program_words);
-    row(y + 48, "Halfwords", buf, C_TEXT);
-    snprintf(buf, sizeof(buf), "%04lx", (unsigned long)dsp_info.ready_word);
-    row(y + 62, "Ready word", buf, C_TEXT);
-    snprintf(buf, sizeof(buf), "%lu ms", (unsigned long)dsp_info.boot_ms);
-    row(y + 76, "Time", buf, C_TEXT);
-    gfx_text_centered(UI_BOTTOM - 12, "Run: boot it again", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(y + 6, buf, c, FONT_SMALL, 1);
+    snprintf(buf, sizeof(buf), "%lu, %lu ms", (unsigned long)dsp_info.blocks,
+             (unsigned long)dsp_info.boot_ms);
+    row(y + 20, "Blocks", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%lu/%lu, %lu", (unsigned long)p->records_taken,
+             (unsigned long)p->records_total, (unsigned long)dsp_info.param_blocks);
+    row(y + 32, "Records", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%lu, %lu", (unsigned long)p->replies, (unsigned long)dsp_info.irqs);
+    row(y + 44, "Replies, IRQs", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%04lx", (unsigned long)dsp_selftest_info.trace_end);
+    row(y + 56, "Marks", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%lu, %lu us", (unsigned long)p->idle_consumed,
+             (unsigned long)p->frame_us);
+    row(y + 68, "Frames", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%lu %lu", (unsigned long)dsp_selftest_info.banks_set.busy,
+             (unsigned long)dsp_selftest_info.banks_clear.busy);
+    row(y + 80, "Own program", buf, C_TEXT);
+    snprintf(buf, sizeof(buf), "%lu, %lu/%lu", (unsigned long)p->dump_blocks,
+             (unsigned long)p->rec_match, (unsigned long)p->rec_words);
+    row(y + 92, "Dump, match", buf, C_TEXT);
+    gfx_text_centered(UI_BOTTOM - 12, "Run: again; report on card", C_DIM, FONT_SMALL, 1);
 }
 
 static void enter(screen_t *s)

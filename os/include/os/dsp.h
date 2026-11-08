@@ -51,9 +51,67 @@ typedef struct {
     uint32_t fi_moves;          /* times the DSP's "out" index moved */
     uint32_t pm_results;        /* power-monitor results read */
     uint32_t ready_word;        /* dsp_ctl seen at DSP_READY */
+    uint32_t started;           /* the DSP took the start command */
+    uint32_t param_blocks;      /* NV parameter blocks it took */
 } dsp_info_t;
 
 extern volatile dsp_info_t dsp_info;
+
+/* dsp_probe(): is the program really running? Each field is something only
+ * a running DSP can produce (see docs/gsm-plan.md). Words only, for QEMU
+ * tests through the ELF symbol dsp_probe_info. Append only. */
+enum { DSP_P_START = 1, DSP_P_RECORDS, DSP_P_FRAMES, DSP_P_PING, DSP_P_DUMP, DSP_P_DONE };
+#define DSP_PROBE_REPLIES 16
+typedef struct {
+    uint32_t phase;             /* DSP_P_*: the step begun last */
+    uint32_t early_words;       /* non-zero share words soon after the start */
+    uint32_t early_first;       /* the first: offset << 16 | value */
+    uint32_t records_total;
+    uint32_t records_taken;     /* parameter records the DSP took */
+    uint32_t cmd_in, cmd_out;
+    uint32_t int_sts;           /* status bits seen at 0x8b000140 */
+    uint32_t replies;           /* response-ring entries */
+    uint32_t msgs;              /* messages on the control block */
+    uint32_t msg_first, msg_last;       /* code << 16 | parameter */
+    uint32_t idle_posted, idle_consumed;
+    uint32_t frame_us;          /* measured time per idle frame */
+    uint32_t ping_before, ping_after, ping_ms;
+    uint32_t dump_blocks;       /* of 64, saved to dsp-dump.bin */
+    uint32_t dump_nonzero;
+    uint32_t dump_head[4];      /* the first four words */
+    uint32_t dump_is_program;   /* block 0 is the program's first block */
+    uint32_t rec_words, rec_match;      /* record words found in the dump */
+    uint32_t reply[DSP_PROBE_REPLIES][5];
+    /* Start-up trace: bit n, the program reached point n (trace_points[] in
+     * drivers/dsp.c; bit 0 the reset vector, 7 waiting, 9 command handler). */
+    uint32_t trace_start, trace_records, trace_end;
+    uint32_t reply_kept;        /* in reply[]: all but the records' acks */
+    uint32_t wake_taken;        /* the run command (l1_run) was taken */
+    uint32_t after_wake;        /* unused */
+    uint32_t after_each_wake[3];        /* unused */
+    uint32_t last_ack[5];       /* the last ack: word 2.. carry the DSP's ids */
+    uint32_t msg_phase;         /* DSP_P_* when the first message came */
+} dsp_probe_t;
+
+extern volatile dsp_probe_t dsp_probe_info;
+
+/* dsp_selftest(): our own few words of DSP code instead of the stock program:
+ * does the DSP execute what the boot ROM takes, and at what rate? Run with
+ * 0x8b0001a0 bits 21:19 set and clear. Words only (symbol dsp_selftest_info). */
+typedef struct {
+    int32_t result;             /* download(), DSP_OK */
+    uint32_t mark0, mark1;      /* 0x5a01 it ran; 0x5a02 after the first set-up */
+    uint32_t echo;              /* 0x1234 it read share memory */
+    uint32_t busy, idle;        /* its count per 20 ms: ARM busy, ARM idle */
+    uint32_t mcu_ctl0, dsp_ctl0;
+} dsp_selftest_case_t;
+
+typedef struct {
+    dsp_selftest_case_t banks_set, banks_clear;
+    uint32_t trace_start, trace_records, trace_end;     /* the stock program */
+} dsp_selftest_t;
+
+extern volatile dsp_selftest_t dsp_selftest_info;
 
 int dsp_boot(void);             /* DSP_OK or an error; holds 104 MHz+ */
 void dsp_stop(void);            /* reset held, interrupt off, clock released */
@@ -61,12 +119,24 @@ void dsp_hold_reset(void);      /* at boot: the OS does not use the DSP. The chi
                                  * lets it go at power-on, and nobody else stops
                                  * its boot ROM. dsp_boot() releases it again. */
 const char *dsp_strerror(int err);
+/* After dsp_boot(): records, idle frames, ping and memory dump, all bounded;
+ * saves /b310e-os/dsp-report.txt, dsp-share.bin and dsp-dump.bin. It leaves the
+ * DSP in its dump loop: call dsp_stop() next. */
+int dsp_probe(void);
+void dsp_selftest(void);        /* not while it runs; leaves it in reset */
+void dsp_set_trace(bool on);    /* start-up marks in the program dsp_boot() sends */
+const char *dsp_probe_verdict(void);
 
 /* ---- layer 1, receive only ---------------------------------------------- */
 
 /* After dsp_boot(): share memory cleared, the 0x8181 start marker, the
  * DSP image's parameter records sent (the stock layer-1 start order). */
 int l1_start(void);
+
+/* What the stock's DSP interrupts do, by polling: the response ring drained,
+ * a control-block message taken and acknowledged (the DSP waits for the ack),
+ * the status bits cleared. Call it while layer 1 runs, every frame or so. */
+void l1_poll(void);
 
 /* Stock "arfcn index" (RF_TOTAL_CHANS = 971 over five bands) for a band
  * and ARFCN; the band order is a guess (docs/gsm-plan.md). 0x3ff: none. */
@@ -79,6 +149,8 @@ uint16_t l1_arfcn_index(int band, int arfcn);
 #define L1_PM_PER_FRAME 6
 int l1_pm_post(const uint16_t *index, const uint8_t *gain, int n);
 int l1_idle_post(int frames);   /* idle frame instructions */
+void l1_ask_more(int back);     /* flag the instruction this many slots back */
+int l1_run(void);               /* after l1_start(): start the frame clock */
 int l1_fi_free(void);           /* free frame-instruction slots */
 
 typedef struct {

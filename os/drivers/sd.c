@@ -1,7 +1,9 @@
 /* B310E OS — SD card block device.
  *
- * Every transfer goes through the 16 KB IRAM bounce buffer at 0x4000b000
+ * Every transfer goes through the 16 KB IRAM bounce buffer at 0x40004000
  * (SDIO DMA into PSRAM hangs the phone), as up to 32 blocks per command.
+ * It stays below 0x4000c000: IRAM above that only holds data while
+ * 0x8b0001a0 bits 21:19 are set, and the DSP runs with them clear.
  * The keypad scan is paused around each SDIO DMA (a held key during it
  * hangs the phone). A failed chunk waits for the card (CMD13, stopping an
  * aborted transfer) and is retried up to four times; rewriting the same
@@ -16,7 +18,7 @@
 #include "os/lib.h"
 #include "drivers/sd_internal.h"
 
-#define BOUNCE        ((uint8_t *)0x4000b000u)
+#define BOUNCE        ((uint8_t *)0x40004000u)
 #define MAX_BLOCKS    32
 #define TRIES         4
 #define READY_MS      1000
