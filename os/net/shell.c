@@ -37,6 +37,7 @@
 #include "os/kernel.h"
 #include "os/lib.h"
 #include "os/rtc.h"
+#include "os/sim.h"
 #include "os/status.h"
 #include "os/ui.h"
 #include "os/usb.h"
@@ -380,6 +381,31 @@ static void c_help(sess_t *s, int argc, char **argv)
     for (const cmd_t *c = cmds; c->name; c++)
         say(s, "  %-6s %-22s %s\n", c->name, c->args, c->help);
     say(s, "binary transfers (put, get, shot) on port %d only\n", NET_PORT_RAW);
+}
+
+/* GSM auth self-test: RUN GSM ALGORITHM on slot 0 with a fixed test RAND. Reports
+ * only success/failure - never the RAND, SRES or Kc. */
+static void c_simauth(sess_t *s, int argc, char **argv)
+{
+    sim_atr_t atr;
+    uint8_t rnd[16], sres[4], kc[8];
+    int rc;
+
+    for (int i = 0; i < 16; i++)
+        rnd[i] = (uint8_t)(0x10 + i);
+    rc = sim_activate(0, &atr);
+    if (rc != SIM_OK) {
+        say(s, "sim: slot 0 activate: %s (%d)\n", sim_strerror(rc), rc);
+        return;
+    }
+    rc = sim_run_gsm_algo(0, rnd, sres, kc);
+    sim_deactivate(0);
+    (void)sres;
+    (void)kc;
+    if (rc == SIM_OK)
+        say(s, "auth OK: RUN GSM ALGORITHM returned SRES+Kc (not shown)\n");
+    else
+        say(s, "auth failed: %s (0x%04x)\n", sim_strerror(rc), (unsigned)rc);
 }
 
 static void c_info(sess_t *s, int argc, char **argv)
@@ -1284,6 +1310,7 @@ static void c_exit(sess_t *s, int argc, char **argv)
 static const cmd_t cmds[] = {
     { "help", "", "this list", c_help },
     { "info", "", "build, uptime, CPU, battery, card, network", c_info },
+    { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },

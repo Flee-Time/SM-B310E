@@ -517,6 +517,45 @@ int sim_apdu(int slot, const uint8_t hdr[5], const uint8_t *data,
     return r;
 }
 
+/* GSM authentication (TS 51.011 RUN GSM ALGORITHM): SELECT MF, SELECT DF_GSM,
+ * run A3/A8 on the 16-octet RAND, then GET RESPONSE for SRES (4) + Kc (8). The
+ * slot must already be active. Returns SIM_OK, or the SW / a negative error. The
+ * driver logs nothing of the RAND, SRES or Kc. */
+int sim_run_gsm_algo(int slot, const uint8_t rand[16], uint8_t sres[4], uint8_t kc[8])
+{
+    static const uint8_t mf[2]  = { 0x3f, 0x00 };
+    static const uint8_t gsm[2] = { 0x7f, 0x20 };
+    uint8_t hdr[5] = { 0xa0, 0xa4, 0x00, 0x00, 0x02 };  /* SELECT, Lc 2 */
+    uint8_t resp[16];
+    int sw, got = 0;
+
+    sw = sim_apdu(slot, hdr, mf, 0, 0);                 /* SELECT MF */
+    if (sw < 0)
+        return sw;
+    sw = sim_apdu(slot, hdr, gsm, 0, 0);                /* SELECT DF_GSM */
+    if (sw < 0)
+        return sw;
+    hdr[1] = 0x88;                                      /* RUN GSM ALGORITHM */
+    hdr[4] = 0x10;                                      /* Lc 16 (RAND) */
+    sw = sim_apdu(slot, hdr, rand, 0, 0);
+    if (sw < 0)
+        return sw;
+    if ((sw & 0xff00) != 0x9f00)                        /* expect 9F 0C */
+        return sw;
+    hdr[1] = 0xc0;                                      /* GET RESPONSE */
+    hdr[4] = (uint8_t)(sw & 0xff);
+    sw = sim_apdu(slot, hdr, 0, resp, &got);
+    if (sw < 0)
+        return sw;
+    if (got < 12)
+        return sw > 0 ? sw : SIM_EPROTO;
+    for (int i = 0; i < 4; i++)
+        sres[i] = resp[i];
+    for (int i = 0; i < 8; i++)
+        kc[i] = resp[4 + i];
+    return SIM_OK;
+}
+
 const char *sim_strerror(int err)
 {
     switch (err) {

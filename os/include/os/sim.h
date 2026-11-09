@@ -81,6 +81,11 @@ void sim_deactivate(int slot);
 int sim_active_slot(void);          /* -1: none */
 const char *sim_strerror(int err);
 
+/* GSM authentication on the active slot: RUN GSM ALGORITHM over the 16-octet
+ * RAND -> SRES (4) + Kc (8). SIM_OK, or the SW / a negative error. Nothing of
+ * the RAND/SRES/Kc is logged by the driver. */
+int sim_run_gsm_algo(int slot, const uint8_t rand[16], uint8_t sres[4], uint8_t kc[8]);
+
 /* Parse an ATR in raw[0..len) into the other fields (sim_activate does
  * this; exported for tests and the GSM layer). */
 void sim_atr_parse(sim_atr_t *atr);
