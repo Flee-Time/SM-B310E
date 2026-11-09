@@ -3,10 +3,11 @@
  * registration stack (L1 RACH + CCCH + SDCCH, LAPDm, RR, MM, the FSM, SIM auth).
  *
  * SAFETY. This TRANSMITS at NORMAL (calibrated) power on the live network with the
- * owner's SIM. It targets the SIM's own home operator (from the IMSI) on the 900
- * band (P-GSM or E-GSM) and shows it on screen; nothing fires without pressing
- * Register and confirming. One bounded attempt per press; it shows the uplink
- * frequency to monitor and restores the TX-off default after.
+ * owner's SIM. The SIM here is Vodafone DE roaming, so it registers on the visited
+ * partner Vodafone TR (TARGET_MCC/MNC) on the 900 band (P-GSM or E-GSM) and shows
+ * the SIM's home operator on screen; nothing fires without pressing Register and
+ * confirming. One bounded attempt per press; it shows the uplink frequency to
+ * monitor and restores the TX-off default after.
  * The receive path (SIM read, DSP boot, scan, sync, read SI) is all safe; only the
  * final reg_lu_run() keys the transmitter.
  *
@@ -40,6 +41,12 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
  * ciphering), RF power class 4 (GSM900 handheld). Honest for a real run. */
 #define CLASSMARK1      0x2b
 #define SIM_SLOT        0
+/* The SIM here is Vodafone DE (262-02) roaming in Turkey, so it registers on a
+ * VISITED network, not its home PLMN. Target Vodafone Turkey (286-02) - the
+ * same-brand roaming partner, within the owner's Vodafone clearance. The LU
+ * request carries this visited LAI with the home IMSI, which is correct. */
+#define TARGET_MCC      286
+#define TARGET_MNC      2
 
 enum { P_IDLE, P_SIM, P_DSP, P_SCAN, P_FIND, P_TX, P_DONE };
 enum { RES_NONE, RES_NO_SIM, RES_RADIO_FAIL, RES_NO_CELL, RES_ACCEPTED,
@@ -51,6 +58,7 @@ static volatile struct {
     uint16_t mcc, mnc, lac;
     uint8_t mnc_digits;
     uint16_t arfcn_index;               /* the cell tried, L1_NO_INDEX none */
+    uint16_t home_mcc, home_mnc;        /* the SIM's PLMN, for the screen */
 } reg_ui;
 
 static uint8_t imsi_digits[16];
@@ -206,14 +214,20 @@ static int scan_candidates(uint16_t *cand, int max)
     return n;
 }
 
-/* ---- 3. sync a candidate and read its SI; is it the SIM's home network? --- */
+/* ---- 3. sync a candidate and read its SI; is it the target (Vodafone TR)? -- */
 
 static bool try_cell(uint16_t index)
 {
-    if (l1_cell_sync(&cell, index, GAIN_START, 0, SYNC_BUDGET_MS) != 1)
+    int s = l1_cell_sync(&cell, index, GAIN_START, 0, SYNC_BUDGET_MS);
+
+    if (s != 1) {
+        klog("register: idx %u no sync (%d)", index, s);
         return false;
+    }
     l1_cell_read(&cell, 24, L1_SI3 | L1_SI4, READ_BUDGET_MS);
-    return cell.mcc == home_mcc && cell.mnc == home_mnc && (cell.si_seen & L1_SI3);
+    klog("register: idx %u -> %u-%02u si %08lx", index, cell.mcc, cell.mnc,
+         (unsigned long)cell.si_seen);
+    return cell.mcc == TARGET_MCC && cell.mnc == TARGET_MNC && (cell.si_seen & L1_SI3);
 }
 
 /* ---- the run ------------------------------------------------------------- */
@@ -232,6 +246,9 @@ static void worker(void *arg)
      * Turkey/MCC 286); only the operator code is kept, never the full IMSI. */
     home_mcc = (uint16_t)(imsi_digits[0] * 100 + imsi_digits[1] * 10 + imsi_digits[2]);
     home_mnc = (uint16_t)(imsi_digits[3] * 10 + imsi_digits[4]);
+    reg_ui.home_mcc = home_mcc;
+    reg_ui.home_mnc = home_mnc;
+    klog("register: home PLMN %u-%02u", home_mcc, home_mnc);
 
     reg_ui.phase = P_DSP;
     if (dsp_boot() != DSP_OK) {
@@ -298,6 +315,7 @@ static void start_worker(void)
     reg_ui.phase = P_IDLE;
     reg_ui.result = RES_NONE;
     reg_ui.mcc = reg_ui.mnc = reg_ui.lac = 0;
+    reg_ui.home_mcc = reg_ui.home_mnc = 0;
     reg_ui.reject_cause = 0;
     reg_ui.arfcn_index = L1_NO_INDEX;
     memset(&reg_prog, 0, sizeof reg_prog);
@@ -314,7 +332,7 @@ static const char *phase_text(void)
     case P_SIM:  return "Reading SIM";
     case P_DSP:  return "Starting radio";
     case P_SCAN: return "Scanning 900";
-    case P_FIND: return "Finding home cell";
+    case P_FIND: return "Finding Vodafone TR";
     case P_TX:   return "Attempt (normal power)";
     default:     return "Working";
     }
@@ -355,7 +373,7 @@ static void result_line(const char **msg, uint32_t *color)
     switch (reg_ui.result) {
     case RES_ACCEPTED:    *msg = "Registered"; *color = C_OK; return;
     case RES_NO_RESPONSE: *msg = "Not registered"; *color = C_WARN; return;
-    case RES_NO_CELL:     *msg = "No home 900 cell"; *color = C_WARN; return;
+    case RES_NO_CELL:     *msg = "No Vodafone TR cell"; *color = C_WARN; return;
     case RES_NO_SIM:      *msg = "SIM not ready"; *color = C_BAD; return;
     case RES_RADIO_FAIL:  *msg = "Radio did not start"; *color = C_BAD; return;
     default:              *msg = "Done"; *color = C_TEXT; return;
@@ -389,6 +407,17 @@ static void draw(screen_t *s)
         gfx_text_centered(y + 7, "Press Register", C_ACCENT, FONT_SMALL, 1);
     }
     y += 28;
+    if ((reg_ui.runs || reg_ui.busy) && reg_ui.home_mcc) {
+        const char *hop = operator_name(reg_ui.home_mcc, reg_ui.home_mnc);
+
+        if (hop)
+            snprintf(line, sizeof line, "SIM: %s  %u-%02u", hop, reg_ui.home_mcc,
+                     reg_ui.home_mnc);
+        else
+            snprintf(line, sizeof line, "SIM: %u-%02u", reg_ui.home_mcc, reg_ui.home_mnc);
+        gfx_text_centered(y, line, C_DIM, FONT_SMALL, 1);
+        y += 13;
+    }
     if ((reg_ui.runs || reg_ui.busy) && reg_ui.mcc) {
         {
             const char *op = operator_name(reg_ui.mcc, reg_ui.mnc);
@@ -440,8 +469,8 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT)
         ui_confirm("Register",
-                   "Transmit a NORMAL-power registration to this SIM's home "
-                   "network on the live band?", confirm_yes);
+                   "Transmit a NORMAL-power roaming registration to Vodafone TR "
+                   "on the live network?", confirm_yes);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
 }
