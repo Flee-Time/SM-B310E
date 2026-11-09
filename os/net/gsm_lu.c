@@ -23,8 +23,8 @@
                                          * enough for the RX to settle after the TX
                                          * burst and read the CCCH (a short wait gets 0) */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
-#define LU_T200_MS      600u            /* resend the SABM if no UA by this (T200) */
-#define LU_SABM_MAX     6               /* SABM tries before giving up (N200+1) */
+#define LU_T200_MS      300u            /* resend the SABM if no UA by this */
+#define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
 #define LU_REF_SLACK    4               /* frames either side of our RACH's: the grant's
                                          * request reference is the frame the BTS heard
@@ -298,8 +298,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                     break;              /* could not start the SIM thread */
             }
         }
-        /* SABM retransmission (T200): until the link is up, resend the kept
-         * SABM when no UA has come within LU_T200_MS, up to LU_SABM_MAX times. */
+        /* SABM retransmission on T200: resend when no UA has come, but keep most
+         * dm_sched calls receive-only (ul == NULL) so they run a deep ring for
+         * clean RX timing - a shallow ring (needed to pace the uplink) jitters
+         * the downlink and fails its CRC. */
         if (!p.established && !have_ul && sabm_tries < LU_SABM_MAX &&
             kernel_ticks() - last_ul >= LU_T200_MS) {
             for (int i = 0; i < LAPDM_BLOCK; i++)

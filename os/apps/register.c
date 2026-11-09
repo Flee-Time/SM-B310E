@@ -61,7 +61,7 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 #define QUEUE_AHEAD     8
 #define SYNC_BUDGET_MS  1500u
 #define READ_BUDGET_MS  2500u
-#define TX_BUDGET_MS    10000u
+#define TX_BUDGET_MS    20000u
 /* Classmark 1 (TS 24.008 10.5.1.6): phase 2, A5/1 NOT available (we do no
  * ciphering), RF power class 4 (GSM900 handheld). Honest for a real run. */
 #define CLASSMARK1      0x2b
@@ -588,9 +588,9 @@ done_nosim:
     sim_deactivate(SIM_SLOT);
     memset(imsi_digits, 0, sizeof imsi_digits);     /* drop the IMSI */
     imsi_n = 0;
-    klog("register: result %u (phase %u), cell %u-%0*u lac %u",
+    klog("register: result %u (phase %u), cell %u-%0*u lac %u, reject cause %u (0x%02x)",
          reg_ui.result, reg_ui.phase, reg_ui.mcc, (int)reg_ui.mnc_digits,
-         reg_ui.mnc, reg_ui.lac);
+         reg_ui.mnc, reg_ui.lac, reg_ui.reject_cause, reg_ui.reject_cause);
     reg_ui.phase = P_DONE;
     reg_ui.runs++;
     reg_ui.busy = 0;

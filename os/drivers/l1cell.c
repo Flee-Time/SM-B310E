@@ -559,11 +559,11 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
     while (!stop && kernel_ticks() - t0 < ms) {
         bool batch = false;
 
-        /* Keep the ring shallow (not AHEAD): an uplink burst posts its TXBUFQ
-         * entry, and the ring only frees a slot when the DSP transmits a burst,
-         * so posting far ahead fills it at the second burst. At depth 2 the DSP
-         * drains burst N before burst N+2 is posted, and all four go out. */
-        while (queued() < 2) {
+        /* Shallow ring (2) only while posting the uplink block - the TXBUFQ frees
+         * a slot only when the DSP transmits a burst, so far-ahead posting fills
+         * it at the second burst. When only receiving, a deep ring (AHEAD) keeps
+         * the downlink timing steady so it decodes (a shallow ring jitters it). */
+        while (queued() < (ul ? 2 : AHEAD)) {
             uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
             int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
             int rc;
