@@ -257,6 +257,8 @@ typedef struct l1_api {
     /* 2.13: the common control channel */
     int (*cch_classify)(const uint8_t d[23]);
     int (*cch_read)(l1_cell_t *c, uint32_t ms, l1_cch_t *st);
+    int (*dm_sched)(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
+                    uint32_t ms, const uint8_t *ul, l1_dm_t *st);  /* SDCCH pump */
     /* 2.15: the minimum-power transmit test */
     void (*tx_min_power)(int on);
     int (*tx_min_power_on)(void);

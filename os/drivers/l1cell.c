@@ -478,6 +478,81 @@ int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st)
     return DSP_OK;
 }
 
+/* ---- dedicated channel (SDCCH/8) ------------------------------------------- */
+
+#define TAG_DCH     9                   /* dedicated-channel RxChannelTag (stock) */
+
+/* SDCCH/8 schedule (GSM 05.02): subchannel k's downlink block occupies FN mod 51
+ * in [k*4, k*4+3]; the uplink is the same pattern offset by 15 frames. SACCH/C8
+ * (its 102-multiframe alternation) and fill frames on idle uplinks are a
+ * refinement for registration bring-up. */
+static int sdcch_burst(int base, uint32_t m)
+{
+    int b = (int)m - base;
+
+    return b >= 0 && b < 4 ? b : -1;
+}
+
+/* One dedicated-channel session of ms: post the subchannel's downlink rx bursts,
+ * and when ul is given its uplink normal bursts, and collect the decoded downlink
+ * blocks into st. The osmocom DATA_IND/DATA_REQ pump for SDCCH, on the verified rx
+ * (l1_burst_post) and uplink (l1_uplink_post) primitives. The uplink block framing
+ * (one TXBUFQ write vs per burst) and the dedicated tag are confirmed at the
+ * cleared registration; it is HW-testable only there. */
+int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
+                uint32_t ms, const uint8_t *ul, l1_dm_t *st)
+{
+    uint32_t t0 = kernel_ticks();
+    int dlbase = (subch & 7) * 4;
+    int ulbase = (dlbase + 15) % 51;
+
+    memset(st, 0, sizeof(*st));
+    if (!c->synced)
+        return DSP_ECMD;
+    while (kernel_ticks() - t0 < ms) {
+        bool batch = false;
+
+        while (queued() < AHEAD) {
+            uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
+            int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
+            int rc;
+
+            if (db >= 0) {
+                rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
+            } else if (ub >= 0 && ul) {
+                rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, cal, ul);
+                if (rc == DSP_OK)
+                    st->ul_bursts++;
+            } else {
+                rc = l1_idle_post(1);
+            }
+            if (rc != DSP_OK)
+                return rc;
+            batch = true;
+        }
+        if (batch)
+            l1_ask_more(3);
+        l1_poll();
+        {
+            l1_rx_t rx;
+
+            while (l1_rx_read(&rx) == 1) {
+                if (rx.hdr[0] != RX_BLOCK && rx.hdr[0] != 8)
+                    continue;
+                if (rx.hdr[1] != 0) {
+                    st->dl_bad++;
+                    continue;
+                }
+                st->dl_blocks++;
+                memcpy(st->last_dl, rx.data, sizeof(st->last_dl));
+                st->has_dl = 1;
+            }
+        }
+        thread_sleep(2);
+    }
+    return DSP_OK;
+}
+
 /* ---- selection -------------------------------------------------------------- */
 
 #define SELECT_SAMPLES   8

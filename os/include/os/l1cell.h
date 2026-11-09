@@ -150,4 +150,17 @@ int l1_cch_classify(const uint8_t d[23]);
 /* CCCH blocks of a synced cell for ms, counted into st. 0, or a DSP_E* error. */
 int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st);
 
+/* Dedicated channel (SDCCH/8) traffic for ms: downlink blocks received and
+ * uplink bursts sent. The osmocom DATA_IND/DATA_REQ pump; HW-testable only at
+ * registration. */
+typedef struct {
+    uint32_t dl_blocks;                 /* downlink blocks received (DSP-decoded) */
+    uint32_t dl_bad;                    /* CRC failures */
+    uint32_t ul_bursts;                 /* uplink bursts sent */
+    uint8_t last_dl[23];                /* the last good downlink block */
+    int has_dl;
+} l1_dm_t;
+int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
+                uint32_t ms, const uint8_t *ul, l1_dm_t *st);
+
 #endif

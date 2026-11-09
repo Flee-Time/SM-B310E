@@ -1331,7 +1331,7 @@ const l1_api_t l1_api = {
     .cch_classify = l1_cch_classify, .cch_read = l1_cch_read,
     .tx_min_power = l1_tx_min_power, .tx_min_power_on = l1_tx_min_power_on,
     .cal_readback = l1_cal_readback, .access_post = l1_access_post,
-    .uplink_post = l1_uplink_post, .dm_est = l1_dm_est,
+    .uplink_post = l1_uplink_post, .dm_est = l1_dm_est, .dm_sched = l1_dm_sched,
 };
 
 /* FUN_0005f692 / FUN_0005f674: "in" is the slot written last; the bytes from

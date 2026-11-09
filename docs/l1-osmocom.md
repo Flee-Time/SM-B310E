@@ -88,8 +88,18 @@ clamp interlock stays the default; for the cleared registration run it relaxes t
 normal power, with bounded, deliberate attempts. Everything below is the path to
 "all the required tools".
 
+## Built 2026-11-09: the SDCCH scheduler
+l1_dm_sched (l1cell.c): one dedicated-channel session - posts the subchannel's
+downlink rx bursts and, when a uplink block is given, its uplink normal bursts,
+per the SDCCH/8 schedule (DL block at FN mod 51 in [k*4, k*4+3], UL offset by 15),
+and collects the DSP-decoded downlink blocks. The DATA_IND/DATA_REQ pump, on the
+verified l1_burst_post / l1_uplink_post primitives. Compile-verified; the uplink
+block framing, the dedicated tag (9), SACCH/C8 and fill frames are confirmed at
+the cleared registration, where it is first HW-testable.
+
 ## To build (the full stack; none to be excluded)
-1. **Dedicated mode (DM_EST)** - l1_dm_est (dsp.c) posts the command-3 piece. The
+1. **Dedicated mode (DM_EST)** - l1_dm_est posts the command-3 piece; l1_dm_sched
+   is the scheduler. The
    real work is that command 3 runs inside the stock **L1 state machine** (PSRAM
    FUN_003b13c6 -> FUN_000589d8, state via FUN_0002f348 "SetState"), which drives
    RF/AFC/timing setup and the per-block dedicated scheduler - a subsystem our L1
