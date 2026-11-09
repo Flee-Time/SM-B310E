@@ -11,6 +11,7 @@
  * ACCEPT or REJECT.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include "os/gsm_lu.h"
 #include "os/gsm_reg.h"
 #include "os/dsp.h"                     /* l1_api, l1_cell_t, l1_rx_t */
 #include "os/sim.h"

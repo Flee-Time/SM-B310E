@@ -12,16 +12,19 @@
 #include "os/ui.h"
 #include "os/usb.h"
 
-/* DSP boot (T_DSP) shows only in developer mode: tool_at() skips its slot when
- * it is off, so the other entries keep their order. */
-enum { T_TORCH, T_SIM, T_IMEI, T_USB, T_DSP, T_RADIO, T_SLEEP, T_COUNT };
+/* DSP boot (T_DSP) and Register (T_REGISTER) show only in developer mode: they
+ * are two contiguous slots, so tool_at() skips both when dev mode is off and the
+ * other entries keep their order. Register transmits, so it stays developer-gated. */
+enum { T_TORCH, T_SIM, T_IMEI, T_USB, T_DSP, T_REGISTER, T_RADIO, T_SLEEP, T_COUNT };
+#define T_DEV_ONLY 2                /* T_DSP, T_REGISTER */
 
 static int tool_at(int visible)
 {
-    return !ui_settings.dev_mode && visible >= T_DSP ? visible + 1 : visible;
+    return !ui_settings.dev_mode && visible >= T_DSP ? visible + T_DEV_ONLY : visible;
 }
 
 screen_t *app_dspboot(void);        /* apps/dspboot.c */
+screen_t *app_register(void);       /* apps/register.c */
 screen_t *app_radio_status(void);   /* apps/gsmstatus.c */
 void app_sleep_test(void);          /* apps/sleeptest.c */
 
@@ -52,6 +55,9 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
     case T_DSP:
         snprintf(text, (size_t)tn, "DSP boot");
         break;
+    case T_REGISTER:
+        snprintf(text, (size_t)tn, "Register");
+        break;
     case T_RADIO:
         snprintf(text, (size_t)tn, "Radio status");
         break;
@@ -64,7 +70,8 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 static const icon_t *tool_icon(void *ctx, int i)
 {
     static const icon_t *const icons[] = {
-        &icon_torch, &icon_sim, &icon_sim, &icon_usb, &icon_cpu, &icon_chart, &icon_power,
+        &icon_torch, &icon_sim, &icon_sim, &icon_usb, &icon_cpu, &icon_sim,
+        &icon_chart, &icon_power,
     };
 
     return icons[tool_at(i)];
@@ -103,6 +110,9 @@ static void key(screen_t *s, const key_event_t *ev)
         case T_DSP:
             ui_push(app_dspboot());
             break;
+        case T_REGISTER:
+            ui_push(app_register());
+            break;
         case T_RADIO:
             ui_push(app_radio_status());
             break;
@@ -124,7 +134,7 @@ screen_t *app_tools(void)
 {
     /* opened anew: from the top (back from a screen it opened, it stays) */
     list.sel = list.top = 0;
-    list.count = ui_settings.dev_mode ? T_COUNT : T_COUNT - 1;    /* DSP boot: dev only */
+    list.count = ui_settings.dev_mode ? T_COUNT : T_COUNT - T_DEV_ONLY;   /* DSP boot, Register: dev only */
     list.item = item;
     list.icon = tool_icon;
     list.toggle = tool_toggle;
