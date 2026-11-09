@@ -108,8 +108,9 @@ the cleared registration, where it is first HW-testable.
    subchannel. SDCCH first, then TCH.
 3. **SACCH** - the slow associated control channel schedule (DL measurement orders,
    UL measurement reports).
-4. **Ciphering** - the DSP command that loads Kc and selects A5/x. Find it in the
-   command handlers (group/type), mirror it.
+4. **Ciphering** - the DSP command that loads Kc and selects A5/x. No cipher/A5/Kc
+   strings in the image (stripped), so it needs a deep trace from the L3
+   cipher-mode handling down to the DSP command, not a string hit. Deferred.
 5. **Power control (PCL)** - the real TX power path, currently pinned to the
    calibrated minimum by the clamp. For registration/traffic the network commands
    the power; wire PARAM_REQ to the band/APC selection. GATED: full-power TX needs
