@@ -103,6 +103,7 @@ static int chunk(uint32_t lba, uint8_t *buf, unsigned n, bool write)
 static int transfer(uint32_t lba, uint8_t *buf, unsigned count, bool write)
 {
     int rc = 0;
+    bool reinit = false;                /* at most one full re-init per transfer */
 
     if (!present)
         return -1;
@@ -114,6 +115,16 @@ static int transfer(uint32_t lba, uint8_t *buf, unsigned count, bool write)
 
         while (chunk(lba, buf, n, write)) {
             if (++tries >= TRIES) {
+                /* CMD13/CMD12 could not clear it: the controller or card is
+                 * wedged (an RF TX burst does this). Re-initialise once, as a
+                 * reset does, and retry before giving up — so a transmit no
+                 * longer leaves the card unreadable until a reboot. */
+                if (!reinit && sd_init() == 0) {
+                    reinit = true;      /* recovered; stats.reinits counts it */
+                    stats.reinits++;
+                    tries = 0;
+                    continue;
+                }
                 stats.failures++;
                 rc = -1;
                 break;

@@ -62,7 +62,7 @@
 
 typedef struct {
     int arfcn, gain, cell, mf, tag, tn, tsc, m, d, sync, pre, c3, c3m, slot, schmf, sch, q, idx;
-    int read, si, sel, stay, mcc, mnc, cch;
+    int read, si, sel, stay, mcc, mnc, cch, tx, fire;
     int32_t w[11], x[3];                /* -1: the stock value */
 } params_t;
 
@@ -687,7 +687,8 @@ static void apply(params_t *p, char *s)
         { "read", offsetof(params_t, read) }, { "si", offsetof(params_t, si) },
         { "sel", offsetof(params_t, sel) }, { "stay", offsetof(params_t, stay) },
         { "mcc", offsetof(params_t, mcc) }, { "mnc", offsetof(params_t, mnc) },
-        { "cch", offsetof(params_t, cch) },
+        { "cch", offsetof(params_t, cch) }, { "tx", offsetof(params_t, tx) },
+        { "fire", offsetof(params_t, fire) },
     };
 
     while (*s) {
@@ -740,6 +741,56 @@ static void save(void)
     }
 }
 
+/* The minimum-power transmit test. First prove the clamp reached the DSP by
+ * reading back the setpoints actually sent (every band must be the minimum);
+ * only then, and only with fire=1, key one access burst on the uplink of the
+ * given ARFCN. Watch it on the SDR at 890 + 0.2*arfcn MHz (an unused channel). */
+static void tx_test(const params_t *p)
+{
+    uint16_t apc[L1_APC_BANDS][L1_APC_N];
+    int bands, bad = 0, ukhz;
+    uint16_t index;
+
+    bands = L->cal_readback(apc);
+    if (bands != L1_APC_BANDS) {
+        say("tx: clamp NOT active (readback %d) - refusing to key", bands);
+        return;
+    }
+    for (int b = 0; b < L1_APC_BANDS; b++)
+        for (int k = 0; k < L1_APC_N; k++)
+            if (apc[b][k] != 10)
+                bad++;
+    say("tx: APC verify - band0 %u..%u, band3 %u..%u; %d of %d != min",
+        apc[0][0], apc[0][L1_APC_N - 1], apc[3][0], apc[3][L1_APC_N - 1],
+        bad, L1_APC_BANDS * L1_APC_N);
+    if (bad) {
+        say("tx: clamp verify FAILED - refusing to key");
+        return;
+    }
+    index = L->arfcn_index(L1_BAND_GSM900, p->tx);
+    ukhz = 890000 + 200 * p->tx;
+    say("tx: clamp verified. uplink arfcn %d = %d kHz, index %u", p->tx, ukhz, index);
+    if (p->fire <= 0) {
+        say("tx: DRY RUN, not keying. add fire=N to transmit N bursts (fire=1 = one).");
+        return;
+    }
+    {
+        int n = p->fire > 500 ? 500 : p->fire;      /* hard cap */
+        int ok = 0;
+
+        /* A single access burst is ~350 us - a one-frame flash, easy to miss on
+         * an SDR. fire=N keys N bursts ~20 ms apart (a visible train, and a
+         * measurable current draw) all at the calibrated minimum. */
+        say("tx: FIRING %d burst(s) at the calibrated minimum, ~20 ms apart...", n);
+        for (int i = 0; i < n && !stop_asked; i++) {
+            if (L->access_post(index, 0, 0, 0x3f) == 0)  /* cal 0, channel request 0x3f */
+                ok++;
+            idle_for(20);                           /* space them; keep the clock alive */
+        }
+        say("tx: fired %d of %d bursts on %d kHz. watch the SDR.", ok, n, ukhz);
+    }
+}
+
 static void worker(void *arg)
 {
     const char *a = app_arg();
@@ -747,7 +798,7 @@ static void worker(void *arg)
     int nseg = 0, rc;
     params_t base = { .arfcn = 56, .gain = 25, .cell = 0, .mf = 4, .tag = 7, .tn = 0,
                       .tsc = -1, .m = 2, .d = 0, .sync = 1, .pre = -1, .c3 = -1,
-                      .slot = 0x0101, .sch = 0, .idx = -1 };
+                      .slot = 0x0101, .sch = 0, .idx = -1, .tx = -1 };
 
     for (int i = 0; i < 11; i++)
         base.w[i] = -1;
@@ -781,6 +832,10 @@ static void worker(void *arg)
         say("the DSP is in use (Radio status?)");
         goto done;
     }
+    if (base.tx >= 0) {                 /* arm the clamp before start() loads the cal */
+        L->tx_min_power(1);
+        say("tx: min-power clamp ARMED (APC setpoints forced to the calibrated minimum)");
+    }
     snprintf(status, sizeof(status), "DSP boot");
     if ((rc = L->dsp_boot()) != DSP_OK || (rc = L->start()) != DSP_OK) {
         say("DSP boot / layer 1 start failed: %d", rc);
@@ -806,6 +861,10 @@ static void worker(void *arg)
     posted = 4;
     idle_for(300);
     say("frame clock: %lu frames taken in 300 ms", (unsigned long)(posted - queued()));
+    if (base.tx >= 0) {                 /* the transmit test runs instead of the RX variants */
+        tx_test(&base);
+        goto stop;
+    }
     for (int v = 0; v < (nseg ? nseg : 1) && !stop_asked; v++) {
         params_t p = base;
         uint16_t index;
@@ -863,6 +922,7 @@ static void worker(void *arg)
     }
 stop:
     L->dsp_stop();
+    L->tx_min_power(0);                 /* never leave the clamp armed for a later run */
 done:
     say("radiolab: done%s", stop_asked ? " (stopped)" : "");
     snprintf(status, sizeof(status), "done: %s", OUT_FILE);

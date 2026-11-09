@@ -87,7 +87,7 @@
  * channel, receive only). */
 /* 2.14 (2026-11-09): ui_is_dark, so a game can stop while the panel is asleep; ui_depth;
  * settings: awake_limit_s, player_idle_s; key_event_t.repeat. */
-#define OS_API_MINOR 14
+#define OS_API_MINOR 15
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"

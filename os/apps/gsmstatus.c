@@ -694,7 +694,7 @@ static void draw(screen_t *s)
 
     if (!done) {
         const char *busy = dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING ?
-                           "DSP in use: Run later" :
+                           "Waiting for the DSP..." :
                            radio_status.busy ? phase_text() : "Press Run to scan";
 
         gfx_round(UI_PAD, y, LCD_WIDTH - 2 * UI_PAD, 22, UI_RADIUS, C_CARD);
@@ -721,6 +721,12 @@ static void enter(screen_t *s)
 
 static void tick(screen_t *s)
 {
+    /* The DSP may be busy with another op when this screen opens. Start the scan
+     * automatically the moment it frees, rather than waiting for a manual Run
+     * (only before the first run; after that, Run re-scans). */
+    if (!radio_status.busy && !radio_status.runs &&
+        dsp_info.state != DSP_BOOTING && dsp_info.state != DSP_RUNNING)
+        start();
 }
 
 static void key(screen_t *s, const key_event_t *ev)

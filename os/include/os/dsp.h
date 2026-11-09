@@ -205,6 +205,22 @@ uint16_t l1_share_r16(uint32_t off);
 void l1_share_w16(uint32_t off, uint16_t v);
 int l1_cmd_post(const uint16_t cmd[5]);
 
+/* 2.15: the transmit minimum-power test (docs/gsm-plan.md "TX power"). The clamp
+ * must be armed before l1_start(); the burst poster refuses without it. */
+#define L1_APC_BANDS 4
+#define L1_APC_N     18
+void l1_tx_min_power(int on);
+int l1_tx_min_power_on(void);
+int l1_cal_readback(uint16_t out[L1_APC_BANDS][L1_APC_N]);
+int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra);
+/* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs
+ * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. */
+int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
+                   uint8_t cal, const uint8_t block[23]);
+/* DM_EST (dedicated-mode establish): the command-3 piece only. Needs the L1
+ * state-machine / RF-control layer + scheduler to work. See docs/l1-osmocom.md. */
+int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux);
+
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {
     int (*dsp_boot)(void);
@@ -241,6 +257,14 @@ typedef struct l1_api {
     /* 2.13: the common control channel */
     int (*cch_classify)(const uint8_t d[23]);
     int (*cch_read)(l1_cell_t *c, uint32_t ms, l1_cch_t *st);
+    /* 2.15: the minimum-power transmit test */
+    void (*tx_min_power)(int on);
+    int (*tx_min_power_on)(void);
+    int (*cal_readback)(uint16_t out[L1_APC_BANDS][L1_APC_N]);
+    int (*access_post)(uint16_t index, int slot, uint8_t cal, uint8_t ra);  /* RACH_REQ */
+    int (*uplink_post)(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
+                       uint8_t cal, const uint8_t block[23]);  /* DATA_REQ uplink */
+    int (*dm_est)(uint16_t sel, uint8_t gain, uint16_t aux);  /* DM_EST (cmd-3 piece) */
 } l1_api_t;
 
 extern const l1_api_t l1_api;

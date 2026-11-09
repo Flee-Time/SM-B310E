@@ -1376,6 +1376,42 @@ the stock's calibration and its DSP's burst handling, and a hard limit on attemp
   per command (`-c user.name=... -c user.email=...`, as in the log); never
   write it to the config.
 
+### TX power, and the minimum-power transmit test (2026-11-09)
+
+Before keying the PA on the live network we needed a transmit power we could
+*prove* is the minimum. The stock ARM image has **no** power-control symbols at
+all (searched: txpwr/PA/ramp/gamma/PCL/tpc/apc/dBm/gain/MS_TXPWR — none). The
+power is produced inside the DSP blob from the **per-band APC setpoint tables in
+NV item 2**: cal types 4..7 (one per band, all four enabled on this phone), u16
+index 16..33 — a DAC per power-control-level, clamping at the top (~226-231) and
+stepping down to a **minimum of 10**. Index 34..45 are temperature/voltage
+compensation deltas; index 64+ is the RX AGC table. The ramp-shape envelopes
+(types 12..15, normalised) are scaled by the setpoint.
+
+The burst mechanism (stock `FUN_0004fe0a`/`FUN_0005f332`/`FUN_0004b49a`): a frame
+instruction of type 6 (access) carries the channel in word 7 and the cal slot in
+word 10; the TX descriptor (TXBUFQ at share +0x240, tag + length-type + payload,
+each halfword high byte first) holds the burst bytes; command `{0,4,1}` arms the
+key-up.
+
+We **send** the NV cal to the DSP, so the verified-minimum does not need the DSP
+disassembled: when the clamp is armed, `send_parameters()` (os/drivers/dsp.c)
+overwrites, in our copy only, every setpoint (index 16..33) to 10 and zeroes the
+compensation (34..45) for cal types 4..7, before sending. The DSP then has no
+entry above the calibrated minimum to select, whatever the level logic does. RX
+AGC and the ramp thresholds are untouched; nothing is written back to NOR.
+
+The test is driven from the Radio lab over USB (never blind key-nav):
+- `run radiolab.app "tx=<arfcn>"` — arms the clamp, boots, reads the setpoints
+  back (`l1_cal_readback`) and prints them; a **dry run**, nothing is keyed.
+- `run radiolab.app "tx=<arfcn> fire=1"` — same, then keys **one** access burst
+  on the uplink (890 + 0.2·arfcn MHz) at the calibrated minimum.
+Interlocks: `l1_access_post` refuses unless the clamp is armed; `fire=1` is a
+separate token from `tx=`; exactly one burst per run. Pick a locally unused
+uplink ARFCN and watch it on the NooElec. Transmit only after the legal/safety
+specifics (BTK/type-approval, attempt cap, min gain) are agreed; the antenna may
+also be removed as an independent hardware backstop. (App API 2.15.)
+
 ## Milestones
 
 1. **M0:** confirm the carrier still runs 2G, and that stock calls and

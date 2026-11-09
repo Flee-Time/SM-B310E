@@ -129,6 +129,13 @@
 #define FI_FCCH         9u
 #define FI_SCH          10u
 #define FI_BLOCK        2u
+#define FI_ACCESS       6u              /* access / RACH */
+#define FI_UPLINK       7u              /* rx + uplink normal burst (dedicated chan) */
+#define TXBUF_BASE      0x240u          /* TXBUFQ: 4 x 62 bytes */
+#define TXBUF_SLOTS     4u
+#define TXBUF_SIZE      0x3eu
+#define TXBUF_IN        0x338u
+#define TXBUF_OUT       0x33au          /* the DSP's consumer index */
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
@@ -857,6 +864,39 @@ static int send_block(uint32_t type, const uint8_t *src, uint32_t bytes)
     return rc;
 }
 
+/* ---- transmit minimum-power clamp (TX test, docs/gsm-plan.md "TX power") -----
+ * The DSP's TX power is the per-band APC setpoint table in NV item 2 (cal types
+ * 4..7, u16 index 16..33: a DAC per power-control-level, ~226-231 at the top
+ * down to 10 at the minimum). We send those tables to the DSP, so to bound the
+ * PA to the calibrated minimum we overwrite, in our copy only, every setpoint to
+ * the minimum (10) and zero the compensation deltas (index 34..45) before
+ * sending. RX AGC (index 64+) and the ramp thresholds are untouched, and nothing
+ * is written back to NOR. The burst path (l1_access_post) refuses unless this
+ * clamp is on, so a transmit cannot happen without it. */
+#define APC_BANDS       4
+#define APC_FIRST       16              /* first setpoint (u16 index in the block) */
+#define APC_LAST        33
+#define APC_N           (APC_LAST - APC_FIRST + 1)      /* 18 setpoints */
+#define APC_COMP_FIRST  34              /* temperature / voltage compensation */
+#define APC_COMP_LAST   45
+#define APC_MIN         10              /* the owner's calibrated minimum DAC */
+
+static bool tx_min_clamp;               /* armed before l1_start(); gates TX */
+static uint16_t sent_apc[APC_BANDS][APC_N];     /* setpoints actually sent */
+
+void l1_tx_min_power(int on) { tx_min_clamp = on != 0; }
+int l1_tx_min_power_on(void) { return tx_min_clamp; }
+
+/* out[band][k] = the setpoint that was last sent for that band; the return is
+ * the number of bands with the clamp active (0 = sent as-calibrated). */
+int l1_cal_readback(uint16_t out[APC_BANDS][APC_N])
+{
+    for (int b = 0; b < APC_BANDS; b++)
+        for (int k = 0; k < APC_N; k++)
+            out[b][k] = sent_apc[b][k];
+    return tx_min_clamp ? APC_BANDS : 0;
+}
+
 /* The list's types 1, 3..15 (table at FUN_000606ea): type 1 is all of NV item
  * 1. The rest lie end to end in NV item 2 behind its version word, in this
  * order of offset: 3, 4, 12, 5, 13, 6, 14, 7, 15 (8..11 are parts of them). */
@@ -883,9 +923,30 @@ static int send_parameters(void)
         return rc;
     dsp_info.param_blocks++;
     for (uint32_t i = 0; i < sizeof(cal) / sizeof(cal[0]); i++) {
+        const uint8_t *buf = calib + 2 + cal[i].offset;
+        uint16_t clamped[396];          /* a band block is 792 bytes */
+
         if (cal[i].wanted_by && !cls[cal[i].wanted_by])
             continue;
-        rc = send_block(cal[i].type, calib + 2 + cal[i].offset, cal[i].bytes);
+        /* cal types 4..7 carry the per-band TX power setpoints: record what we
+         * send and, when the clamp is armed, send the minimum instead. */
+        if (cal[i].type >= 4 && cal[i].type <= 7) {
+            int band = cal[i].type - 4;
+            const uint16_t *src = (const uint16_t *)buf;
+
+            for (int k = 0; k < APC_N; k++)
+                sent_apc[band][k] = tx_min_clamp ? APC_MIN : src[APC_FIRST + k];
+            if (tx_min_clamp) {
+                for (int k = 0; k < 396; k++)
+                    clamped[k] = src[k];
+                for (int k = APC_FIRST; k <= APC_LAST; k++)
+                    clamped[k] = APC_MIN;
+                for (int k = APC_COMP_FIRST; k <= APC_COMP_LAST; k++)
+                    clamped[k] = 0;
+                buf = (const uint8_t *)clamped;
+            }
+        }
+        rc = send_block(cal[i].type, buf, cal[i].bytes);
         if (rc != DSP_OK)
             return rc;
         dsp_info.param_blocks++;
@@ -1102,6 +1163,133 @@ int l1_sleep_post(int frames)
     return rc;
 }
 
+/* FUN_0005f332: the next TXBUFQ slot takes the tag, the length-type and then the
+ * payload as halfwords, each high byte first. */
+static int tx_desc_post(uint16_t tag, uint16_t type, const uint8_t *buf, uint32_t nbytes)
+{
+    uint32_t in = sm_r16(TXBUF_IN), out = sm_r16(TXBUF_OUT), next, base;
+
+    if (in >= TXBUF_SLOTS)
+        return DSP_EFULL;
+    next = (in + 1) % TXBUF_SLOTS;
+    if (out < TXBUF_SLOTS && next == out)       /* ring full: the DSP has not drained it */
+        return DSP_EFULL;
+    base = TXBUF_BASE + next * TXBUF_SIZE;
+    sm_w16(base, tag);
+    sm_w16(base + 2, type);
+    for (uint32_t k = 0; k < nbytes / 2; k++)
+        sm_w16(base + 8 + k * 2, (uint16_t)(buf[k * 2] << 8 | buf[k * 2 + 1]));
+    if (nbytes & 1)
+        sm_w16(base + 8 + (nbytes / 2) * 2, (uint16_t)(buf[nbytes - 1] << 8));
+    sm_w16(TXBUF_IN, (uint16_t)next);
+    return DSP_OK;
+}
+
+/* One GSM access burst (RACH) - the osmocom RACH_REQ primitive. The stock
+ * FUN_0004fe0a reduced to a standalone key-up: word 7 = the channel index
+ * (l1_arfcn_index), word 10 = the cal slot, no hopping, band field 0. The TX
+ * descriptor is the stock's {0, cal, 0, ra}: byte 1 the channel's RF-cal byte
+ * (0 is accepted as a default), byte 3 the 8-bit channel request (random access).
+ * The arm command {4,0,1} (command group 4) follows and the DSP keys the PA for
+ * that one frame. STILL REFUSES unless the minimum-power clamp is armed - the
+ * safety interlock stays until full-power registration is separately agreed.
+ * SDR-verified 2026-11-09 to emit spec-compliant access bursts. */
+int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
+{
+    uint8_t desc[4] = { 0, cal, 0, ra };
+    uint16_t fi[11], ext[3];
+    int rc;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    if (!tx_min_clamp)                   /* interlock: no transmit without the clamp */
+        return DSP_ECMD;
+    fi_init(fi, ext, FI_ACCESS);
+    fi[0] = (uint16_t)(FI_ACCESS | 0xa000u);    /* the stock's type-6 flag bits */
+    fi[3] = 0;                           /* no hopping, power band 0 */
+    fi[5] = 0;
+    fi[7] = (uint16_t)(index & 0x3ffu);
+    fi[10] = (uint16_t)(0x3ffu | (uint16_t)(slot & 0x3f) << 10);
+    if ((rc = post_fi(fi, ext)) != DSP_OK)
+        return rc;
+    if ((rc = tx_desc_post(0, 0, desc, sizeof desc)) != DSP_OK)
+        return rc;
+    /* FUN_0004b49a(0,1): command group 4 (the TX/frame group), word 2 = 1. */
+    { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
+}
+
+/* Uplink normal-burst TX on a dedicated channel - the osmocom DATA_REQ (uplink)
+ * primitive. The stock path (FUN_000504f8 + FUN_00050426 + FUN_0004f526):
+ *  - the 23-byte L2 block goes to the TXBUFQ as a type-3 descriptor;
+ *  - the burst is a type-2 rx frame rewritten to type 7: word0 = 7 | 0xa000,
+ *    words 6 and 7 = the ARFCN index, word 10 = the cal slot, word 3's high
+ *    nibble cleared; word1 carries the tag/burst/FN and word4 the TSC as for rx;
+ *  - then a {0, cal, 0, burst} control descriptor and the arm command {4,0,1}.
+ * A caller posts the four bursts (burst 0..3) of a block in order on the
+ * assigned timeslot. Serving-cell context (ARFCN index, cal slot, TN, TSC, cell,
+ * cal byte) comes from the immediate assignment; pass it in rather than reading a
+ * stock scell struct.
+ *
+ * RE-FAITHFUL + compile-checked, but NOT HARDWARE-VERIFIED: a dedicated channel
+ * only exists after a network immediate-assignment, so this can be exercised only
+ * through the (gated) registration flow, where its exact block/burst framing is
+ * confirmed against real behaviour. The min-power clamp interlock still applies.
+ * See docs/l1-osmocom.md. */
+int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
+                   uint8_t cal, const uint8_t block[23])
+{
+    uint16_t fi[11], ext[3];
+    int rc;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    if (!tx_min_clamp)                   /* interlock: no transmit without the clamp */
+        return DSP_ECMD;
+    /* the 23-byte L2 block -> TXBUFQ (type-3 normal burst) */
+    if ((rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
+        return rc;
+    /* a type-2 rx frame (as l1_burst_post), then the type-7 rewrite */
+    fi_init(fi, ext, FI_BLOCK);
+    fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
+    fi[3] = (uint16_t)((tn & 7) << 8);
+    fi[4] = (uint16_t)((tsc & 7) << 8);
+    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
+    fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);        /* word0: type 7 + flags */
+    fi[6] = (uint16_t)(index & 0x3ffu);             /* word6 = ARFCN index */
+    fi[7] = (uint16_t)(index & 0x3ffu);             /* word7 = ARFCN index */
+    fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
+    fi[3] = (uint16_t)(fi[3] & 0x0fffu);            /* clear word3 bits 15:12 */
+    if ((rc = post_fi(fi, ext)) != DSP_OK)
+        return rc;
+    { const uint8_t ctl[4] = { 0, cal, 0, (uint8_t)(burst & 3) };
+      if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
+          return rc; }
+    { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
+}
+
+/* Dedicated-mode establish (osmocom DM_EST): the DSP command-3 that moves the L1
+ * toward a dedicated channel. Stock command builder FUN_0004b410: word0 = 3,
+ * word1 = the channel/mode selector, word2 = the mapped gain (0/1 pass through,
+ * 3->2, 4->3, else 0), word3 = the current frame, word4 = aux.
+ *
+ * IMPORTANT - this is only the DSP-command piece. In the stock, command 3 runs
+ * inside the L1 STATE MACHINE (PSRAM FUN_003b13c6 -> FUN_000589d8), which also
+ * drives the RF / AFC / timing setup (FUN_0002f348 "SetState", FUN_00062dc2..)
+ * and the per-block dedicated scheduler. A working dedicated channel needs that
+ * whole subsystem, which our L1 does not have yet (our RX works on broadcast
+ * without it). So l1_dm_est posts the command; the L1-state/RF-control layer and
+ * the scheduler are the remaining major pieces, and the path is HW-verifiable
+ * only through the gated registration flow. See docs/l1-osmocom.md. */
+int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux)
+{
+    uint16_t g = gain <= 1 ? gain : gain == 3 ? 2 : gain == 4 ? 3 : 0;
+    uint16_t cmd[5] = { 3, sel, g, (uint16_t)(frame_number & 0xffffu), aux };
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    return post_cmd(cmd);
+}
+
 int l1_fi_post(const uint16_t fi[11], const uint16_t ext[3])
 {
     uint16_t f[11];
@@ -1141,6 +1329,9 @@ const l1_api_t l1_api = {
     .cell_idle = l1_cell_idle, .rxlev_measure = l1_rxlev_measure, .cell_c1 = l1_cell_c1,
     .cell_select = l1_cell_select, .cell_stay = l1_cell_stay,
     .cch_classify = l1_cch_classify, .cch_read = l1_cch_read,
+    .tx_min_power = l1_tx_min_power, .tx_min_power_on = l1_tx_min_power_on,
+    .cal_readback = l1_cal_readback, .access_post = l1_access_post,
+    .uplink_post = l1_uplink_post, .dm_est = l1_dm_est,
 };
 
 /* FUN_0005f692 / FUN_0005f674: "in" is the slot written last; the bytes from

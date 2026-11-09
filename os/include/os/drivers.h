@@ -83,7 +83,7 @@ void rtc_time(int *h, int *m, int *s);
 
 /* ---- SD card ------------------------------------------------------------ */
 typedef struct {
-    uint32_t blocks_read, blocks_written, retries, failures;
+    uint32_t blocks_read, blocks_written, retries, failures, reinits;
 } sd_stats_t;
 
 int sd_init(void);              /* 0, or the probe step that failed (1-8) */
