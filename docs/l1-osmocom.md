@@ -128,6 +128,22 @@ So a working DM_EST = l1_dm_est (have) + the RF-control writes (step 2, addresse
 to map) + the L1-state set + the ring rework/scheduler (step 5). All in the
 decompilable region, so RE-able; untestable until the (now cleared) registration.
 
+### Refinement (RE 2026-11-09): most of step 2 is stock-internal, skip it
+The step-2 RF-control writes target SHADOW STRUCTS in the stock's PSRAM data
+(DAT_00062ec8 = 0x0428b8c0, DAT_00062e74 = 0x0422fbd8; FUN_00063000/FUN_0002ee34
+set mode/"PGPARAM" fields in them). They are the stock's own ARM-side bookkeeping
+at fixed stock addresses - NOT hardware and NOT our memory map. The DSP gets the
+real per-channel config through the SHARE-MEMORY protocol we already drive: the NV
+cal (sent at l1_start), command 3 (serving cell -> l1_dm_est), and the frame
+instructions' cal-slot / ARFCN / TSC fields (l1_burst_post rx, l1_uplink_post tx).
+So our L1 does NOT replicate the stock shadow structs. Dedicated mode for us is:
+  command 3 (have) + the per-block SDCCH/TCH multiframe SCHEDULER.
+The scheduler is pure ARM-side GSM TDMA (GSM 05.02): on the assigned timeslot,
+post the downlink rx bursts and the uplink tx bursts at the subchannel's frames of
+the 51-multiframe (SDCCH/8) or 26-multiframe (TCH), collect rx blocks (DATA_IND),
+send uplink blocks (DATA_REQ). It reuses the verified rx/tx primitives and needs
+no new RF RE - the tractable next build. HW-testable only at registration.
+
 ## Notes
 - L1CTL is a thin adapter: it should not re-implement PHY; it marshals primitives
   to l1_api and the result rings to DATA_IND/confirms. Keep l1_api the single
