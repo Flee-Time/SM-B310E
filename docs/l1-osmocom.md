@@ -107,6 +107,27 @@ normal power, with bounded, deliberate attempts. Everything below is the path to
 6. **TCH / voice traffic** - the DSP's traffic rings and codec modes.
 7. **Timing advance, handover, measurement-report assembly.**
 
+## DM_EST establishment sequence (RE 2026-11-09, the implementation foundation)
+The stock L1 state machine routes command 3 through FUN_000589d8 (low region,
+decompiles cleanly; the PSRAM dispatcher FUN_003b13c6 is only the router and
+disassembles poorly - we don't need it). FUN_000589d8 does, for a dedicated
+channel (its arg has a channel-mode field, 0/1/2):
+1. post command 3 to the DSP (FUN_0004b410: word0=3, mode selector, mapped gain,
+   frame, aux) - l1_dm_est covers this.
+2. RF/analog register setup: FUN_00062dc2 (a single reg write), FUN_00062d78 (a
+   double-buffered reg: shadow[1]=v, live=shadow, dirty=1), FUN_00062dce
+   (reg[6]=computed, then FUN_00063000). These program the channel's RF params
+   (gain from scell[+8], channel config). <- the RF-control layer to replicate.
+3. set the L1 state: FUN_0002f348 (state 4, or 6 when mode==2) - "SetState normal".
+4. reset FUN_0005c064 (zeros a small state pair).
+5. rework the 26-slot frame-instruction ring (FUN_0005f85c, ~1.2 KB): walk the
+   ring from the DSP's current "out" to "in", clearing/re-marking entries so the
+   dedicated channel's rx(+uplink) bursts are scheduled. <- the scheduler.
+
+So a working DM_EST = l1_dm_est (have) + the RF-control writes (step 2, addresses
+to map) + the L1-state set + the ring rework/scheduler (step 5). All in the
+decompilable region, so RE-able; untestable until the (now cleared) registration.
+
 ## Notes
 - L1CTL is a thin adapter: it should not re-implement PHY; it marshals primitives
   to l1_api and the result rings to DATA_IND/confirms. Keep l1_api the single
