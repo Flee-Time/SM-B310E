@@ -85,6 +85,42 @@ int mm_parse_lu_reject(const uint8_t *l3, int len, uint8_t *cause)
     return 0;
 }
 
+int mm_parse_auth_request(const uint8_t *l3, int len, uint8_t rand[16])
+{
+    if (len < 19 || mm_msg_type(l3, len) != MM_AUTH_REQUEST)
+        return -1;
+    for (int i = 0; i < 16; i++)             /* octet 3 = CKSN; RAND at 4..19 */
+        rand[i] = l3[3 + i];
+    return 0;
+}
+
+int mm_encode_auth_response(uint8_t *out, const uint8_t sres[4])
+{
+    out[0] = MM_PD;
+    out[1] = MM_AUTH_RESPONSE;
+    for (int i = 0; i < 4; i++)
+        out[2 + i] = sres[i];
+    return 6;
+}
+
+int mm_encode_identity_response(uint8_t *out, int type, const uint8_t *digits, int n)
+{
+    int milen;
+
+    out[0] = MM_PD;
+    out[1] = MM_IDENTITY_RESPONSE;
+    milen = mm_encode_mi_digits(out + 3, type, digits, n);
+    out[2] = (uint8_t)milen;
+    return 3 + milen;
+}
+
+int mm_encode_tmsi_realloc_complete(uint8_t *out)
+{
+    out[0] = MM_PD;
+    out[1] = MM_TMSI_REALLOC_COMPL;
+    return 2;
+}
+
 int mm_selftest(void)
 {
     static const uint8_t imsi[15] = { 0, 0, 1, 0, 1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
@@ -110,5 +146,16 @@ int mm_selftest(void)
     if (n == 18 && lu[8] == 0x33 && lu[9] == 8 && lu[10] == 0x09 && lu[17] == 0x98) ok++;
     if (mm_msg_type(accept, (int)sizeof accept) == MM_LU_ACCEPT) ok++;
     if (mm_parse_lu_reject(reject, (int)sizeof reject, &cause) == 0 && cause == 0x0b) ok++;
+    {
+        uint8_t ar[19] = { 0x05, 0x12, 0x07 };
+        uint8_t rnd[16], resp[6];
+        static const uint8_t sres[4] = { 0xde, 0xad, 0xbe, 0xef };
+
+        for (int i = 0; i < 16; i++)
+            ar[3 + i] = (uint8_t)(0x10 + i);
+        if (mm_parse_auth_request(ar, 19, rnd) == 0 && rnd[0] == 0x10 && rnd[15] == 0x1f) ok++;
+        if (mm_encode_auth_response(resp, sres) == 6 && resp[1] == MM_AUTH_RESPONSE &&
+            resp[2] == 0xde && resp[5] == 0xef) ok++;
+    }
     return ok;
 }

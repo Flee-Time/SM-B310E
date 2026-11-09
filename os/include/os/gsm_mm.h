@@ -58,8 +58,16 @@ int mm_encode_lu_request(uint8_t *out, int lu_type, int cksn,
 int mm_msg_type(const uint8_t *l3, int len);
 /* LOCATION UPDATING REJECT -> reject cause. 0, or -1. */
 int mm_parse_lu_reject(const uint8_t *l3, int len, uint8_t *cause);
+/* AUTHENTICATION REQUEST -> the 16-octet RAND. 0, or -1. */
+int mm_parse_auth_request(const uint8_t *l3, int len, uint8_t rand[16]);
+/* AUTHENTICATION RESPONSE from the 4-octet SRES. Returns length (6). */
+int mm_encode_auth_response(uint8_t *out, const uint8_t sres[4]);
+/* IDENTITY RESPONSE carrying a BCD identity (IMSI/IMEI). Returns length. */
+int mm_encode_identity_response(uint8_t *out, int type, const uint8_t *digits, int n);
+/* TMSI REALLOCATION COMPLETE. Returns length (2). */
+int mm_encode_tmsi_realloc_complete(uint8_t *out);
 
-#define MM_SELFTEST_TOTAL 11
+#define MM_SELFTEST_TOTAL 13
 int mm_selftest(void);
 
 #endif
