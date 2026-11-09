@@ -209,8 +209,14 @@ int l1_cmd_post(const uint16_t cmd[5]);
  * must be armed before l1_start(); the burst poster refuses without it. */
 #define L1_APC_BANDS 4
 #define L1_APC_N     18
-void l1_tx_min_power(int on);
-int l1_tx_min_power_on(void);
+/* TX power interlock modes: OFF refuses all transmit (the safe default), MIN
+ * clamps the APC tables to the calibrated minimum, NORMAL sends them as
+ * calibrated (a real, owner-cleared registration). Set before l1_start(). */
+enum { L1_TX_OFF, L1_TX_MIN, L1_TX_NORMAL };
+void l1_tx_min_power(int on);           /* compat: on -> MIN, off -> OFF */
+int l1_tx_min_power_on(void);           /* is the MIN clamp armed? */
+void l1_tx_power_set(int mode);         /* L1_TX_* */
+int l1_tx_power_mode(void);
 int l1_cal_readback(uint16_t out[L1_APC_BANDS][L1_APC_N]);
 int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs

@@ -881,20 +881,30 @@ static int send_block(uint32_t type, const uint8_t *src, uint32_t bytes)
 #define APC_COMP_LAST   45
 #define APC_MIN         10              /* the owner's calibrated minimum DAC */
 
-static bool tx_min_clamp;               /* armed before l1_start(); gates TX */
+/* TX power interlock (set before l1_start()): L1_TX_OFF refuses all transmit -
+ * the safe default; L1_TX_MIN sends the per-band APC tables clamped to the
+ * calibrated minimum (the SDR-verified dry run); L1_TX_NORMAL sends them as
+ * calibrated, for a real (owner-cleared) registration. */
+static int tx_power_mode;               /* L1_TX_OFF by default; gates TX */
 static uint16_t sent_apc[APC_BANDS][APC_N];     /* setpoints actually sent */
 
-void l1_tx_min_power(int on) { tx_min_clamp = on != 0; }
-int l1_tx_min_power_on(void) { return tx_min_clamp; }
+void l1_tx_min_power(int on) { tx_power_mode = on ? L1_TX_MIN : L1_TX_OFF; }
+int l1_tx_min_power_on(void) { return tx_power_mode == L1_TX_MIN; }
+void l1_tx_power_set(int mode)
+{
+    tx_power_mode = mode < L1_TX_OFF ? L1_TX_OFF :
+                    mode > L1_TX_NORMAL ? L1_TX_NORMAL : mode;
+}
+int l1_tx_power_mode(void) { return tx_power_mode; }
 
 /* out[band][k] = the setpoint that was last sent for that band; the return is
- * the number of bands with the clamp active (0 = sent as-calibrated). */
+ * the number of bands with the min clamp active (0 = sent as-calibrated). */
 int l1_cal_readback(uint16_t out[APC_BANDS][APC_N])
 {
     for (int b = 0; b < APC_BANDS; b++)
         for (int k = 0; k < APC_N; k++)
             out[b][k] = sent_apc[b][k];
-    return tx_min_clamp ? APC_BANDS : 0;
+    return tx_power_mode == L1_TX_MIN ? APC_BANDS : 0;
 }
 
 /* The list's types 1, 3..15 (table at FUN_000606ea): type 1 is all of NV item
@@ -935,8 +945,8 @@ static int send_parameters(void)
             const uint16_t *src = (const uint16_t *)buf;
 
             for (int k = 0; k < APC_N; k++)
-                sent_apc[band][k] = tx_min_clamp ? APC_MIN : src[APC_FIRST + k];
-            if (tx_min_clamp) {
+                sent_apc[band][k] = tx_power_mode == L1_TX_MIN ? APC_MIN : src[APC_FIRST + k];
+            if (tx_power_mode == L1_TX_MIN) {
                 for (int k = 0; k < 396; k++)
                     clamped[k] = src[k];
                 for (int k = APC_FIRST; k <= APC_LAST; k++)
@@ -1202,7 +1212,7 @@ int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;
-    if (!tx_min_clamp)                   /* interlock: no transmit without the clamp */
+    if (tx_power_mode == L1_TX_OFF)      /* interlock: no transmit in the OFF mode */
         return DSP_ECMD;
     fi_init(fi, ext, FI_ACCESS);
     fi[0] = (uint16_t)(FI_ACCESS | 0xa000u);    /* the stock's type-6 flag bits */
@@ -1243,7 +1253,7 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;
-    if (!tx_min_clamp)                   /* interlock: no transmit without the clamp */
+    if (tx_power_mode == L1_TX_OFF)      /* interlock: no transmit in the OFF mode */
         return DSP_ECMD;
     /* the 23-byte L2 block -> TXBUFQ (type-3 normal burst) */
     if ((rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
