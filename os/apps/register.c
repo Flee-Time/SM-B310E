@@ -30,6 +30,9 @@ screen_t *app_register(void);
 #define IDX_MAX         548             /* best[] spans indexes 0..547 */
 static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } };
 #define GAIN_START      25u             /* the stock's middle AGC (gsmstatus) */
+#define GAIN_WEAK       12u             /* a weak cell needs a more sensitive (lower) gain
+                                         * to sync + read: gain 25 can't lock rxlev ~33 */
+#define WEAK_RXLEV      40              /* rxlev below this -> use GAIN_WEAK */
 #define SWEEPS          2u
 /* A home BCCH can be a weak carrier buried under stronger traffic (e.g. a
  * roaming-partner / less-dense operator), so sweep many channels in signal order,
@@ -150,7 +153,7 @@ static void take_pm(uint16_t *best, l1_pm_t *res, int got)
             best[res[j].index] = res[j].level & 0xfffu;
 }
 
-static int scan_candidates(uint16_t *cand, int max)
+static int scan_candidates(uint16_t *cand, uint8_t *candrx, int max)
 {
     uint16_t *best = kmalloc(IDX_MAX * sizeof(uint16_t));
     l1_pm_t res[8];
@@ -207,6 +210,7 @@ static int scan_candidates(uint16_t *cand, int max)
                 bv = best[i], bi = (uint16_t)i;
         if (bi == L1_NO_INDEX)
             break;
+        candrx[n] = (uint8_t)(bv >> 4);         /* rxlev of this candidate */
         cand[n++] = bi;
         best[bi] = 0;
     }
@@ -216,15 +220,13 @@ static int scan_candidates(uint16_t *cand, int max)
 
 /* ---- 3. sync a candidate and read its SI; is it the SIM's home network? --- */
 
-static bool try_cell(uint16_t index)
+static bool try_cell(uint16_t index, uint8_t gain)
 {
-    int s = l1_cell_sync(&cell, index, GAIN_START, 0, SYNC_BUDGET_MS);
-
-    if (s != 1)
-        return false;                   /* not a BCCH (fast fail); not logged - noisy */
+    if (l1_cell_sync(&cell, index, gain, 0, SYNC_BUDGET_MS) != 1)
+        return false;                   /* not a BCCH at this gain (fast fail) */
     sweep_synced++;
     l1_cell_read(&cell, 24, L1_SI3 | L1_SI4, READ_BUDGET_MS);
-    klog("register: idx %u -> %u-%02u si %08lx", index, cell.mcc, cell.mnc,
+    klog("register: idx %u g%u -> %u-%02u si %08lx", index, gain, cell.mcc, cell.mnc,
          (unsigned long)cell.si_seen);
     return cell.mcc == home_mcc && cell.mnc == home_mnc && (cell.si_seen & L1_SI3);
 }
@@ -234,6 +236,7 @@ static bool try_cell(uint16_t index)
 static void worker(void *arg)
 {
     uint16_t cand[CANDIDATES];
+    uint8_t candrx[CANDIDATES];          /* rxlev per candidate, to pick the sync gain */
     int ncand, rc;
 
     reg_ui.phase = P_SIM;
@@ -263,7 +266,7 @@ static void worker(void *arg)
     posted = 4;                          /* l1_run()'s idle frames */
 
     reg_ui.phase = P_SCAN;
-    ncand = scan_candidates(cand, CANDIDATES);
+    ncand = scan_candidates(cand, candrx, CANDIDATES);
     klog("register: scan ncand=%d, top %u %u %u", ncand,
          ncand > 0 ? cand[0] : 0xffffu, ncand > 1 ? cand[1] : 0xffffu,
          ncand > 2 ? cand[2] : 0xffffu);
@@ -276,8 +279,10 @@ static void worker(void *arg)
         int swept = 0;
 
     for (int i = 0; i < ncand && kernel_ticks() - find_t0 < FIND_BUDGET_MS; i++, swept++) {
+        uint8_t g = candrx[i] < WEAK_RXLEV ? GAIN_WEAK : GAIN_START;
+
         reg_ui.arfcn_index = cand[i];
-        if (try_cell(cand[i])) {
+        if (try_cell(cand[i], g)) {
             reg_ui.mcc = cell.mcc;
             reg_ui.mnc = cell.mnc;
             reg_ui.mnc_digits = cell.mnc_digits;

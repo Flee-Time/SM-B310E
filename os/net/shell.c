@@ -507,15 +507,17 @@ static void c_nvband(sess_t *s, int argc, char **argv)
  * to prove the band's RX path and the arfcn-index->band mapping. No transmit. */
 static void c_rxcell(sess_t *s, int argc, char **argv)
 {
-    uint32_t band = 0, arfcn = 0;
+    uint32_t band = 0, arfcn = 0, gain = 25;
     l1_cell_t *c;
     uint16_t index;
     int rc, synced;
 
     if (argc < 3 || !parse_num(argv[1], &band) || !parse_num(argv[2], &arfcn)) {
-        say(s, "usage: rxcell BAND ARFCN  (BAND 0=GSM900 1=DCS1800)\n");
+        say(s, "usage: rxcell BAND ARFCN [GAIN]  (BAND 0=900 1=1800; GAIN 0-63, def 25)\n");
         return;
     }
+    if (argc > 3)
+        parse_num(argv[3], &gain);
     if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING) {
         say(s, "rxcell: the DSP is busy\n");
         return;
@@ -537,16 +539,16 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
             (unsigned long)band, (unsigned long)arfcn);
         goto stop;
     }
-    synced = l1_cell_sync(c, index, 25, 0, 2000);
-    say(s, "rxcell: band %lu arfcn %lu index %u -> sync %d\n",
-        (unsigned long)band, (unsigned long)arfcn, index, synced);
+    synced = l1_cell_sync(c, index, (uint8_t)gain, 0, 2000);
+    say(s, "rxcell: band %lu arfcn %lu index %u gain %lu -> sync %d\n",
+        (unsigned long)band, (unsigned long)arfcn, index, (unsigned long)gain, synced);
     if (synced == 1) {
         say(s, "  SCH ok: BSIC %u (NCC %u BCC %u), frame offset %lu\n", c->bsic,
             c->bsic >> 3, c->bsic & 7, (unsigned long)c->fn_offset);
         l1_cell_read(c, 24, L1_SI3 | L1_SI4, 3000);
-        say(s, "  SI 0x%08lx, MCC %u MNC %0*u, LAC %u, cell %u, %lu good blocks\n",
+        say(s, "  SI 0x%08lx, MCC %u MNC %0*u, LAC %u, cell %u; %lu good / %lu bad blocks\n",
             (unsigned long)c->si_seen, c->mcc, (int)c->mnc_digits, c->mnc, c->lac,
-            c->ci, (unsigned long)c->good);
+            c->ci, (unsigned long)c->good, (unsigned long)c->bad);
     }
 stop:
     dsp_stop();
@@ -1458,7 +1460,7 @@ static const cmd_t cmds[] = {
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
-    { "rxcell", "BAND ARFCN", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
+    { "rxcell", "BAND ARFCN [GAIN]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },
