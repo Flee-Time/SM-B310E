@@ -2,15 +2,11 @@
  * update (registration) attempt on the owner's SIM, the end-to-end exercise of the
  * registration stack (L1 RACH + CCCH + SDCCH, LAPDm, RR, MM, the FSM, SIM auth).
  *
- * SAFETY. This TRANSMITS, so nothing fires without the user pressing Register and
- * confirming. The min-power clamp is armed before l1_start(), so the RACH goes at
- * the minimum APC setpoint — a live tower will not decode it (a safe dry run), and
- * reg_lu_run() times out waiting for an IMMEDIATE ASSIGNMENT (result "no response").
- * A real, normal-power registration — which the owner has cleared for Vodafone WHEN
- * the full tool set exists — needs the clamp interlock released (a deliberate code
- * change) and the SIM-auth timing fix noted in os/gsm_lu.h; it is NOT this screen.
- *
- * Receive path (SIM read, DSP boot, scan, sync, read SI) is all safe; only the
+ * SAFETY. This TRANSMITS at NORMAL (calibrated) power on the live network with the
+ * owner's SIM — the registration the owner has cleared for Vodafone. Nothing fires
+ * without pressing Register and confirming; it is one bounded attempt per press, it
+ * shows the uplink frequency to monitor, and it restores the TX-off default after.
+ * The receive path (SIM read, DSP boot, scan, sync, read SI) is all safe; only the
  * final reg_lu_run() keys the transmitter.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
@@ -58,6 +54,7 @@ static uint8_t imsi_digits[16];
 static int imsi_n;
 static gsm_reg_t reg;
 static l1_cell_t cell;
+static reg_lu_progress_t reg_prog;      /* how far the last/current attempt got */
 
 /* ---- frame-ring feeding (the proven gsmstatus pattern) ------------------- */
 
@@ -232,7 +229,7 @@ static void worker(void *arg)
         reg_ui.result = RES_RADIO_FAIL;
         goto done;
     }
-    l1_tx_min_power(1);                  /* clamp TX to the minimum before l1_start */
+    l1_tx_power_set(L1_TX_NORMAL);       /* normal (calibrated) power before l1_start */
     if (l1_start() != DSP_OK || l1_run() != DSP_OK) {
         reg_ui.result = RES_RADIO_FAIL;
         goto done;
@@ -263,13 +260,14 @@ static void worker(void *arg)
              cell.lac, CLASSMARK1);
     reg_ui.phase = P_TX;
     rc = reg_lu_run(&reg, &cell, 0, 0, SIM_SLOT, (uint8_t)(kernel_ticks() & 0x0f),
-                    TX_BUDGET_MS);
+                    TX_BUDGET_MS, &reg_prog);
     reg_ui.reject_cause = reg.reject_cause;
     reg_ui.result = rc == REG_ACCEPTED ? RES_ACCEPTED :
                     rc == REG_REJECTED ? RES_REJECTED : RES_NO_RESPONSE;
 
 done:
     dsp_stop();
+    l1_tx_power_set(L1_TX_OFF);          /* restore the safe default (TX refused) */
 done_nosim:
     sim_deactivate(SIM_SLOT);
     memset(imsi_digits, 0, sizeof imsi_digits);     /* drop the IMSI */
@@ -293,6 +291,7 @@ static void start_worker(void)
     reg_ui.mcc = reg_ui.mnc = reg_ui.lac = 0;
     reg_ui.reject_cause = 0;
     reg_ui.arfcn_index = L1_NO_INDEX;
+    memset(&reg_prog, 0, sizeof reg_prog);
     reg_ui.busy = 1;
     if (!thread_create("register", PRIO_NORMAL, 4096, worker, NULL))
         reg_ui.busy = 0;
@@ -335,7 +334,7 @@ static void result_line(const char **msg, uint32_t *color)
 {
     switch (reg_ui.result) {
     case RES_ACCEPTED:    *msg = "Registered"; *color = C_OK; return;
-    case RES_NO_RESPONSE: *msg = "No response (min power)"; *color = C_WARN; return;
+    case RES_NO_RESPONSE: *msg = "Not registered"; *color = C_WARN; return;
     case RES_NO_CELL:     *msg = "No Vodafone cell"; *color = C_WARN; return;
     case RES_NO_SIM:      *msg = "SIM not ready"; *color = C_BAD; return;
     case RES_RADIO_FAIL:  *msg = "Radio did not start"; *color = C_BAD; return;
@@ -387,8 +386,19 @@ static void draw(screen_t *s)
                 gfx_text_centered(y, line, C_ACCENT, FONT_SMALL, 1);
             }
         }
+        if (reg_ui.phase == P_TX || reg_ui.result >= RES_ACCEPTED) {
+            const char *stage = reg_prog.sim_ok ? "auth ok" :
+                                reg_prog.reached_auth ? "auth req" :
+                                reg_prog.established ? "SDCCH up" :
+                                reg_prog.got_assign ? "got grant" : "RACH sent";
+
+            y += 12;
+            snprintf(line, sizeof line, "%s  dl%u ul%u", stage,
+                     reg_prog.dl_blocks, reg_prog.ul_bursts);
+            gfx_text_centered(y, line, C_TEXT, FONT_SMALL, 1);
+        }
     }
-    gfx_text_centered(UI_BOTTOM - 12, "experimental, minimum power", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(UI_BOTTOM - 12, "experimental, normal power", C_DIM, FONT_SMALL, 1);
 }
 
 static void confirm_yes(void)
@@ -402,8 +412,8 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT)
         ui_confirm("Register",
-                   "Send a minimum-power registration attempt to Vodafone? "
-                   "(experimental, transmits)", confirm_yes);
+                   "Transmit a NORMAL-power registration to Vodafone on the live "
+                   "network with this SIM?", confirm_yes);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
 }
