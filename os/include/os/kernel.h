@@ -61,6 +61,8 @@ struct thread {
 /* threads */
 thread_t *thread_create(const char *name, int prio, size_t stack_size,
                         thread_fn fn, void *arg);
+thread_t *thread_create_owned(const char *name, int prio, size_t stack_size,
+                            thread_fn fn, void *arg, void *owner);
 void thread_sleep(uint32_t ms);
 void thread_yield(void);
 void thread_exit(void) __attribute__((noreturn));

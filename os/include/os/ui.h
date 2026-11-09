@@ -114,11 +114,15 @@ void ui_pop(void);
  *                     Center too, without repeats, tactile buzz or the
  *                     held-key gestures (quick panel, torch); END held
  *                     2 s still powers off
- *   UI_MODE_AWAKE     no screen timeout */
+ *   UI_MODE_AWAKE     no screen timeout while keys come: awake_limit_s (5 min)
+ *                     after the last, the normal timeout runs, so a game left
+ *                     running does not keep the screen lit until the battery
+ *                     is gone. "Screen off: never" in Settings still means never */
 #define UI_MODE_FULL      1u
 #define UI_MODE_RAW_KEYS  2u
 #define UI_MODE_AWAKE     4u
 void ui_screen_mode(screen_t *s, unsigned flags);
+void ui_push_urgent(screen_t *s);   /* the alarm: even with the stack full */
 /* From a full-screen draw(): a whole frame sent where it lies, no copy: 32-byte
  * aligned, and not written until another is sent. The one sent already, or
  * NULL: the panel stays as it is. False if the screen is not on top and
@@ -156,11 +160,18 @@ typedef struct {
     int tz_min;                     /* the time zone: minutes from UTC */
     int net_time;                   /* 1: the clock from the network (SNTP) */
     int dev_mode;                   /* 1: show developer tools (DSP boot, ...) */
+    int chip_sleep;                 /* 1: system sleep in dark idle (default) */
+    int awake_limit_s;              /* UI_MODE_AWAKE: no key for this long, the
+                                     * normal screen timeout runs again */
+    int player_idle_s;              /* Music closes after this long playing nothing
+                                     * and with no key for it; 0: never */
 } ui_settings_t;
 
 extern ui_settings_t ui_settings;
 void ui_settings_save(void);
 void ui_apply_brightness(void);
+bool ui_is_dark(void);              /* the panel asleep: apps can stop working */
+void ui_force_dark(void);           /* dark now, as after the timeout; the UI's */
 void ui_wake(void);                 /* light the screen, as a key would */
 void ui_buzz(int level, uint32_t ms);   /* vibrate at level 1..7 for ms (5 s at most) */
 

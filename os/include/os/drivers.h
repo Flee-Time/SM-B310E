@@ -58,6 +58,7 @@ typedef struct {
     uint8_t code;
     uint8_t down;               /* 1 press, 0 release */
     uint32_t time;              /* kernel_ticks() */
+    uint8_t repeat;             /* the UI's auto-repeat of a held key (appended) */
 } key_event_t;
 
 void keypad_init(void);
@@ -75,6 +76,8 @@ bool charger_present(void);
 enum { CHARGE_NONE, CHARGE_CHARGING, CHARGE_DONE };
 int charge_state(void);             /* CHARGE_* from the charger's lines */
 int battery_mv(void);               /* last unplugged reading, -1 unknown */
+extern volatile uint32_t ui_alive_at;   /* the UI loop's last pass: is it stuck? */
+extern volatile bool ui_end_held;       /* END still held long after: power off */
 int battery_percent(int mv);        /* -1 unknown */
 void rtc_time(int *h, int *m, int *s);
 

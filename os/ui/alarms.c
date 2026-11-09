@@ -23,6 +23,7 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
+#include "os/media.h"
 #include "os/rtc.h"
 #include "os/ui.h"
 #include "apps/wavio.h"
@@ -38,9 +39,17 @@ static int count;
 static bool loaded;
 
 int alarm_snooze_min = -1;              /* minute of day to ring again, -1 none (tests read it) */
-static int fired_min = -1;              /* the minute that rang (once each) */
 bool alarm_ringing;                     /* (tests read it) */
 static int ringing_index = -1;
+/* A snooze is a time span in ticks, so a clock moved meanwhile cannot make it 24 h;
+ * and one each, or stopping another alarm would cancel it */
+static uint32_t snooze_at[ALARM_MAX];
+static bool snoozed[ALARM_MAX];
+static unsigned pending;                /* due while another rang: bit per alarm */
+static int pending_min = -1;
+/* what the ring took over, given back when it ends */
+static bool took_music, took_fm, took_volume;
+static int took_cat;
 
 /* ---- the file -------------------------------------------------------------- */
 
@@ -154,7 +163,8 @@ int alarm_set(int i, const alarm_t *a)
     alarms[i].days &= 0x7f;
     if (i == count)
         count++;
-    alarm_snooze_min = -1;
+    snoozed[i] = false;                 /* changed: its snooze no longer means it */
+    pending &= ~(1u << i);
     save();
     return i;
 }
@@ -164,6 +174,14 @@ bool alarm_delete(int i)
     ensure();
     if (i < 0 || i >= count)
         return false;
+    if (i < ringing_index)
+        ringing_index--;
+    for (int j = i; j + 1 < count; j++) {
+        snoozed[j] = snoozed[j + 1];
+        snooze_at[j] = snooze_at[j + 1];
+    }
+    snoozed[count - 1] = false;
+    pending = (pending & ((1u << i) - 1)) | (pending >> (i + 1) << i);
     memmove(&alarms[i], &alarms[i + 1], sizeof(alarm_t) * (size_t)(count - i - 1));
     count--;
     save();
@@ -246,7 +264,8 @@ static bool beep_on;
 static void ring_stop(void)
 {
     if (beep_on) {
-        wav_stop();
+        if (!wav_recording())
+            wav_stop();
         vibrator_set(0);
         beep_on = false;
     }
@@ -265,11 +284,14 @@ static void ring_tick(screen_t *s)
         return;
     beep_on = want;
     if (want) {
-        volume_use(VOL_ALARM);
-        wav_play_tone(BEEP_HZ);
+        if (!wav_recording()) {         /* a tone would end the recording: buzz only */
+            volume_use(VOL_ALARM);
+            wav_play_tone(BEEP_HZ);
+        }
         vibrator_set(5);
     } else {
-        wav_stop();
+        if (!wav_recording())
+            wav_stop();
         vibrator_set(0);
     }
 }
@@ -300,9 +322,15 @@ static void ring_key(screen_t *s, const key_event_t *ev)
 
         rtc_time(&h, &m, &sec);
         alarm_snooze_min = (h * 60 + m + SNOOZE_MIN) % (24 * 60);
+        if (ringing_index >= 0 && ringing_index < ALARM_MAX) {
+            snoozed[ringing_index] = true;
+            snooze_at[ringing_index] = kernel_ticks() + SNOOZE_MIN * 60000u;
+        }
         ui_pop();
     } else if (ev->code == KEY_CENTER || ev->code == KEY_RSOFT) {
         alarm_snooze_min = -1;
+        if (ringing_index >= 0 && ringing_index < ALARM_MAX)
+            snoozed[ringing_index] = false;
         ui_pop();
     }
 }
@@ -310,6 +338,13 @@ static void ring_key(screen_t *s, const key_event_t *ev)
 static void ring_leave(screen_t *s)
 {
     ring_stop();
+    if (took_fm && fm_is_on())          /* it may have been turned off meanwhile */
+        audio_fm_route(true);
+    if (took_volume)
+        volume_use(took_cat);
+    if (took_music)
+        media_pause(false);
+    took_fm = took_music = took_volume = false;
     alarm_ringing = false;
 }
 
@@ -321,46 +356,81 @@ static screen_t ring_screen = {
 
 static void ring(int index, int minute)
 {
-    fired_min = minute;
     ringing_index = index;
     alarm_ringing = true;
     ring_min = minute;
     ring_start = kernel_ticks();
     beep_on = false;
     klog("alarm: ringing at %02d:%02d", minute / 60, minute % 60);
+    /* Its tone needs the DAC and its own volume: the music waits, and the radio's
+     * line-in route (which leaves the DAC out, so the tone would not be heard) goes
+     * until it ends. A recording stays, with the buzz only. */
+    if (!wav_recording()) {
+        took_cat = volume_current();
+        took_volume = true;
+        if (media_state() == MEDIA_PLAYING || media_state() == MEDIA_LOADING) {
+            media_pause(true);
+            took_music = true;
+        }
+        if (fm_is_on()) {
+            audio_fm_route(false);
+            took_fm = true;
+        }
+    }
     ui_wake();
-    ui_push(&ring_screen);
+    ui_push_urgent(&ring_screen);
+    ui_screen_mode(&ring_screen, UI_MODE_AWAKE);    /* lit for all of its 3 minutes */
+}
+
+static bool due(int i, int now, int *wday)
+{
+    rtc_datetime_t t;
+
+    if (!alarms[i].on || alarms[i].minute != now)
+        return false;
+    if (!alarms[i].days)
+        return true;
+    if (*wday < 0)
+        *wday = rtc_get(&t) == 0 ? t.wday : -1;
+    return *wday >= 0 && (alarms[i].days & 1u << *wday);
+}
+
+static void ring_alarm(int i, int now)
+{
+    if (!alarms[i].days) {
+        alarms[i].on = 0;               /* once: done */
+        save();
+    }
+    ring(i, now);
 }
 
 void alarm_check(int h, int m)
 {
-    int now = h * 60 + m;
-    rtc_datetime_t t;
-    int wday = -1;
+    int now = h * 60 + m, wday = -1;
 
     ensure();
-    if (now != fired_min)
-        fired_min = -1;
-    if (alarm_ringing || fired_min == now)
-        return;
-    if (now == alarm_snooze_min) {
-        alarm_snooze_min = -1;
-        ring(ringing_index, now);
-        return;
+    /* Each new minute once: what is due joins the queue, also during a ring, so that
+     * nothing is lost to a ring or a snooze landing on the same minute */
+    if (now != pending_min) {
+        pending_min = now;
+        for (int i = 0; i < count; i++)
+            if (due(i, now, &wday))
+                pending |= 1u << i;
     }
-    for (int i = 0; i < count; i++) {
-        if (!alarms[i].on || alarms[i].minute != now)
-            continue;
-        if (alarms[i].days) {
-            if (wday < 0)
-                wday = rtc_get(&t) == 0 ? t.wday : -1;
-            if (wday < 0 || !(alarms[i].days & 1u << wday))
-                continue;
-        } else {
-            alarms[i].on = 0;           /* once: done */
-            save();
+    if (alarm_ringing)
+        return;
+    for (int i = 0; i < count; i++)
+        if (snoozed[i] && (int32_t)(kernel_ticks() - snooze_at[i]) >= 0) {
+            snoozed[i] = false;
+            alarm_snooze_min = -1;
+            ring(i, now);
+            return;
         }
-        ring(i, now);
-        return;
-    }
+    for (int i = 0; i < count; i++)
+        if (pending & 1u << i) {
+            pending &= ~(1u << i);
+            ring_alarm(i, now);
+            return;
+        }
+    pending = 0;
 }

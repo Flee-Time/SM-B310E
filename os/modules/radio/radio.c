@@ -213,8 +213,14 @@ static void draw(screen_t *s)
     }
 }
 
+static uint32_t conf_due;
+
 static void tick(screen_t *s)
 {
+    if (conf_due && (int32_t)(ticks() - conf_due) >= 0) {
+        conf_due = 0;
+        conf_save();
+    }
     if (starting) {
         bool was_on = fm_is_on();
 
@@ -380,6 +386,10 @@ static void open_options(void)
 
 static void key(screen_t *s, const key_event_t *ev)
 {
+    /* Held Up or Down must not stop and start the seek ten times a second, nor a held
+     * Left or Right write the card each step */
+    if (ev->repeat && (seek_dir || ev->code == KEY_UP || ev->code == KEY_DOWN))
+        return;
     if (seek_dir) {                     /* any key stops a seek */
         seek_dir = 0;
         state = NULL;
@@ -392,7 +402,7 @@ static void key(screen_t *s, const key_event_t *ev)
     case KEY_RIGHT:
         if (fm_is_on()) {
             tune(fm_frequency() + (ev->code == KEY_RIGHT ? FM_STEP : -FM_STEP));
-            conf_save();
+            conf_due = ticks() + 1500;  /* once it stops moving */
         }
         break;
     case KEY_UP:

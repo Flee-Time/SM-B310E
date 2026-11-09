@@ -127,6 +127,11 @@ static void saved(const char *text, void *ctx)
                 num = notes[i].number + 1;
     }
     path_of(num, path, sizeof(path));
+    /* the list holds 64: past that, the highest listed is not the highest there is */
+    while (editing == 0 && num < 9999 && f_stat(path, NULL) == FR_OK) {
+        num++;
+        path_of(num, path, sizeof(path));
+    }
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
         ui_message("Notes", "Could not save the note.");
         return;

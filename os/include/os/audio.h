@@ -13,6 +13,7 @@
 #define OS_AUDIO_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* ---- codec (drivers/audio.c) -------------------------------------------- */
@@ -96,6 +97,8 @@ typedef void (*audio_sink_fn)(const int16_t *mono, unsigned frames, void *ctx);
 int audio_play(unsigned rate, audio_fill_fn fill, void *ctx);
 void audio_play_stop(void);
 bool audio_playing(void);
+bool audio_record_failed(void);     /* a DMA error ended the last audio_record */
+void audio_drop_code(const void *base, size_t size);
 int audio_record(unsigned rate, int source, audio_sink_fn sink, void *ctx);
 void audio_record_stop(void);
 unsigned audio_peak(void);          /* largest sample since the last call */

@@ -21,6 +21,7 @@
 
 extern mutex_t net_lock;
 extern volatile bool net_stopping;
+void tcp_drop_all(void);                /* the PC started over: nobody is on them */
 
 void net_wake(void);                    /* the net thread: something to send */
 

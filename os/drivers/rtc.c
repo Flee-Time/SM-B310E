@@ -40,6 +40,7 @@
 #include "os/kernel.h"
 #include "os/lib.h"
 #include "os/rtc.h"
+#include "build_info.h"
 
 #define RTC_BASE      0x82001600u
 #define RTC_SEC       (RTC_BASE + 0x00)
@@ -313,6 +314,19 @@ uint32_t rtc_unix(int tz_min)
 }
 
 #define CLOCK_FILE OS_DIR "/clock.txt"
+#define PLAUSIBLE_DAYS (30u * 366u)     /* past this build's date: not a clock */
+#define SAVED_DAYS     (3u * 366u)      /* past the saved time: off that long? no */
+
+/* BUILD_DATE, "YYYY-MM-DD HH:MM": the latest thing known to be true. */
+static uint32_t build_seconds(void)
+{
+    const char *b = BUILD_DATE;
+#define TWO(i) ((b[i] - '0') * 10 + (b[(i) + 1] - '0'))
+    int32_t days = rtc_days_from_date(TWO(0) * 100 + TWO(2), TWO(5), TWO(8));
+
+    return days < 0 ? 0 : to_seconds((uint32_t)days, (unsigned)TWO(11), (unsigned)TWO(14), 0);
+#undef TWO
+}
 
 void rtc_save(void)
 {
@@ -332,26 +346,48 @@ void rtc_restore(void)
     char buf[16];
     FIL f;
     UINT n = 0;
-    uint32_t saved = 0, now = now_seconds();
+    uint32_t saved = 0, now = now_seconds(), to, built = build_seconds();
+    uint32_t day = adi_read(RTC_DAY) & 0xffff, last_day = built / 86400u + PLAUSIBLE_DAYS;
+    bool time_bad = (adi_read(RTC_HOUR) & 0x1f) > 23 || (adi_read(RTC_MIN) & 0x3f) > 59 ||
+                    (adi_read(RTC_SEC) & 0x3f) > 59;
     rtc_datetime_t t;
 
-    if (f_open(&f, CLOCK_FILE, FA_READ) != FR_OK)
-        return;
-    f_read(&f, buf, sizeof(buf) - 1, &n);
-    f_close(&f);
-    buf[n] = 0;
-    for (char *p = buf; *p >= '0' && *p <= '9'; p++)
-        saved = saved * 10 + (uint32_t)(*p - '0');
-    if (!saved || now + 60 >= saved)
+    if (f_open(&f, CLOCK_FILE, FA_READ) == FR_OK) {
+        f_read(&f, buf, sizeof(buf) - 1, &n);
+        f_close(&f);
+        buf[n] = 0;
+        for (char *p = buf; *p >= '0' && *p <= '9'; p++)
+            saved = saved * 10 + (uint32_t)(*p - '0');
+    }
+    if (saved / 86400u > last_day)      /* saved from a clock that had gone wrong */
+        saved = 0;
+    /* the clock is saved all the time it runs, and runs while the phone is off:
+     * far past the saved day is as wrong (a year past the build is always fine) */
+    if (saved) {
+        last_day = saved / 86400u + SAVED_DAYS;
+        if (last_day < built / 86400u + 366u)
+            last_day = built / 86400u + 366u;
+    }
+    /* With the battery out the counters can come back with anything: the day
+     * counter read 0xaaaa, 2099-08-14, on 2026-11-09 (the time of day changed too),
+     * ahead of the saved time so nothing below caught it. */
+    if (day > last_day || time_bad) {
+        to = saved ? saved : built;
+        klog("rtc: day %lu at boot cannot be right: set to the %s time", (unsigned long)day,
+             saved ? "saved" : "build's");
+    } else if (saved && now + 60 < saved) {
+        to = saved;
+        klog("rtc: day %lu at boot is behind the saved day %lu: the clock was cleared, "
+             "set back to the saved time", (unsigned long)(now / 86400u),
+             (unsigned long)(saved / 86400u));
+    } else {
         return;                         /* the clock kept going */
-    if (!rtc_date_from_days(saved / 86400u, &t))
+    }
+    if (!rtc_date_from_days(to / 86400u, &t))
         return;
-    t.hour = (uint8_t)(saved % 86400u / 3600u);
-    t.min = (uint8_t)(saved % 3600u / 60u);
-    t.sec = (uint8_t)(saved % 60u);
-    klog("rtc: day %lu at boot is behind the saved day %lu: the clock was cleared, "
-         "set back to the saved time", (unsigned long)(now / 86400u),
-         (unsigned long)(saved / 86400u));
+    t.hour = (uint8_t)(to % 86400u / 3600u);
+    t.min = (uint8_t)(to % 3600u / 60u);
+    t.sec = (uint8_t)(to % 60u);
     rtc_set(&t);
 }
 

@@ -78,39 +78,65 @@ uint32_t klog_pos(void)
     return tail_pos;
 }
 
+/* One at a time, the log thread's and fs_sync's: out is shared, and a second f_open of
+ * the log fails. fs_suspend holds this through the unmount, so no flush that had already
+ * passed the check can write the card once USB has it. Lines leave log_buf only once
+ * they are written: a failed open or write loses nothing, unless the buffer fills. */
+static mutex_t flush_lock;
+static uint32_t log_retry_at;
+
 static void log_flush(void)
 {
     static char out[LOG_BUF + 32];
-    size_t len;
+    size_t len, taken;
+    bool marker = false, ok = false;
     FIL f;
     FILINFO st;
-    UINT written;
+    UINT written = 0;
 
+    mutex_lock(&flush_lock, WAIT_FOREVER);
     mutex_lock(&log_lock, WAIT_FOREVER);
     if (!info.mounted) {                /* keep them until it is back */
         mutex_unlock(&log_lock);
+        mutex_unlock(&flush_lock);
         return;
     }
-    len = log_len;
+    taken = len = log_len;
     memcpy(out, log_buf, len);
     if (log_dropped) {
         memcpy(out + len, "-- lines dropped --\n", 20);
         len += 20;
         log_dropped = false;
+        marker = true;
     }
-    log_len = 0;
     mutex_unlock(&log_lock);
 
-    if (!len || !info.mounted)
+    if (!len) {
+        mutex_unlock(&flush_lock);
         return;
+    }
     if (f_stat(OS_LOG, &st) == FR_OK && st.fsize > LOG_ROTATE) {
         f_unlink(OS_LOG_OLD);
         f_rename(OS_LOG, OS_LOG_OLD);
     }
     if (f_open(&f, OS_LOG, FA_WRITE | FA_OPEN_APPEND) == FR_OK) {
-        f_write(&f, out, (UINT)len, &written);
-        f_close(&f);
+        ok = f_write(&f, out, (UINT)len, &written) == FR_OK && written == len;
+        ok = f_close(&f) == FR_OK && ok;
     }
+    mutex_lock(&log_lock, WAIT_FOREVER);
+    /* what did reach the card leaves; written can pass taken by the marker */
+    if (written > taken)
+        written = (UINT)taken;
+    if (ok)
+        written = (UINT)taken;
+    memmove(log_buf, log_buf + written, log_len - written);
+    log_len -= written;
+    if (!ok && marker)
+        log_dropped = true;
+    /* a full or failing card: each try is a hold and a PLL start, so not every second */
+    log_retry_at = ok ? 0 : kernel_ticks() + 60000u;
+    mutex_unlock(&log_lock);
+    mutex_unlock(&flush_lock);
 }
 
 static void set_free(DWORD clusters)
@@ -144,7 +170,8 @@ static void log_main(void *arg)
         count_free();
     for (;;) {
         sem_wait(&log_kick, 1000);
-        log_flush();
+        if (!log_retry_at || (int32_t)(kernel_ticks() - log_retry_at) >= 0)
+            log_flush();
     }
 }
 
@@ -161,10 +188,12 @@ void fs_suspend(void)
     if (!info.mounted)
         return;
     log_flush();
+    mutex_lock(&flush_lock, WAIT_FOREVER);
     mutex_lock(&log_lock, WAIT_FOREVER);
     info.mounted = false;               /* log_flush stops writing */
     mutex_unlock(&log_lock);
     f_mount(NULL, "", 0);
+    mutex_unlock(&flush_lock);
 }
 
 int fs_resume(void)
@@ -186,6 +215,7 @@ int fs_init(void)
     uint32_t t = kernel_ticks();
 
     mutex_init(&log_lock);
+    mutex_init(&flush_lock);
     sem_init(&log_kick, 0);
     info.sd_code = sd_init();
     if (info.sd_code == 0) {

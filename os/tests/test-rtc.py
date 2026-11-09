@@ -12,7 +12,10 @@ through Menu -> Settings -> Date & time. Then:
   - typing 31 02 2028 must save 2028-02-29 (the day cut to the month's
     length) and keep the running time of day;
   - a change and RSoft (cancel) must leave the RTC alone;
-  - the card log must have the set lines.
+  - the card log must have the set lines;
+  - a day counter that cannot be right at boot (0xaaaa, as a battery pull left
+    it on the phone) goes back to the saved time, or to the build's date when
+    the saved time came from such a clock.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -240,6 +243,71 @@ def main():
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
+
+    # The counters as a battery pull left them, with the machine still paused
+    def garbage(name, saved_seconds, want_day, planted_day=0xaaaa):
+        d = out / name
+        d.mkdir(exist_ok=True)
+        txt = d / 'clock.txt'
+        txt.write_text(f'{saved_seconds}\n')
+        img = d / 'card.img'
+        subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
+                        '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
+                        '--runtime', str(REPO / 'sdcard/.rockbox'),
+                        '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
+                        '--add', f'b310e-os/clock.txt={txt}',
+                        '--output', str(img)], check=True, capture_output=True)
+        qp, tp = free_port(), free_port()
+        p = subprocess.Popen([str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox', '-S',
+                              '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), '-serial', 'none',
+                              '-monitor', 'none',
+                              '-drive', f'file={image.as_posix()},format=raw,if=none,id=os,readonly=on',
+                              '-drive', f'file={img.as_posix()},format=raw,if=none,id=sdcard',
+                              '-qmp', f'tcp:127.0.0.1:{qp},server=on,wait=off',
+                              '-qtest', f'tcp:127.0.0.1:{tp},server=on,wait=off'], env=env,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        q = t = None
+        try:
+            for _ in range(100):
+                try:
+                    q, t = capture.QMP(qp), QT(tp)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            assert q and t, 'QEMU did not start'
+            for i, v in enumerate((12, 40, 17, planted_day)):
+                t.write(RTC + 0x10 + 4 * i, v)
+            t.write(RTC + 0x38, 0xf00)
+            planted = [t.read(RTC + 4 * i) & 0xffff for i in range(4)]
+            assert planted[3] == planted_day, planted
+            q.command('cont')
+            wait_for(t, base, lambda s: s['ui_depth'] == 1, 30, 'no UI')
+            end = time.monotonic() + 6
+            while (t.read(RTC + 12) & 0xffff) != want_day and time.monotonic() < end:
+                time.sleep(0.1)
+            got = t.read(RTC + 12) & 0xffff
+            result[name] = {'planted_day': planted[3], 'day_after_boot': got, 'wanted': want_day}
+            assert got == want_day, result[name]
+            time.sleep(2.5)                    # the log reaches the card
+            q.command('quit')
+            p.wait(timeout=20)
+        finally:
+            if t:
+                t.close()
+            if q:
+                q.close()
+            if p.poll() is None:
+                p.terminate()
+                p.wait(timeout=10)
+        text = img.read_bytes()
+        assert b'cannot be right' in text, f'{name}: not in the log'
+
+    garbage('garbage_saved_good', saved_day * 86400 + 12 * 3600, saved_day)
+    # 2039: within 30 years of the build, but years past the saved time
+    garbage('garbage_near', saved_day * 86400 + 12 * 3600, saved_day, 0x5555)
+    built = (args.build / 'build_info.h').read_text().split('"')[1]
+    build_day = days(int(built[:4]), int(built[5:7]), int(built[8:10]))
+    garbage('garbage_saved_bad', 0xaaaa * 86400 + 3600, build_day)
 
     text = card.read_bytes()
     lines = [l.decode(errors='replace') for l in text.split(b'\n') if b'rtc: set' in l]

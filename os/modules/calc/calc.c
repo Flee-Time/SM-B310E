@@ -58,8 +58,18 @@ static bool format(double v, char *out, int n)
     frac[fl] = 0;
     if (ip == 0 && fl == 0)
         neg = false;                    /* no "-0" */
-    snprintf(out, (size_t)n, "%s%lu%s%s", neg ? "-" : "", (unsigned long)ip,
-             fl ? "." : "", frac);
+    /* our printf has no 64-bit numbers, and %lu cut 100000 x 100000 to 1410065408 */
+    {
+        char whole[24];
+        int w = (int)sizeof(whole) - 1;
+
+        whole[w] = 0;
+        do {
+            whole[--w] = (char)('0' + ip % 10);
+            ip /= 10;
+        } while (ip);
+        snprintf(out, (size_t)n, "%s%s%s%s", neg ? "-" : "", whole + w, fl ? "." : "", frac);
+    }
     return true;
 }
 

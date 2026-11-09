@@ -77,6 +77,8 @@ def csum(data):
 
 
 class Rndis:
+    mute = False                # the data pipes dead: asks go unanswered
+    arp_asks = 0
     """The PC's RNDIS host and a tiny IPv4 stack on it."""
 
     def __init__(self, host):
@@ -222,6 +224,8 @@ class Rndis:
             sip, tip = f[28:32], f[38:42]
             if op == 2:
                 self.phone_mac = f[22:28]
+            elif op == 1 and tip == self.ip and self.mute:
+                self.arp_asks += 1
             elif op == 1 and tip == self.ip:
                 self.send_eth(src, 0x0806, struct.pack('!HHBBH', 1, 0x800, 6, 4, 2) + self.mac + self.ip
                               + f[22:28] + sip)
@@ -694,6 +698,51 @@ def main():
             if args.background:
                 result['background'] = {'screen': title(), 'shell': banner.strip()[:40]}
                 shot('background')
+                # The link watchdog: keepalives go on, the PC's frames stop. The phone
+                # asks, then connects again by itself.
+                sessions = qt.read(usb_base + 4 * 10)
+                frames = netstat()['rx_frames']
+                net.mute = True
+                t0 = time.monotonic()
+                while qt.read(usb_base + 4 * 10) == sessions:
+                    assert time.monotonic() - t0 < 70, ('no reconnect', net.arp_asks, netstat())
+                    try:
+                        net.command(8)
+                        net.pump(2.0)
+                    except (AssertionError, OSError, TimeoutError):
+                        time.sleep(0.2)
+                result['reconnect_after_s'] = round(time.monotonic() - t0, 1)
+                result['arp_asks'] = net.arp_asks
+                assert net.arp_asks >= 3, result
+                assert result['reconnect_after_s'] > 30, result
+                host.wait_attached(20)
+                net = Rndis(host)
+                net.enumerate()
+                net.command(2, struct.pack('<III', 1, 0, 0x4000))
+                net.mac = net.query(0x01010101)[1]
+                net.set(0x0001010e, struct.pack('<I', 0x0b))
+                assert net.dhcp()['ack'] == HOST_IP
+                net.arp(PHONE_IP)
+                sh = Tcp(net, RAW_PORT)
+                sh.connect()
+                sh.read_until(PROMPT)
+                assert 'usage' in sh.cmd('usbstall'), 'shell after the reconnect'
+                assert 'usage' in sh.cmd('bench'), 'bench with no time'
+                # bench: USB off with the cable in, the screen dark, then back by itself
+                sessions = qt.read(usb_base + 4 * 10)
+                sh.send(b'bench 4 dark\n')
+                sh.read_until(b'USB off')
+                t0 = time.monotonic()
+                dark = False
+                while qt.read(usb_base + 4 * 10) == sessions:
+                    assert time.monotonic() - t0 < 15, 'USB never came back after bench'
+                    dark = dark or status(qt, base)['ui_light'] == 2
+                    time.sleep(0.1)
+                result['bench_back_after_s'] = round(time.monotonic() - t0, 1)
+                result['bench_dark'] = dark
+                assert dark and result['bench_back_after_s'] >= 3, result
+                host.wait_attached(20)
+                time.sleep(2.5)                 # the log reaches the card
                 raise Done
             help_text = sh.cmd('help')
             for name in ('ps', 'mem', 'log', 'peek', 'poke', 'ls', 'put', 'get', 'run', 'reboot'):
@@ -1006,6 +1055,10 @@ def main():
     if args.background:
         log_text = (BOOT['card_file'](card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
         result['card_log'] = [l for l in log_text.splitlines() if 'usb:' in l and 'cmd' not in l]
+        assert any('connecting again' in l for l in result['card_log']), result['card_log']
+        bench = [l for l in log_text.splitlines() if 'bench: 4 s' in l or 'bench: 3 s' in l or 'bench: 5 s' in l]
+        result['bench_log'] = bench
+        assert bench, 'no bench line in the log'
         (out / 'result.json').write_text(json.dumps(result, indent=2, default=str))
         print('PASS ' + json.dumps(result, default=str))
         return

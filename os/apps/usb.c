@@ -34,6 +34,7 @@
 #include "os/notify.h"
 #include "os/ui.h"
 #include "os/usb.h"
+#include "apps/wavio.h"
 
 #define RATE_WINDOW_MS  1000
 #define ACTIVE_MS       1000            /* "Reading"/"Writing" this long after */
@@ -48,8 +49,22 @@ int usb_app_resume_result;              /* fs_resume() after the last session */
 
 static void auto_stop(bool unplugged);
 
+/* The hold a session took. A session still running keeps it, or the PLL goes off under
+ * it, which kills its data pipes: usb_auto_tick gives it back when it has ended. */
+static int release_due;
+static volatile uint32_t bench_req;     /* seconds; from the shell's thread */
+
+static void usb_release_hold(void)
+{
+    if (usb_running())
+        release_due++;
+    else
+        cpufreq_release();
+}
+
 static void storage_begin(void)
 {
+    wav_stop();                         /* its file must be closed: the card goes */
     memset(&st, 0, sizeof(st));
     media_queue_clear();                /* the music reads the card */
     media_stop();
@@ -73,8 +88,8 @@ static void storage_end(void)
     if (st.started)
         usb_stop();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
-    cpufreq_release();
     usb_app_resume_result = fs_resume();
+    usb_release_hold();
     if (!st.started)
         klog("usb: not started (%s)", sd_present() ? "no memory" : "no card");
     else
@@ -224,7 +239,7 @@ static void net_end(void)
 {
     if (nt.started)
         usb_stop();
-    cpufreq_release();
+    usb_release_hold();
     nt.depth = 0;
     if (!nt.started)
         klog("usb: network not started (no memory)");
@@ -265,11 +280,21 @@ void usb_net_close_apps(void)
 
 static void net_tick(screen_t *s)
 {
-    if (usb_cable()) {
-        nt.cable_seen = true;
-    } else if (nt.cable_seen) {
-        nt.unplugged = true;
-        ui_pop();                       /* net_leave() stops USB */
+    if (!usb_cable()) {
+        if (nt.cable_seen) {
+            nt.unplugged = true;
+            ui_pop();                   /* net_leave() stops USB */
+        }
+        return;
+    }
+    nt.cable_seen = true;
+    if (nt.started && net_stat.link_lost) {     /* as in the background: as a replug */
+        int depth = nt.depth;
+
+        usb_log_state("data pipes quiet, keepalives still coming, connecting again");
+        net_end();
+        net_begin();
+        nt.depth = depth;
     }
 }
 
@@ -406,6 +431,7 @@ static void note_post(void)
 
 static void auto_stop(bool unplugged)
 {
+    bench_req = 0;                      /* it was for this session */
     if (auto_fn < 0)
         return;
     notify_remove(&note);
@@ -421,16 +447,111 @@ static void auto_stop(bool unplugged)
     auto_fn = -1;
 }
 
+/* ---- bench: USB off for a while, the cable still in ---------------------- */
+
+/* USB holds the clock up, so with the network on the phone never reaches dark
+ * idle. The shell's "bench" asks for this (it cannot stop USB itself, the shell
+ * is on it): USB off, optionally the screen dark at once, USB back after that
+ * long, and a log line with what the time went on. For a current meter on the
+ * cable, and for trying the dark screen with nobody at the phone. */
+static volatile bool bench_req_dark, bench_req_nosleep;
+static bool bench_on;
+static uint32_t bench_at, bench_end_at, bench_ms[CLOCK_LEVELS], bench_sleeps, bench_starts, bench_irqs;
+
+void usb_bench_request(uint32_t seconds, bool dark, bool nosleep)
+{
+    bench_req_dark = dark;
+    bench_req_nosleep = nosleep;
+    bench_req = seconds;
+}
+
+static void bench_start(void)
+{
+    uint32_t seconds = bench_req;
+
+    bench_req = 0;
+    klog("bench: USB off for %lu s%s%s", (unsigned long)seconds, bench_req_dark ? ", dark" : "",
+         bench_req_nosleep ? ", chip sleep off" : "");
+    auto_stop(false);
+    if (bench_req_nosleep)
+        sleep_idle_enable(false);
+    if (bench_req_dark)
+        ui_force_dark();
+    bench_at = kernel_ticks();
+    bench_end_at = bench_at + seconds * 1000u;
+    for (int i = 0; i < CLOCK_LEVELS; i++)
+        bench_ms[i] = clock_level_ms(i);
+    bench_sleeps = sleep_idle_count;
+    bench_starts = clock_pll_starts();
+    bench_irqs = irq_count;
+    bench_on = true;
+}
+
+static void bench_end(void)
+{
+    uint32_t ms = kernel_ticks() - bench_at, s = ms / 1000u + !ms;
+    uint32_t irqs = irq_count - bench_irqs;
+
+    bench_on = false;
+    sleep_idle_enable(ui_settings.chip_sleep);
+    klog("bench: %lu s: 26/104/208 MHz %lu/%lu/%lu ms, %lu sleeps, %lu PLL starts, %lu irqs/s, holds %d, "
+         "screen %s", (unsigned long)(ms / 1000u),
+         (unsigned long)(clock_level_ms(0) - bench_ms[0]), (unsigned long)(clock_level_ms(1) - bench_ms[1]),
+         (unsigned long)(clock_level_ms(2) - bench_ms[2]), (unsigned long)(sleep_idle_count - bench_sleeps),
+         (unsigned long)(clock_pll_starts() - bench_starts), (unsigned long)(irqs / s), cpufreq_holds(),
+         ui_is_dark() ? "dark" : "lit");
+    usb_auto_resume();
+}
+
+bool usb_auto_network(void)
+{
+    return auto_fn == USB_FN_NETWORK;
+}
+
+/* For what must not run with USB on (Sleep test); the UI thread. */
+bool usb_auto_pause(void)
+{
+    if (auto_fn < 0)
+        return false;
+    auto_stop(false);
+    return true;
+}
+
+void usb_auto_resume(void)
+{
+    auto_retry = true;
+    auto_tries = 0;
+}
+
 /* the UI, every second */
 void usb_auto_tick(void)
 {
     bool cable = usb_cable();
-    bool plugged = cable && !cable_was;
+    bool plugged = cable && !cable_was, retry;
 
+    while (release_due && !usb_running()) {
+        release_due--;
+        cpufreq_release();
+    }
     cable_was = cable;
+    if (bench_on) {
+        if (!cable || (int32_t)(kernel_ticks() - bench_end_at) >= 0)
+            bench_end();
+        else
+            return;
+    }
+    if (bench_req && auto_fn == USB_FN_NETWORK) {
+        bench_start();
+        return;
+    }
     if (auto_fn >= 0) {
         if (!cable) {
             auto_stop(true);
+        } else if (auto_fn == USB_FN_NETWORK && net_stat.link_lost) {
+            /* the PC is there but its frames stopped: as a replug */
+            usb_log_state("data pipes quiet, keepalives still coming, connecting again");
+            auto_stop(false);
+            usb_auto_resume();
         } else if (usb_stat.state < USB_ENUMERATING && kernel_ticks() - auto_since > NO_HOST_MS) {
             auto_retry = auto_tries < NO_HOST_TRIES;
             if (!auto_retry)
@@ -443,11 +564,17 @@ void usb_auto_tick(void)
         auto_retry = false;
         return;
     }
+    retry = auto_retry;
     auto_retry = false;
     if (plugged)
         auto_tries = 0;
-    if (!ui_settings.usb_default || usb_running())
+    if (!ui_settings.usb_default)
         return;
+    if (usb_running()) {                /* the last one has not stopped yet; not
+                                         * if it is the USB screen's, which is on */
+        auto_retry = retry && usb_stopping();
+        return;
+    }
     auto_tries++;
     auto_since = kernel_ticks();
     if (ui_settings.usb_default == 1) {
@@ -467,8 +594,7 @@ void usb_auto_tick(void)
     }
     klog("usb: background %s on the plug (try %d)",
          auto_fn == USB_FN_STORAGE ? "storage" : "network", auto_tries);
-    if (auto_tries == 1)
-        note_post();
+    note_post();                        /* auto_stop took it, retry or not */
 }
 
 /* "USB" or "NET" in the status bar while one runs, else NULL */

@@ -29,6 +29,7 @@
 #define EIC_END     3
 #define EIC_HOOK    4                   /* headset button, stock EIC 20 */
 #define END_FAILSAFE_MS 8000
+#define UI_STUCK_MS     3000
 
 typedef volatile struct {
     uint32_t ctrl, int_en, int_raw, int_mask;
@@ -54,7 +55,7 @@ static queue_t events;
 
 static void post(uint8_t code, bool down)
 {
-    key_event_t ev = { code, down, kernel_ticks() };
+    key_event_t ev = { code, down, kernel_ticks(), 0 };
 
     if (events.buf)
         queue_send_isr(&events, &ev);
@@ -66,6 +67,8 @@ static void post(uint8_t code, bool down)
  * reading the card all the time, got dozens a press, and the flood
  * filled the event queue until a release was lost. */
 static uint32_t matrix_down[4];
+volatile uint32_t ui_alive_at;
+volatile bool ui_end_held;
 
 static void keypad_isr(void)
 {
@@ -218,8 +221,13 @@ static void end_key_main(void *arg)
          * is stuck (an FM seek once blocked it for minutes): power off from
          * here, without touching the card. */
         if (now && t - end_since >= END_FAILSAFE_MS) {
-            klog("END held %u s: the UI did not respond, power off", END_FAILSAFE_MS / 1000);
-            arch_power_off();
+            if (t - ui_alive_at > UI_STUCK_MS) {
+                klog("END held %u s: the UI did not respond, power off", END_FAILSAFE_MS / 1000);
+                arch_power_off();
+            }
+            /* It runs, but this press never got to its own power off (it woke the
+             * screen, or closed an app): cleanly, so a recording's file is kept. */
+            ui_end_held = true;
         }
         for (unsigned i = 0; i < ARRAY_SIZE(hs); i++)
             if ((held ^ hs_was) & hs[i].bit)

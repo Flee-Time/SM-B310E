@@ -109,6 +109,8 @@ void *memset(void *dst, int c, size_t n);
 #define ui_choose              (os->ui_choose)
 #define gfx_blit               (os->gfx_blit)
 #define ui_wake                (os->ui_wake)
+#define ui_is_dark             (os->ui_is_dark)
+#define ui_depth               (os->ui_depth)
 #define ui_settings_save       (os->ui_settings_save)
 #define rtc_get                (os->rtc_get)
 #define rtc_set                (os->rtc_set)

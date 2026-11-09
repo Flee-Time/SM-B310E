@@ -35,6 +35,9 @@ static struct {
     int argc;
     thread_t *thread;
     volatile bool running, on_stack, quit_asked, held, paused;
+    volatile bool dark;                 /* stopped: the screen is dark */
+    uint32_t dark_ms;                   /* time the game did not see */
+    int depth;                          /* ui_depth with its screen on top */
     struct { uint8_t code, down; } keys[64];
     volatile unsigned key_in, key_out;
     kit_view_t view;
@@ -338,11 +341,22 @@ static inline uint16_t mean4(uint32_t a)
     return (uint16_t)(a | a >> 16);
 }
 
-/* "Leave?" is up: the game waits here */
+static void dark_pause(void);
+static void sound_back(void);
+
+/* "Leave?" is up, or the screen is dark: the game waits here */
 static void wait_if_paused(void)
 {
-    while (k.paused && !k.quit_asked)
+    for (;;) {
+        if (ui_is_dark())
+            dark_pause();
+        if (!k.paused || k.quit_asked)
+            break;
         thread_sleep(20);
+    }
+    /* Something else took the sound (an alarm's tone) and has gone: it comes back
+     * when the game's screen is the top one again */
+    sound_back();
 }
 
 void kit_present8(const uint8_t *src, int w, int h, int pitch)
@@ -571,6 +585,7 @@ static struct {
     sem_t more;
     thread_t *thread;
     volatile bool on, stop;
+    unsigned rate;
 } snd;
 
 static unsigned sound_fill(int16_t *lr, unsigned frames, void *ctx)
@@ -605,7 +620,7 @@ static void sound_main(void *arg)
             }
             snd.in += RENDER_CHUNK;
         }
-        sem_wait(&snd.more, 20);
+        sem_wait(&snd.more, k.dark ? 500 : 20);
     }
     snd.thread = NULL;
 }
@@ -622,6 +637,7 @@ int kit_audio_start(unsigned rate, void (*render)(int16_t *lr, unsigned frames))
     if (!audio_rate_ok(rate))
         return -1;
     snd.render = render;
+    snd.rate = rate;
     snd.in = snd.out = 0;
     snd.stop = false;
     sem_init(&snd.more, 0);
@@ -652,8 +668,44 @@ void kit_audio_stop(void)
         thread_sleep(5);
 }
 
+static void sound_back(void)
+{
+    if (snd.on && !audio_playing() && k.on_stack && ui_depth() == k.depth)
+        audio_play(snd.rate, sound_fill, NULL);
+}
+
+/* The screen went dark with the game running (no key for awake_limit_s, or it
+ * is under another screen): nothing to see, so nothing to run. Its sound and its
+ * hold on the clock go, so the phone can reach dark idle, and its clock stops:
+ * any key wakes the screen and the game goes on from where it was. */
+static void dark_pause(void)
+{
+    uint32_t t = ticks();
+    bool held = k.held;
+
+    klog("%s: paused, the screen is dark", kit_game.log_name);
+    k.dark = true;
+    if (snd.on)
+        audio_play_stop();
+    if (held) {
+        k.held = false;
+        cpufreq_release();
+    }
+    while (ui_is_dark() && !k.quit_asked)
+        thread_sleep(200);
+    if (held) {
+        cpufreq_hold();
+        k.held = true;
+    }
+    k.dark = false;
+    if (snd.on && !audio_playing() && audio_play(snd.rate, sound_fill, NULL))
+        klog("%s: no sound after the pause", kit_game.log_name);
+    k.dark_ms += ticks() - t;
+    klog("%s: going on after %lu s", kit_game.log_name, (unsigned long)((ticks() - t) / 1000));
+}
+
 /* ---- the rest of kit.h ------------------------------------------------------------ */
-uint32_t kit_ms(void) { return ticks(); }
+uint32_t kit_ms(void) { return ticks() - k.dark_ms; }
 void kit_sleep(uint32_t ms) { thread_sleep(ms); }
 bool kit_quit_asked(void) { return k.quit_asked; }
 void kit_log(const char *s) { klog("%s: %s", kit_game.log_name, s); }
@@ -773,10 +825,17 @@ static void finished(void *arg)
 {
     k.running = false;
     ui_screen_mode(&game, 0);
+    if (k.held) {                       /* an error stays up with nothing running */
+        k.held = false;
+        cpufreq_release();
+    }
     if (k.on_stack && !kit.error[0]) {
         if (kit_game.rom_exts)
             kit_menu_after_game();      /* the list again, in a fresh app */
-        ui_pop();                       /* quit: back to where it was opened */
+        /* quit: back to where it was opened. What is over it (the panel) goes too,
+         * or the panel would go and the game's screen stay */
+        for (int i = 0; i < 12 && k.on_stack; i++)
+            ui_pop();
     } else {
         ui_redraw();                    /* the error, with Back */
     }
@@ -939,7 +998,11 @@ static void game_key(screen_t *s, const key_event_t *ev)
         ui_pop();
 }
 
-static void game_enter(screen_t *s) { k.on_stack = true; }
+static void game_enter(screen_t *s)
+{
+    k.on_stack = true;
+    k.depth = ui_depth();
+}
 
 static void game_leave(screen_t *s)
 {

@@ -442,11 +442,62 @@ static void dhcp_input(const uint8_t *d, int len)
 #define NTP_TRIES       6               /* then every NTP_EVERY_MS anyway */
 #define NTP_1970        2208988800u     /* NTP seconds at the Unix epoch */
 
-static uint32_t pc_ip;                  /* the PC: the source of its frames */
+static uint32_t pc_ip;                  /* the PC: the source of its latest frame
+                                         * (it can move from link-local to a lease) */
 static uint32_t ntp_next, ntp_asked;
 static int ntp_tries;
 static volatile uint32_t ntp_got;       /* Unix seconds to set, 0 none */
 static uint32_t ntp_from;
+
+/* The data pipes can die with the control pipe alive: the host's keepalives
+ * keep coming, Windows shows the link up, and nothing else on the phone notices
+ * (phone, 2026-11-09). So with keepalives arriving and no frame from the PC for
+ * LINK_QUIET_MS, ask the PC for its address, which it answers whatever else it
+ * is doing; no answer to LINK_ASKS sets link_lost and apps/usb.c connects again.
+ * A host with no keepalives, or asleep, is not judged. */
+#define LINK_QUIET_MS       30000u
+#define LINK_ASK_MS         5000u
+#define LINK_ASKS           3u
+#define LINK_KEEPALIVE_MS   10000u
+
+static uint32_t link_rx, link_rx_at, link_msgs, link_msgs_at, link_ask_at;
+
+static void link_init(uint32_t now)
+{
+    link_rx = link_msgs = 0;
+    link_rx_at = link_msgs_at = now;
+}
+
+/* the net thread; returns ms to the next look */
+static uint32_t link_poll(uint32_t now)
+{
+    if (net_stat.rx_frames != link_rx) {
+        link_rx = net_stat.rx_frames;
+        link_rx_at = now;
+        net_stat.link_asks = 0;
+    }
+    if (net_stat.rndis_msgs != link_msgs) {
+        link_msgs = net_stat.rndis_msgs;
+        link_msgs_at = now;
+    }
+    if (!pc_ip || !net_stat.link || now - link_msgs_at > LINK_KEEPALIVE_MS) {
+        link_rx_at = now;
+        net_stat.link_asks = 0;
+        return 1000;
+    }
+    if (now - link_rx_at < LINK_QUIET_MS)
+        return 1000;
+    if (net_stat.link_asks && now - link_ask_at < LINK_ASK_MS)
+        return LINK_ASK_MS - (now - link_ask_at);
+    if (net_stat.link_asks >= LINK_ASKS) {
+        net_stat.link_lost = 1;
+        return 1000;
+    }
+    net_stat.link_asks++;
+    link_ask_at = now;
+    arp_send(1, NULL, pc_ip);
+    return LINK_ASK_MS;
+}
 
 static void ntp_ask(uint32_t now)
 {
@@ -547,7 +598,7 @@ static void ip_input(const uint8_t *eth, uint8_t *h, int len)
     }
     src = get32(h + 12);
     dst = get32(h + 16);
-    if (!pc_ip && !is_self(src) &&
+    if (src != pc_ip && !is_self(src) &&
         ((src & NET_MASK) == (NET_IP & NET_MASK) || (src & NET_LL_MASK) == (NET_LL_IP & NET_LL_MASK))) {
         pc_ip = src;                    /* a time question soon */
         ntp_next = kernel_ticks() + 500;
@@ -584,6 +635,17 @@ static void eth_input(uint8_t *f, int len)
 
 /* ---- the net thread ----------------------------------------------------- */
 
+/* The PC rebooted with the cable in: no bus-level stop, and its connections just
+ * stay open, until three of them leave no room for a new shell. */
+static volatile bool host_restarted;
+
+void net_host_restarted(void)
+{
+    host_restarted = true;
+    if (started)
+        sem_post(&wake);
+}
+
 static void net_main(void *arg)
 {
     uint32_t wait = WAIT_FOREVER;
@@ -595,6 +657,10 @@ static void net_main(void *arg)
         if (net_stopping)
             break;
         mutex_lock(&net_lock, WAIT_FOREVER);
+        if (host_restarted) {
+            host_restarted = false;
+            tcp_drop_all();
+        }
         while (queue_recv(&rx_full, &it, 0) == WAIT_OK) {
             eth_input(it.buf + it.off, it.len);
             net_rx_free(it.buf);
@@ -603,6 +669,9 @@ static void net_main(void *arg)
         {
             uint32_t w = ntp_poll(kernel_ticks());
 
+            if (w < wait)
+                wait = w;
+            w = link_poll(kernel_ticks());
             if (w < wait)
                 wait = w;
         }
@@ -638,15 +707,23 @@ static void free_all(void)
     rx_free.buf = rx_full.buf = NULL;
 }
 
+static bool net_stuck;
+
 int net_start(int (*send)(uint8_t *buf, int len))
 {
     if (started)
         return 0;
+    if (net_stuck) {                    /* its thread may still be using all of it */
+        klog("net: not started, a thread never stopped: restart the phone");
+        return -1;
+    }
     memset((void *)&net_stat, 0, sizeof(net_stat));
     memset(arp, 0, sizeof(arp));
     net_self = NET_IP;
     pc_ip = ntp_got = 0;
+    host_restarted = false;
     ntp_tries = 0;
+    link_init(kernel_ticks());
     net_stopping = false;
     link_send = send;
     mutex_init(&net_lock);
@@ -705,6 +782,7 @@ void net_stop(void)
     net_stat.link = 0;
     if (stuck) {
         klog("net: a thread did not stop; the stack's memory is kept");
+        net_stuck = true;
         return;
     }
     tcp_free_all();

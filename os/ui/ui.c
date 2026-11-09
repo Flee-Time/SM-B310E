@@ -36,11 +36,15 @@ ui_settings_t ui_settings = {
     1, 0,
     0, 1,                            /* UTC until set; the clock from the network */
     0,                               /* developer mode off */
+    1,                               /* system sleep in dark idle */
+    300,                             /* UI_MODE_AWAKE: 5 minutes with no key */
+    900,                             /* Music: 15 minutes playing nothing */
 };
 
-static screen_t *stack[MAX_DEPTH];
+static screen_t *stack[MAX_DEPTH + 1]; /* one more for an alarm, whatever is open */
 static int depth;
 static bool dirty;
+static uint32_t last_key;                /* for UI_MODE_AWAKE's limit */
 static uint32_t last_input, end_down, next_repeat, next_second, next_tick, next_music;
 static bool end_in_game;                /* END went down on a raw-key screen */
 static bool collect;                    /* an app's screen left the stack */
@@ -84,6 +88,9 @@ static const struct {
     { "screen_timeout", &ui_settings.screen_timeout_s, 0, 3600 },
     { "cpu_max", &ui_settings.cpu_max, 0, 1 },
     { "deep_idle", &ui_settings.deep_idle, 0, 1 },
+    { "chip_sleep", &ui_settings.chip_sleep, 0, 1 },
+    { "awake_limit_s", &ui_settings.awake_limit_s, 1, 86400 },
+    { "player_idle_s", &ui_settings.player_idle_s, 0, 86400 },
     { "alarm_on", &ui_settings.alarm_on, 0, 1 },
     { "alarm_min", &ui_settings.alarm_min, 0, 24 * 60 - 1 },
     { "vol_music", &ui_settings.vol[VOL_MUSIC], 0, VOL_LEVELS },
@@ -111,6 +118,7 @@ static void settings_load(void)
     buf[n] = 0;
     for (p = buf; *p; ) {
         char *line = p, *eq;
+        bool neg;
         int v = 0;
 
         while (*p && *p != '\n')
@@ -121,8 +129,13 @@ static void settings_load(void)
         if (!eq)
             continue;
         *eq++ = 0;
+        neg = *eq == '-';
+        if (neg)
+            eq++;
         while (*eq >= '0' && *eq <= '9')
             v = v * 10 + (*eq++ - '0');
+        if (neg)                        /* a time zone west of Greenwich */
+            v = -v;
         for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++)
             if (!strcmp(line, setting_table[i].name) && v >= setting_table[i].min &&
                 v <= setting_table[i].max)
@@ -164,9 +177,18 @@ static void publish(void)
 static unsigned top_mode(void);
 static void raw_release_all(screen_t *s, uint32_t now);
 
+static bool urgent_push;
+
+void ui_push_urgent(screen_t *s)
+{
+    urgent_push = true;
+    ui_push(s);
+    urgent_push = false;
+}
+
 void ui_push(screen_t *s)
 {
-    if (!s || depth == MAX_DEPTH)
+    if (!s || depth >= MAX_DEPTH + (urgent_push ? 1 : 0))
         return;
     if (depth && top_mode() & UI_MODE_RAW_KEYS)
         raw_release_all(stack[depth - 1], kernel_ticks());  /* a game lets go of its keys */
@@ -356,7 +378,9 @@ static void draw_status(void)
         int ix = UI_PAD + 2 + gfx_text_width("00:00", FONT_SMALL, 1) + 5;
         notify_t *n;
 
-        for (int i = 0; (n = notify_get(i)) && ix + ICON_SIZE < x - 2; i++) {
+        /* the icons have their own margin: "chg" left the USB icon out by a
+         * pixel when this asked for 2 more */
+        for (int i = 0; (n = notify_get(i)) && ix + ICON_SIZE <= x; i++) {
             gfx_icon(ix, 0, n->icon ? n->icon : &icon_alarm, C_DIM);
             ix += ICON_SIZE + 1;
         }
@@ -472,7 +496,10 @@ static void closing_tick(uint32_t now)
     if (!app_is_loaded(closing))
         closing = NULL;
     else if (now - closing_at >= KILL_AFTER_MS) {
-        app_kill(closing);
+        /* only what did not end: Music, playing on from its notification, is not
+         * hung, and dropping that left it playing with no way to stop it */
+        if (thread_count_owned(closing))
+            app_kill(closing);
         closing = NULL;
         collect = true;
     }
@@ -482,6 +509,7 @@ void ui_power_off(void)
 {
     splash("Powering off");
     klog("power off");
+    wav_stop();                         /* a recording's file: finished */
     volume_save();
     rtc_save();
     fs_sync();
@@ -599,6 +627,7 @@ void ui_reboot(void)
 {
     splash("Restarting");
     klog("reboot: hard reset");
+    wav_stop();
     volume_save();
     rtc_save();
     fs_sync();
@@ -725,8 +754,20 @@ static bool background_audio(void)
 
 void ui_wake(void)
 {
-    last_input = kernel_ticks();
+    last_input = last_key = kernel_ticks();
     wake();
+}
+
+bool ui_is_dark(void)
+{
+    return light == 2;
+}
+
+void ui_force_dark(void)
+{
+    last_input = last_key = kernel_ticks() - 0x40000000u;
+    if (light != 2)
+        set_light(2);
 }
 
 /* The keys a raw-key screen (a game) has been given down: released for it
@@ -754,7 +795,7 @@ static void raw_release_all(screen_t *s, uint32_t now)
 {
     for (unsigned code = 0; s == raw_screen && code < 128; code++)
         if (raw_held[code >> 5] & 1u << (code & 31)) {
-            key_event_t up = { (uint8_t)code, 0, now };
+            key_event_t up = { (uint8_t)code, 0, now, 0 };
 
             raw_deliver(s, &up);
         }
@@ -788,6 +829,9 @@ static bool chord(const key_event_t *ev, uint32_t now)
     chord_eat = 3;
     if (light)
         wake();
+    if (alarm_ringing)                  /* over it, its tick stops: the buzz stays on
+                                         * and it never times out */
+        return true;
     held_key = swallow_key = 0;
     center_down = zero_down = 0;
     if (top_mode() & UI_MODE_RAW_KEYS)
@@ -809,7 +853,7 @@ static void on_key(const key_event_t *ev, uint32_t now)
 {
     os_status.keys++;
     os_status.last_key = ev->code | (uint32_t)ev->down << 8;
-    last_input = now;
+    last_input = last_key = now;
 
     if (app_reloading()) {              /* the keys are not for the screen under it */
         if (ev->code == KEY_END && !ev->down) {
@@ -840,10 +884,16 @@ static void on_key(const key_event_t *ev, uint32_t now)
     if (ev->down && light) {            /* the first key only wakes */
         wake();
         swallow_key = ev->code;
+        if (ev->code == KEY_END)        /* held on: still the power off */
+            end_down = now ? now : 1;
         return;
     }
     if (!ev->down && ev->code == swallow_key) {
         swallow_key = 0;
+        if (ev->code == KEY_END)
+            end_down = 0;
+        if (ev->code == held_key)
+            held_key = 0;
         return;
     }
     if (ev->down && ui_settings.vol[VOL_TACTILE]) {
@@ -858,7 +908,7 @@ static void on_key(const key_event_t *ev, uint32_t now)
         if (ev->down) {
             center_down = now ? now : 1;
         } else if (center_down) {       /* let go before the hold: a press */
-            key_event_t press = { KEY_CENTER, 1, now };
+            key_event_t press = { KEY_CENTER, 1, now, 0 };
 
             center_down = 0;
             dispatch(&press);
@@ -896,8 +946,9 @@ static void drain_log(uint32_t now)
 {
     rtc_datetime_t t;
     uint32_t load = 1000 - kernel_idle_permille();
-    static uint32_t last_ms[CLOCK_LEVELS], last_irqs, last_now;
-    uint32_t pct[CLOCK_LEVELS], span = 0, irqs = irq_count;
+    static uint32_t last_ms[CLOCK_LEVELS], last_irqs, last_sleeps, last_starts, last_now, last_adi_errors;
+    uint32_t pct[CLOCK_LEVELS], span = 0, irqs = irq_count, sleeps = sleep_idle_count;
+    uint32_t starts = clock_pll_starts();
 
     for (int i = 0; i < CLOCK_LEVELS; i++) {
         uint32_t ms = clock_level_ms(i);
@@ -910,15 +961,23 @@ static void drain_log(uint32_t now)
         pct[i] = span ? (uint32_t)((uint64_t)pct[i] * 100 / span) : 0;
     rtc_get(&t);
     klog("battery: %d mV %d%%%s, load %lu.%lu%%, %d MHz, 26/104/208 MHz %lu/%lu/%lu%%, "
-         "holds %d, %lu irqs/s, screen %s, rtc %02d:%02d:%02d, up %lu s",
+         "holds %d, %lu irqs/s, %lu sleeps/s, %lu PLL starts/s, screen %s, rtc %02d:%02d:%02d, up %lu s",
          bat_mv, battery_percent(bat_mv),
          charging == CHARGE_CHARGING ? ", charging" : charging == CHARGE_DONE ? ", charged" : "",
          (unsigned long)(load / 10), (unsigned long)(load % 10), clock_mhz(),
          (unsigned long)pct[0], (unsigned long)pct[1], (unsigned long)pct[2], cpufreq_holds(),
          (unsigned long)((irqs - last_irqs) / ((now - last_now) / 1000u + 1u)),
+         (unsigned long)((sleeps - last_sleeps) / ((now - last_now) / 1000u + 1u)),
+         (unsigned long)((starts - last_starts) / ((now - last_now) / 1000u + 1u)),
          light == 0 ? "on" : light == 1 ? "dim" : "dark", t.hour, t.min, t.sec,
          (unsigned long)(now / 1000));
+    if (adi_read_errors != last_adi_errors) {
+        klog("adi: %lu read errors so far", (unsigned long)adi_read_errors);
+        last_adi_errors = adi_read_errors;
+    }
     last_irqs = irqs;
+    last_sleeps = sleeps;
+    last_starts = starts;
     last_now = now;
 }
 
@@ -934,8 +993,8 @@ static void every_second(uint32_t now)
     notify_tick();
     audio_idle_tick();
     volume_save();
+    charging = charge_state();          /* a plug shows at once, as on Home */
     if (n % 30 == 0) {                  /* the ADC is slow: twice a minute */
-        charging = charge_state();
         bat_mv = battery_mv();
         os_status.battery_mv = (uint32_t)bat_mv;
     }
@@ -952,8 +1011,8 @@ static void every_second(uint32_t now)
     os_status.heap_free = heap_free_bytes();
     os_status.stray_irqs = irq_stray_count;
 
-    if (top_mode() & UI_MODE_AWAKE)
-        last_input = now;               /* a game: no timeout */
+    if ((top_mode() & UI_MODE_AWAKE) && now - last_key < (uint32_t)ui_settings.awake_limit_s * 1000u)
+        last_input = now;               /* a game being played: no timeout */
     if (timeout && light == 0 && now - last_input > timeout)
         set_light(1);
     else if (timeout && light == 1 && now - last_input > timeout + DARK_AFTER_MS)
@@ -996,6 +1055,7 @@ void ui_run(screen_t *home)
     rtc_restore();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
     kernel_set_tickless(ui_settings.deep_idle);
+    sleep_idle_enable(ui_settings.chip_sleep);
     ui_apply_brightness();
     keylight_set(ui_settings.keylight);
     last_input = kernel_ticks();
@@ -1040,9 +1100,14 @@ void ui_run(screen_t *home)
         }
 
         if (held_key && (int32_t)(now - next_repeat) >= 0) {
-            key_event_t rep = { held_key, 1, now };
+            key_event_t rep = { held_key, 1, now, 1 };
             next_repeat = now + REPEAT_EVERY;
             dispatch(&rep);
+        }
+        ui_alive_at = now;
+        if (ui_end_held) {
+            ui_end_held = false;
+            ui_power_off();
         }
         if (end_down && now - end_down >= END_HOLD_MS) {
             end_down = 0;

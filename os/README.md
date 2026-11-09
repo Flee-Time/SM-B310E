@@ -76,7 +76,57 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
     unused, a paused track too, and stock's power set-up runs at boot;
   - stock always boots the DSP; whether a DSP that never ran lets the chip stop
     is not known. The status words in the test's log (0x20500100, 0x8b000120)
-    should show it.
+    should show it;
+  - second night (2026-11-08/09, 8 h, phone): dark idle at 26 MHz 98-99% of the
+    time, no holds, 4 interrupts a second, 6.85 mV an hour after the first hour
+    off the charger (21 before). About 4-6 mA by estimate, not measured;
+  - the oscillator staying up is by design on this board: the 32 kHz clock is
+    made from it, as a chip of this family does when built without a 32 kHz
+    crystal. What a sleep can still stop is the PLL and the clock trees;
+  - 0x8b000120 is a live status word: bit 0 ARM system sleep, 1 DSP stop, 2 the
+    scheduler's sleep, 3 PLL down, 4 oscillator enable, 5 DSP deep sleep, 6 DSP
+    system sleep, 8 and 9 the oscillator's and PLL's wait counts done. It reads
+    0x10 with the DSP in reset, out of reset or with its program booted, and
+    0x72 (DSP stop and both sleeps) nearly all the time once layer 1 is up, also
+    in its multi-frame sleep. The ARM's system sleep still wakes within 0-2
+    slow ticks in every case, so that sleep alone does not stop the PLL;
+  - the PLL can be stopped directly (phone, 2026-11-09): clearing bit 0 of
+    0x8b000020 with the ARM on the crystal sets the word's bit 3 at once, and
+    setting it again brings the PLL back. The analog die's bus needs it: reads
+    return 0 without it. So the idle loop stops it just before sleeping and any
+    ADI access or clock rise starts it again (`clock_pll_need()`);
+  - the idle loop takes the system sleep (`sleep_idle()`) at 26 MHz with no hold.
+    Settings -> Power -> Chip sleep turns both off, to compare. Timer 2 runs
+    through it, so it cannot oversleep a timeout. In QEMU this only shows the
+    path runs; the battery log's `sleeps/s` and `PLL starts/s` show it on the
+    phone, and what it saves takes a night's log.
+  - measured (2026-11-09) with `tools/power-meter`: an Arduino Leonardo reading a
+    resistor in the USB ground wire, battery out, data still connected. Dark idle
+    about 2.6 mA with chip sleep, higher without (1.4 to 4.2 mA more, depending on
+    the estimator); Doom 121 mA lit, 2.2 mA paused dark. Sharp pulses on the line make
+    plain averages wrong, so the meter takes the mean of the middle half of its
+    samples; the scale has not been checked against a multimeter under these terms;
+  - Music: Options (the list's left key) has Shuffle and Quit. Back keeps the music
+    playing, and its notification keeps the app loaded, even paused; Quit ends both,
+    and so do 15 minutes playing nothing with no key (`player_idle_s`, 0: never);
+  - games and emulators keep the screen on only while keys come: 5 minutes after
+    the last one the normal timeout runs. Dark, the kit stops the game, its sound
+    and its clock hold, whatever made it dark (`dark_pause`), and any key goes on
+    from there, the game's clock stopped meanwhile (API 2.14 `ui_is_dark`);
+  - a battery pull can leave the RTC with anything: on 2026-11-09 the day counter
+    read 0xaaaa (2099-08-14) and the hours jumped. `rtc_restore()` only caught a
+    clock behind the saved time; now a day over 3 years past the saved time (30
+    past the build with nothing saved) goes back to the saved time, or the build's
+    date if the saved time is as bad. A plausible wrong time can't be told;
+  - Sleep test with the USB network up killed the data pipes until a replug
+    (2026-11-09) while the keepalives went on, so neither side noticed. The test
+    now stops the background network for those steps and starts it after. The
+    net thread also watches for this: keepalives coming, no frame from the PC
+    for 30 s, then three ARP asks unanswered, and the background network
+    connects again by itself. The shell's `usbstall irq|low` stalls the link with
+    the watchdog armed. A second with interrupts off is survived. Shutting the
+    USB clock gates with the link busy froze the phone until the battery came
+    out, so nothing may do that.
 - **Status bar**: a symbol for where the sound goes (speaker, headphones, a
   headset with a mic) or a muted speaker: the level of what is playing, with
   nothing playing the music's, or the radio's own mute.
@@ -401,6 +451,7 @@ the only one that carries binary transfers. Three sessions at a time.
 | `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `mv`, `df`, `crc` | files on the card (absolute or from the current folder) |
 | `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565 (raw port; the helper does these) |
 | `run APP`, `close` | close the app that is open, load and start APP (a path, or a name or file name in `/b310e-os/apps/` or its folders); close it |
+| `bench SECONDS [dark] [nosleep]` | USB off that long with the cable in, so the phone can reach dark idle (USB holds the clock up); `dark` darkens the screen at once, `nosleep` turns chip sleep off for the run, to compare. This connection ends; USB comes back by itself. The log gets a `bench:` line: time at each clock speed, sleeps, PLL starts, interrupts |
 | `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
 | `reboot [soft\|menu\|os\|stock]` | a hard reset; `menu`, `os`, `stock`: with that request to the boot loader; `soft`: `/payloads/b310e-os.bin` again with no reset, which keeps the clock. Plain `reboot` comes back to this OS through the loader |
 | `echo`, `exit` | |

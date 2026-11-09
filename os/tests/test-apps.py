@@ -324,6 +324,28 @@ def main():
         shot('pasted')
         assert result['music_rows_after_paste'] == 3, result
 
+        # ---- Music: Options -> Quit, with a track playing: nothing plays and the app
+        # is gone, its notification too, where Back leaves it loaded
+        key('esc', wait=0.5)
+        key('ret', 'Menu')
+        key('ret', 'Apps')
+        for _ in range(APPS.index('Music')):
+            key('down')
+        key('ret', wait=0.8)
+        if title() == 'Music':
+            key('ret', 'Now playing')
+        key('f1', 'Music')
+        result['music_before_quit'] = (qt.read(m_on) & 0xff, status(qt, base)['apps_loaded'])
+        assert result['music_before_quit'] == (1, 1), result
+        key('f1', 'Options')
+        shot('music-options')
+        key('down')
+        key('ret', 'Apps', wait=1.0)
+        result['music_after_quit'] = (qt.read(m_on) & 0xff, status(qt, base)['apps_loaded'])
+        assert result['music_after_quit'] == (0, 0), result
+        key('ret', 'Music', wait=0.8)                         # loads again, fresh: the list
+        key('f2', 'Apps', wait=1.0)
+
         # power off from the menu: the log reaches the card
         key('esc', wait=0.5)
         key('ret', 'Menu')

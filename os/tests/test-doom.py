@@ -60,11 +60,18 @@ def main():
     parser.add_argument('--build', type=Path, default=REPO / 'build/os')
     parser.add_argument('--wad', type=Path, default=Path(os.environ.get(
         'B310E_DOOM_WAD', REPO / 'sdcard/games/doom1/doom1.wad')))
+    parser.add_argument('--dark', action='store_true',
+                        help="left alone, the game's screen goes dark and it stops; a key goes on")
     args = parser.parse_args()
     if not args.wad.is_file():
         sys.exit(f'test-doom: no WAD at {args.wad} (use --wad)')
-    out = (args.build / 'test-doom').resolve()
+    out = (args.build / ('test-doom-dark' if args.dark else 'test-doom')).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    extra = []
+    if args.dark:
+        settings = out / 'settings.txt'
+        settings.write_text('screen_timeout=5\nawake_limit_s=20\n', newline='\n')
+        extra = ['--add', f'b310e-os/settings.txt={settings}']
     elf, image = args.build / 'b310e-os.elf', args.build / 'b310e-os.bin'
     doom_elf, doom_app = args.build / 'ports/doom.elf', args.build / 'ports/doom.app'
     base = symbol(elf, 'os_status')
@@ -80,7 +87,7 @@ def main():
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
                     '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     '--add', f'{DIR[1:]}/doom.app={doom_app.resolve()}',
-                    '--add', f'{DIR[1:]}/{args.wad.name.lower()}={args.wad.resolve()}',
+                    '--add', f'{DIR[1:]}/{args.wad.name.lower()}={args.wad.resolve()}', *extra,
                     '--output', str(card)], check=True, capture_output=True)
     wav_out = out / 'audio.wav'
     wav_out.unlink(missing_ok=True)
@@ -194,6 +201,46 @@ def main():
         arena = var('kit', 164)
         result['allocs'] = n_allocs
         assert arena and arena in [qt.read(allocs + 4 * i) for i in range(n_allocs)], result
+        if args.dark:
+            # Still lit past the normal timeout: keys count for the limit, the
+            # last one was launching it
+            s = status(qt, base)
+            result['light_at_first_frame'] = s['ui_light']
+            frames_before = var('kit')
+            until(lambda: var('kit') > frames_before + 10, 60, 'not running')
+            # Left alone: dim, then dark
+            wait_for(qt, base, lambda s: s['ui_light'] == 2, 90, 'never went dark')
+            time.sleep(2)
+            f0, gt0 = var('kit'), var('gametic')
+            d0 = status(qt, base)
+            time.sleep(4)
+            d1 = status(qt, base)
+            result['frames_dark'] = var('kit') - f0
+            result['gametics_dark'] = var('gametic') - gt0
+            result['mhz_dark'] = d1['cpu_mhz']
+            assert result['frames_dark'] == 0, result
+            assert result['gametics_dark'] == 0, result
+            until(lambda: status(qt, base)['cpu_mhz'] == 26, 10, 'clock not down while paused')
+            result['mhz_dark'] = 26
+            # A key: lit, and the game goes on with no jump in its clock
+            key('down', wait=0.3, hold=60)
+            wait_for(qt, base, lambda s: s['ui_light'] == 0, 5, 'no wake')
+            g0 = var('gametic')
+            time.sleep(4)
+            result['gametics_in_4_s_after'] = var('gametic') - g0
+            result['frames_after'] = var('kit') - f0
+            assert result['frames_after'] > 5, result
+            # 35 tics a second at most, and a jump of the paused time would be far more
+            assert 0 < result['gametics_in_4_s_after'] <= 4 * 35 + 10, result
+            key('f2', wait=0.5)
+            qmp.command('quit')
+            p.wait(timeout=20)
+            log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+            lines = [x for x in log.splitlines() if 'the screen is dark' in x or 'going on after' in x]
+            result['log'] = lines
+            assert any('going on after' in x for x in lines), lines
+            print('PASS ' + json.dumps(result))
+            return
         until(lambda: var('kit') > 60, 180, 'the frames stopped')
         time.sleep(3)
         result['title_frames'] = var('kit')

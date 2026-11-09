@@ -67,6 +67,10 @@ int clock_level(void);
 int clock_mhz(void);
 int clock_level_mhz(int level);
 void clock_set_level(int level);
+void clock_pll_stop(void);           /* at 26 MHz only; the idle loop's */
+void clock_pll_need(void);           /* interrupts off: running and locked */
+uint32_t clock_pll_starts(void);
+extern uint32_t adi_read_errors;     /* reads that never came back right */
 void clock_account(void);           /* irqs off: count the time at this level */
 uint32_t clock_level_ms(int level); /* ms at that level since start */
 
@@ -86,6 +90,9 @@ void timer_skip(uint32_t cycles);   /* time that passed with the timer stopped *
 uint32_t sleep_analog_id(void);
 void sleep_chip_init(void);         /* at boot: nothing playing; it waits */
 void sleep_stop(int level);         /* 0 the system may stop, 1 the core only */
+void sleep_idle(void);              /* the idle loop's wait, interrupts off */
+void sleep_idle_enable(bool on);    /* off: a plain wait for interrupt */
+extern uint32_t sleep_idle_count;   /* system sleeps the idle loop took */
 uint32_t sleep_counter_ms(void);    /* runs on through a sleep */
 void sleep_timer_start(uint32_t ms);
 uint32_t sleep_timer_stop(void);
@@ -94,6 +101,7 @@ uint32_t timer_load(void);          /* its reload value */
 uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
 
 /* ---- power (arch/sc6530c/power.c) -------------------------------------- */
+void watchdog_arm(void);            /* a reset in 8 s */
 void watchdog_stop(void);
 void arch_reboot(void) __attribute__((noreturn));
 /* Copy image to 0x04000000 and enter it, MMU and caches off (from IRAM). */

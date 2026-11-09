@@ -258,7 +258,9 @@ static int read_exact(sess_t *s, uint8_t *buf, int n)
         int r = tcp_read(s->c, buf + got, n - got, 10000);
 
         if (r <= 0) {
-            s->quit = r != NET_EAGAIN;
+            /* also on a timeout: what comes next is still the transfer's, and read
+             * as commands it could be anything (rm, poke, reboot) */
+            s->quit = true;
             return -1;
         }
         got += r;
@@ -690,6 +692,50 @@ static void c_adi(sess_t *s, int argc, char **argv)
     say(s, "0x%08lx = 0x%04lx\n", (unsigned long)a, (unsigned long)adi_read(a));
 }
 
+/* What breaks the USB link? One second of each; the watchdog in ip.c notices,
+ * and apps/usb.c connects again, about a minute later. */
+static void c_usbstall(sess_t *s, int argc, char **argv)
+{
+    int how = argc < 2 ? -1 : streq(argv[1], "irq") ? 0 : streq(argv[1], "low") ? 1 : -1;
+
+    if (how < 0) {
+        say(s, "usage: usbstall irq|low   (a second without the ARM, or also without the PLL)\n");
+        return;
+    }
+    klog("shell: usbstall %s", argv[1]);
+    usb_test_stall(how);
+    say(s, "OK\n");
+}
+
+/* USB off for a while, the cable in (apps/usb.c): this connection ends with it */
+static void c_bench(sess_t *s, int argc, char **argv)
+{
+    uint32_t seconds;
+    bool dark = false, nosleep = false;
+
+    for (int i = 2; i < argc; i++) {
+        if (streq(argv[i], "dark"))
+            dark = true;
+        else if (streq(argv[i], "nosleep"))
+            nosleep = true;
+        else
+            argc = 0;
+    }
+    if (argc < 2 || !parse_num(argv[1], &seconds) || !seconds || seconds > 86400) {
+        say(s, "usage: bench SECONDS [dark] [nosleep]   (USB off that long; the screen dark at "
+               "once; chip sleep off, to compare)\n");
+        return;
+    }
+    if (!usb_auto_network()) {
+        say(s, "ERR bench is for the network in the background, not the USB screen\n");
+        return;
+    }
+    say(s, "OK: USB off for %lu s, the log says how it went\n", (unsigned long)seconds);
+    flush(s);
+    tcp_flush(s->c, 1000);
+    usb_bench_request(seconds, dark, nosleep);
+}
+
 /* ---- files ------------------------------------------------------------------ */
 
 static bool need_card(sess_t *s)
@@ -859,7 +905,7 @@ static void c_crc(sess_t *s, int argc, char **argv)
     }
     r = f_open(&f, s->path, FA_READ);
     if (r == FR_OK) {
-        while ((r = f_read(&f, buf, XFER_BUF, &n)) == FR_OK && n) {
+        while (!net_stopping && (r = f_read(&f, buf, XFER_BUF, &n)) == FR_OK && n) {
             crc = net_crc32(crc, buf, n);
             total += n;
         }
@@ -917,8 +963,8 @@ static void c_put(sess_t *s, int argc, char **argv)
             r = FR_DENIED;
         left -= k;
     }
-    if (open)
-        f_close(&f);
+    if (open && f_close(&f) != FR_OK && r == FR_OK)
+        r = FR_DISK_ERR;                /* the last of it did not reach the card */
     if (r == FR_OK && !left) {
         f_unlink(s->path);
         r = f_rename(s->path2, s->path);
@@ -1084,7 +1130,9 @@ static bool wait_unloaded(sess_t *s, const char *path, uint32_t ms)
     }
 }
 
-static void c_run(sess_t *s, int argc, char **argv)
+static mutex_t run_lock;
+
+static void c_run_locked(sess_t *s, int argc, char **argv)
 {
     const char *name = argc > 1 ? argv[1] : NULL;
     size_t n;
@@ -1128,6 +1176,14 @@ static void c_run(sess_t *s, int argc, char **argv)
     }
     net_stat.apps_run++;
     say(s, "OK %s started\n", s->path);
+}
+
+/* run_arg, run_err and run_loaded are one set: one run at a time */
+static void c_run(sess_t *s, int argc, char **argv)
+{
+    mutex_lock(&run_lock, WAIT_FOREVER);
+    c_run_locked(s, argc, argv);
+    mutex_unlock(&run_lock);
 }
 
 static void c_close(sess_t *s, int argc, char **argv)
@@ -1235,6 +1291,8 @@ static const cmd_t cmds[] = {
     { "peek", "ADDR [N] [b|h|w] [-f]", "read memory or registers", c_peek },
     { "poke", "ADDR VAL [b|h|w] [-f]", "write memory or registers", c_poke },
     { "adi", "ADDR [VAL]", "analog die register", c_adi },
+    { "usbstall", "irq|low", "stall the USB link a second", c_usbstall },
+    { "bench", "SECONDS [dark] [nosleep]", "USB off that long, cable in", c_bench },
     { "ls", "[DIR]", "list a folder", c_ls },
     { "cd", "[DIR]", "change folder", c_cd },
     { "pwd", "", "current folder", c_pwd },
@@ -1362,6 +1420,7 @@ static void server_main(void *arg)
 int shell_start(void)
 {
     memset(sess, 0, sizeof(sess));
+    mutex_init(&run_lock);
     sem_init(&server_exited, 0);
     if (tcp_listen(NET_PORT_TELNET) || tcp_listen(NET_PORT_RAW))
         return -1;

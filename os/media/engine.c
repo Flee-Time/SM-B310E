@@ -300,6 +300,12 @@ static void pcmbuf_insert(const void *ch1, const void *ch2, int count)
             }
             /* linear interpolation between the last frame and this one */
             while (rs_phase < 65536) {
+                /* a low rate gives many frames for one, and a bad header any number */
+                if (n >= CHUNK * 2) {
+                    if (!ring_put(out, n))
+                        return;
+                    n = 0;
+                }
                 int32_t a = rs_prev[0] + (int32_t)(((int64_t)(l - rs_prev[0]) * rs_phase) >> 16);
                 int32_t b = rs_prev[1] + (int32_t)(((int64_t)(r - rs_prev[1]) * rs_phase) >> 16);
 
@@ -854,6 +860,7 @@ static void drain_track(void)
             if (codec->mod->start_at)
                 codec->mod->start_at((unsigned long)req_seek);
             req_seek = -1;
+            seek_target = -1;           /* or the position stays frozen there */
             api.curpos = 0;
             frames_in = (uint32_t)((uint64_t)base_ms * in_rate / 1000);
             codec->mod->run();

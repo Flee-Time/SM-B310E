@@ -369,8 +369,8 @@ uint32_t kernel_idle_permille(void)
 
 /* ---- threads ------------------------------------------------------------- */
 
-thread_t *thread_create(const char *name, int prio, size_t stack_size,
-                        thread_fn fn, void *arg)
+thread_t *thread_create_owned(const char *name, int prio, size_t stack_size,
+                            thread_fn fn, void *arg, void *owner)
 {
     thread_t *t = kzalloc(sizeof(*t));
     uint32_t *stack, *sp, s;
@@ -403,10 +403,17 @@ thread_t *thread_create(const char *name, int prio, size_t stack_size,
     s = arch_irq_save();
     t->all_next = all_threads;
     all_threads = t;
+    t->owner = owner;                   /* before it can run */
     ready_add(t, false);
     k_preempt();
     arch_irq_restore(s);
     return t;
+}
+
+thread_t *thread_create(const char *name, int prio, size_t stack_size,
+                        thread_fn fn, void *arg)
+{
+    return thread_create_owned(name, prio, stack_size, fn, arg, NULL);
 }
 
 void thread_sleep(uint32_t ms)
@@ -583,7 +590,7 @@ static void idle_main(void *arg)
         if (need_resched)
             k_preempt();
         else
-            arch_wait_for_irq();
+            sleep_idle();
         arch_irq_restore(s);
     }
 }

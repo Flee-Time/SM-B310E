@@ -8,12 +8,17 @@
  * The stop runs from IRAM with interrupts off and no PSRAM access, as
  * stock's does (copied to 0x40000000, NOR 0x109478).
  *
- * Not used by the idle loop yet: apps/sleeptest.c tries each level on the
- * phone and logs what happened. See os/README.md, "Deep sleep".
+ * On this board the 32 kHz clock is made from the oscillator (no 32 kHz crystal),
+ * so the oscillator stays up by design. sleep_idle() stops the PLL and takes the
+ * system sleep in dark idle: timer 2 runs on through it, so the tickless timer
+ * still ends it and no time is lost.
+ * apps/sleeptest.c tries each level on the phone and logs what happened. See
+ * os/README.md, "Deep sleep".
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
+#include "os/kernel.h"
 #include "os/lib.h"
 
 #define STOP_IRAM   0x40003000u         /* IRAM bank 0, always on; the loader's
@@ -26,6 +31,9 @@
 #define T0_COUNT    0x81000004u
 #define T0_CTL      0x81000008u
 #define T0_INT      0x8100000cu
+
+uint32_t sleep_idle_count;              /* system sleeps the idle loop took */
+static bool chip_ready, idle_on = true;
 
 static void ana_bits(uint32_t addr, uint32_t clear, uint32_t set)
 {
@@ -94,6 +102,7 @@ void sleep_chip_init(void)
     adi_write(0x82001180, adi_read(0x82001180) | 2u);   /* it runs on the DC-DC */
     adi_write(0x82001160, adi_read(0x82001160) & ~1u);
     adi_write(0x820011e8, (adi_read(0x820011e8) & ~8u) | 4u);
+    chip_ready = true;
     arch_irq_restore(s);
 }
 
@@ -113,6 +122,31 @@ void sleep_stop(int level)
     }
     stop(level);
     REG32(AHB_SLP1) &= ~0x18u;
+}
+
+void sleep_idle_enable(bool on)
+{
+    uint32_t s = arch_irq_save();
+
+    idle_on = on;
+    if (!on)
+        clock_pll_need();
+    arch_irq_restore(s);
+}
+
+/* The idle loop's wait, interrupts off. Only at 26 MHz with no hold: anything
+ * using a bus or a clock (SD, USB, the codec, the DSP, the SIM) holds the clock
+ * up, and the panel must be asleep for 26 MHz at all. Timer 2 runs through this
+ * sleep (phone, 2026-11-08), so it cannot sleep past the kernel's next timeout. */
+void sleep_idle(void)
+{
+    if (idle_on && chip_ready && clock_level() == 0 && !cpufreq_holds()) {
+        sleep_idle_count++;
+        clock_pll_stop();               /* until something needs it */
+        sleep_stop(0);
+    } else {
+        arch_wait_for_irq();
+    }
 }
 
 /* The 1 ms counter; it can glitch while it counts: two reads that agree. */

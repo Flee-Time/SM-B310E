@@ -4,6 +4,7 @@
  */
 #include "os/app.h"
 #include "os/arch.h"
+#include "os/audio.h"
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
@@ -25,6 +26,7 @@ struct app {
     char path[96];                      /* its .app */
     bool reload;                        /* load it again once it has gone (2.7) */
     int vol_cat;                        /* its volume tag (2.10); 0: none yet */
+    int holds;                          /* cpufreq_hold()s not released yet */
     char *reload_arg;
 };
 
@@ -47,6 +49,29 @@ app_t *app_self(void)
     thread_t *t = thread_self();
 
     return t && t->owner ? t->owner : app_current;
+}
+
+/* For apps: counted, so an app that goes away gives back what it held. */
+void app_cpufreq_hold(void)
+{
+    app_t *a = app_self();
+
+    if (a)
+        a->holds++;
+    cpufreq_hold();
+}
+
+void app_cpufreq_release(void)
+{
+    app_t *a = app_self();
+
+    if (!a) {                           /* taken with no app either */
+        cpufreq_release();
+    } else if (a->holds > 0) {          /* more releases than holds would drop someone
+                                         * else's: the SD's, in mid transfer */
+        a->holds--;
+        cpufreq_release();
+    }
 }
 
 /* ---- CRC-32 (IEEE), four bits at a time ---------------------------------- */
@@ -254,6 +279,11 @@ static void unload(app_t *a)
         a->info->stop();
         app_current = saved;
     }
+    audio_drop_code(a->image, a->size);
+    if (a->holds)
+        klog("app: %s left %d clock holds", a->name, a->holds);
+    for (; a->holds > 0; a->holds--)    /* or the phone never gets down to 26 MHz */
+        cpufreq_release();
     for (pp = &apps; *pp; pp = &(*pp)->next)
         if (*pp == a) {
             *pp = a->next;
@@ -547,9 +577,8 @@ thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *
         prio = PRIO_NORMAL - 1;
     if (prio < PRIO_LOW)
         prio = PRIO_LOW;
-    t = thread_create(name, prio, stack, fn, arg);
-    if (t)
-        t->owner = app_self();          /* a thread's thread: the same app's */
+    /* a thread's thread: the same app's, from before it first runs */
+    t = thread_create_owned(name, prio, stack, fn, arg, app_self());
     return t;
 }
 
@@ -644,7 +673,8 @@ static const char *open_file(const char *path, const char *arg, bool fresh)
         app_current = saved;
     }
     if (!first) {
-        unload(a);
+        if (!thread_count_owned(a))     /* or it is freed under them: app_collect's */
+            unload(a);
         return "the app did not start";
     }
     return NULL;

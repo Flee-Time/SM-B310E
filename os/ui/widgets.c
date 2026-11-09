@@ -228,11 +228,14 @@ static void dialog_key(screen_t *s, const key_event_t *ev)
             d->no = !d->no;             /* two buttons: any direction moves */
             ui_redraw();
             break;
-        case KEY_CENTER:                /* the selected one */
+        case KEY_CENTER: {              /* the selected one */
+            bool no = d->no;            /* ui_pop frees d */
+
             ui_pop();
-            if (!d->no)
+            if (!no)
                 yes();
             break;
+        }
         case KEY_LSOFT:                 /* the soft keys under Yes and No */
             ui_pop();
             yes();

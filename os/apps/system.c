@@ -31,6 +31,8 @@ static const char *const page_names[PAGES] = {
 
 static struct {
     thread_t *t;
+    char name[16];                      /* copies: it may have ended by the draw */
+    uint16_t prio;
     uint32_t last;
     uint16_t permille;
 } seen[MAX_THREADS];
@@ -70,6 +72,8 @@ static void sample(void)
         sum += seen[n].permille;
         seen[n].t = t;
         seen[n].last = c;
+        snprintf(seen[n].name, sizeof(seen[n].name), "%s", t->name);
+        seen[n].prio = (uint16_t)t->prio;
     }
     for (; n < MAX_THREADS; n++)
         seen[n].t = NULL;
@@ -220,7 +224,7 @@ static void draw_threads(void)
         char label[24], v[12];
         int bw = 24;
 
-        snprintf(label, sizeof(label), "%s (%u)", seen[i].t->name, seen[i].t->prio);
+        snprintf(label, sizeof(label), "%s (%u)", seen[i].name, seen[i].prio);
         pct(v, sizeof(v), seen[i].permille);
         gfx_text(UI_PAD + 2, y, label, C_TEXT, FONT_SMALL, 1, 64);
         gfx_bar(LCD_WIDTH - UI_PAD - 2 - 32 - bw, y + 1, bw, 5, seen[i].permille, 1000,

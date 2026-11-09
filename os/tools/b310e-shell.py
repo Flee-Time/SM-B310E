@@ -69,7 +69,9 @@ class Shell:
         return out
 
     def send(self, data):
-        self.sock.sendall(data)
+        # a socket's timeout is sendall's whole deadline: in pieces, so it is per piece
+        for at in range(0, len(data), 32768):
+            self.sock.sendall(data[at:at + 32768])
 
     def cmd(self, line):
         self.send(line.encode() + b'\n')
@@ -207,7 +209,7 @@ def main():
             sh = Shell(host, args.port, timeout=5 if not args.host else 30)
             sh.sock.settimeout(30)
             break
-        except OSError as e:
+        except (OSError, ShellError) as e:
             err = f'{host}:{args.port} ({e})'
     if not sh:
         sys.exit(f'cannot reach {err}. On the phone: Tools -> USB -> Network, cable in; the PC '

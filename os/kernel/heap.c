@@ -35,7 +35,7 @@ void *kmalloc(size_t size)
     block_t **pp, *b = NULL;
     uint32_t irq;
 
-    if (!size)
+    if (!size || size > 0xfffff000u)    /* need wrapped: a tiny block for a huge ask */
         return NULL;
     irq = arch_irq_save();
     for (pp = &free_list; *pp; pp = &(*pp)->next) {

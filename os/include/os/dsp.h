@@ -157,6 +157,7 @@ uint16_t l1_arfcn_index(int band, int arfcn);
 #define L1_PM_PER_FRAME 6
 int l1_pm_post(const uint16_t *index, const uint8_t *gain, int n);
 int l1_idle_post(int frames);   /* idle frame instructions */
+int l1_sleep_post(int frames);  /* one multi-frame sleep, below 1000 frames */
 void l1_ask_more(int back);     /* flag the instruction this many slots back */
 int l1_run(void);               /* after l1_start(): start the frame clock */
 int l1_fi_free(void);           /* free frame-instruction slots */

@@ -12,6 +12,8 @@
 #include <stdint.h>
 
 #define ALARM_MAX   8
+
+extern bool alarm_ringing;
 #define ALARM_ONCE  0                   /* days: no weekday set, rings once */
 
 typedef struct {

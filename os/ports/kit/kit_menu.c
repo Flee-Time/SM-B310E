@@ -177,6 +177,7 @@ static void opt_key(screen_t *s, const key_event_t *ev)
         ui_redraw();
     } else if (ev->code == KEY_LSOFT) {
         save_values(roms[opt_rom].path);
+        ui_pop();                       /* the options; play() takes the list */
         play(roms[opt_rom].path);
     } else if (ev->code == KEY_RSOFT) {
         save_values(roms[opt_rom].path);

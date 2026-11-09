@@ -16,6 +16,20 @@
 #define WDG_LOCK  (WDG + 0x20)
 #define WDG_KEY   0xe551u
 
+/* A reset in 8 s (at 32768 Hz) unless watchdog_stop() comes first: for tries
+ * that may hang the phone. */
+void watchdog_arm(void)
+{
+    adi_write(0x820010e0, 4);
+    adi_write(0x820010e4, 2);
+    adi_write(0x82001480 + 0x20, 0xe551);
+    adi_write(0x82001480 + 8, adi_read(0x82001480 + 8) | 9);
+    adi_write(0x82001480, 0);
+    adi_write(0x82001480 + 4, 4);
+    adi_write(0x82001480 + 8, adi_read(0x82001480 + 8) | 2);
+    adi_write(0x82001480 + 0x20, (uint16_t)~0xe551u);
+}
+
 void watchdog_stop(void)
 {
     adi_write(WDG_LOCK, WDG_KEY);

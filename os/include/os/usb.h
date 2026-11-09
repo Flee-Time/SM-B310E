@@ -73,6 +73,13 @@ struct screen *app_usb_menu(void);
 /* the default function in the background (Settings -> USB): the UI calls
  * it every second; the label for the status bar, or NULL */
 void usb_auto_tick(void);
+bool usb_stopping(void);            /* usb_stop was asked for */
+bool usb_auto_network(void);        /* the network runs in the background */
+bool usb_auto_pause(void);          /* background USB off; true if it was on */
+void usb_auto_resume(void);         /* on again at the next tick */
+void usb_bench_request(uint32_t seconds, bool dark, bool nosleep);    /* any thread */
+void usb_log_state(const char *why);
+void usb_test_stall(int how);       /* the shell's usbstall */
 const char *usb_auto_label(void);
 
 /* The last mass storage commands of the session (opcode, page, direction,

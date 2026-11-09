@@ -280,6 +280,8 @@ static void retransmit(tcp_conn_t *c, uint32_t now)
         c->rto = c->rto * 2 > RTO_MAX ? RTO_MAX : c->rto * 2;
         c->tx_sent = 0;                 /* go back to the oldest byte */
         c->fin_sent = false;            /* (the state stays: FIN_WAIT_1 etc.) */
+        if (!c->snd_wnd && c->tx_len && c->state != S_SYN_RCVD)
+            c->probe = true;            /* still a zero window: the probe again */
         if (c->state == S_SYN_RCVD)
             c->ack_now = true;          /* the SYN-ACK again */
     } else if (c->tx_len && !c->snd_wnd) {
@@ -507,6 +509,8 @@ void tcp_input(uint32_t src, uint8_t *t, int len)
             return;
     }
     c->snd_wnd = get16(t + 14);
+    if (!c->snd_wnd)                    /* answering, just not reading: alive */
+        c->retries = 0;
 
     /* data, in order only */
     if (dlen || (flags & F_FIN)) {
@@ -572,6 +576,18 @@ void tcp_shutdown(void)
         }
     sem_post(&accept_sem);
     sem_post(&accept_sem);
+}
+
+void tcp_drop_all(void)
+{
+    for (int i = 0; i < TCP_CONN_N; i++) {
+        tcp_conn_t *c = &conns[i];
+
+        if (c->state != S_FREE && c->state != S_CLOSED) {
+            c->reset = true;
+            conn_closed(c);
+        }
+    }
 }
 
 void tcp_free_all(void)

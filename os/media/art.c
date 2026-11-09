@@ -361,11 +361,14 @@ static void skip_n(src_t *s, int n)
         ;
 }
 
-static void huff_build(huff_t *t)
+/* false: more codes of a length than there are (the table below would overrun) */
+static bool huff_build(huff_t *t)
 {
     int code = 0, k = 0;
 
     for (int l = 1; l <= 16; l++) {
+        if (code + t->bits[l] > 1 << l)
+            return false;
         t->valptr[l] = (int16_t)k;
         t->mincode[l] = code;
         code += t->bits[l];
@@ -382,6 +385,7 @@ static void huff_build(huff_t *t)
             for (int f = 0; f < 1 << (9 - l); f++)
                 t->lut[first + f] = (uint16_t)(l << 8 | t->vals[n]);
         }
+    return true;
 }
 
 /* The entropy-coded bits, MSB first, up to 32 at a time in bitbuf (its
@@ -729,7 +733,8 @@ static bool jpeg_decode(src_t *s, int side, uint16_t *px)
                     goto out;
                 for (int i = 0; i < n; i++)
                     t->vals[i] = (uint8_t)src_byte(s);
-                huff_build(t);
+                if (!huff_build(t))
+                    goto out;
                 len -= 17 + n;
             }
         } else if (m == 0xc0 || m == 0xc1 || m == 0xc2) {   /* SOF0/1/2 */
@@ -1275,6 +1280,8 @@ static bool png_decode(src_t *s, int side, uint16_t *px)
             p->h = (int)be32(d + 4);
             p->depth = d[8];
             p->ctype = d[9];
+            if (p->depth != 1 && p->depth != 2 && p->depth != 4 && p->depth != 8)
+                goto out;               /* 0 would never end a row; 16 is not done */
             if (d[12] || p->w <= 0 || p->h <= 0 || p->w > 8192 || p->h > 8192)
                 goto out;               /* interlaced, or nonsense */
             p->channels = p->ctype == 2 ? 3 : p->ctype == 4 ? 2 : p->ctype == 6 ? 4 : 1;

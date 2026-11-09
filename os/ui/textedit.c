@@ -253,9 +253,24 @@ static void key(screen_t *s, const key_event_t *ev)
         }
         break;
     case KEY_CENTER:
-        if (e->done)
-            e->done(e->text, e->ctx);
-        ui_pop();                       /* frees e */
+        {
+            /* the editor closes first: a message done() shows must stay up */
+            void (*done)(const char *, void *) = e->done;
+            void *ctx = e->ctx;
+            char *copy = done ? kmalloc((size_t)e->len + 1) : NULL;
+
+            if (done && !copy) {
+                done(e->text, ctx);
+                done = NULL;
+            } else if (copy) {
+                memcpy(copy, e->text, (size_t)e->len);
+                copy[e->len] = 0;
+            }
+            ui_pop();                   /* frees e */
+            if (done && copy)
+                done(copy, ctx);
+            kfree(copy);
+        }
         return;
     case KEY_RSOFT:
         ui_pop();

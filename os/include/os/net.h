@@ -77,6 +77,8 @@ typedef struct {
     uint32_t tx_no_link;        /* sends refused: the host never set a filter */
     uint32_t tx_fail;           /* sends the USB side did not complete */
     uint32_t packet_filter;     /* as the host set it */
+    uint32_t link_asks;         /* ARP asks because the data pipes went quiet */
+    uint32_t link_lost;         /* keepalives come, the PC's frames do not */
 } net_stat_t;
 
 extern volatile net_stat_t net_stat;
@@ -91,6 +93,7 @@ extern const uint8_t net_mac[6], net_host_mac[6];
  * without memory. net_stop() ends every connection and thread. */
 int net_start(int (*send)(uint8_t *buf, int len));
 void net_stop(void);
+void net_host_restarted(void);          /* RNDIS INITIALIZE: any thread or IRQ */
 void net_link(bool up);                 /* the host may take frames */
 /* A free receive buffer of NET_RX_BUF bytes, NULL after timeout_ms or
  * when stopping; hand it back filled (net_rx_frame, the frame at off) or

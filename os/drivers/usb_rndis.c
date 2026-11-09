@@ -335,7 +335,7 @@ static void rndis_command(const uint8_t *m, int len)
                  (unsigned long)(len >= 16 && (type == MSG_QUERY || type == MSG_SET) ?
                                  le32(m + 12) : 0),
                  (unsigned long)(type == MSG_SET && len >= 28 &&
-                                 le32(m + 20) + 8 + 4 <= (uint32_t)len ?
+                                 le32(m + 20) <= (uint32_t)len - 12 ?
                                  le32(m + le32(m + 20) + 8) : 0));
     }
     switch (type) {
@@ -344,6 +344,7 @@ static void rndis_command(const uint8_t *m, int len)
             return;
         host_max_transfer = le32(m + 20);
         initialized = true;
+        net_host_restarted();
         set_filter(0);
         net_stat.rndis_inits++;
         r = resp_new();
@@ -389,7 +390,7 @@ static void rndis_command(const uint8_t *m, int len)
         r = resp_new();
         r[0] = MSG_SET | MSG_CMPLT;
         r[2] = id;
-        r[3] = off + n > (uint32_t)len ? ST_INVALID_DATA : set(le32(m + 12), m + off, n);
+        r[3] = off > (uint32_t)len || n > (uint32_t)len - off ? ST_INVALID_DATA : set(le32(m + 12), m + off, n);
         resp_push(16);
         return;
     }

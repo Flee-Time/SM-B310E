@@ -59,6 +59,33 @@ static const screen_t list_tpl, np_tpl;
 /* a copy of a screen, freed when popped: the app may be opened again
  * (app_launch) while one of its screens is on the stack */
 static void note_ensure(void);          /* the notification, below */
+static void quit(void);
+
+/* Open, or paused in the background, and playing nothing for player_idle_s with
+ * no key: it closes, since only a reboot would otherwise end a paused queue. */
+static uint32_t used_at;
+static bool idle_said;
+static int seek_cur = -1;               /* the track a held key is seeking in */
+
+static void used(void)
+{
+    used_at = ticks();
+    idle_said = false;
+}
+
+static bool idle_long(void)
+{
+    if (media_queue_active() && media_state() != MEDIA_PAUSED)
+        used();
+    if (!ui_settings.player_idle_s ||
+        ticks() - used_at < (uint32_t)ui_settings.player_idle_s * 1000u)
+        return false;
+    if (!idle_said)
+        klog("music: nothing played for %d s: closing", ui_settings.player_idle_s);
+    idle_said = true;                   /* still true: a screen under the panel closes
+                                         * as soon as it is back on top */
+    return true;
+}
 
 static screen_t *new_screen(const screen_t *tpl)
 {
@@ -314,6 +341,7 @@ static void show_list(void)
 
 static void np_key(screen_t *s, const key_event_t *ev)
 {
+    used();
     uint32_t now = ev->time;
 
     switch (ev->code) {
@@ -340,6 +368,7 @@ static void np_key(screen_t *s, const key_event_t *ev)
             seek_dir = d;               /* the first repeat: held, seek */
             seek_steps = 1;
             seek_pos = (int32_t)media_position() + d * 2000;
+            seek_cur = media_queue_current();
             if (seek_pos < 0)
                 seek_pos = 0;
             tap_dir = 0;
@@ -379,6 +408,11 @@ static void np_tick(screen_t *s)
 {
     uint32_t now = ticks();
 
+    if (idle_long()) {
+        quit();
+        return;
+    }
+
     if (tap_dir && now - tap_at > TAP_MS) {
         int d = tap_dir;
 
@@ -388,7 +422,7 @@ static void np_tick(screen_t *s)
     note_ensure();
     if (seek_dir && now - last_repeat > HOLD_END_MS) {
         seek_dir = 0;
-        if (seek_pos >= 0) {
+        if (seek_pos >= 0 && seek_cur == media_queue_current()) {  /* not if it moved on */
             klog("music: seek to %lu ms", (unsigned long)seek_pos);
             media_seek((uint32_t)seek_pos);
         }
@@ -408,6 +442,8 @@ static bool note_update(notify_t *n)
     const char *now = media_queue_now();
     uint32_t len = media_duration();
 
+    if (idle_long())                    /* a screen of its own closes at its tick */
+        media_queue_clear();
     if (!media_queue_active())
         return false;
     if (media_info(&mi) && mi.title[0]) {
@@ -426,6 +462,7 @@ static bool note_update(notify_t *n)
 
 static void note_act(notify_t *n, int a)
 {
+    used();
     if (a == 1)
         toggle_pause();
     else
@@ -510,7 +547,6 @@ static void list_draw_(screen_t *s)
     int count = media_queue_count(), cur = media_queue_current();
     const char *err = media_queue_error();
 
-    s->left = media_queue_shuffle() ? "Shuffle" : "In order";
     if (need_fill) {
         gfx_text_centered(UI_TOP + 40, "Reading /music...", C_DIM, FONT_BODY, 1);
         return;
@@ -538,6 +574,28 @@ static void list_draw_(screen_t *s)
              LCD_WIDTH - 2 * UI_PAD);
 }
 
+/* Quit: the queue and the notification go, which is what kept the app loaded even
+ * when paused, then its screens; the loader unloads it. */
+static void quit(void)
+{
+    int n = n_shown;
+
+    media_queue_clear();
+    notify_remove(&note);
+    while (n-- > 0)
+        ui_pop();
+}
+
+static const char *options[2];
+
+static void option_picked(int i, void *ctx)
+{
+    if (i == 0)
+        media_queue_set_shuffle(!media_queue_shuffle());
+    else
+        quit();
+}
+
 static void show_now_playing(void)
 {
     screen_t *s;
@@ -550,6 +608,7 @@ static void show_now_playing(void)
 
 static void list_key_(screen_t *s, const key_event_t *ev)
 {
+    used();
     switch (ev->code) {
     case KEY_UP:
     case KEY_DOWN:
@@ -570,7 +629,9 @@ static void list_key_(screen_t *s, const key_event_t *ev)
         toggle_pause();
         break;
     case KEY_LSOFT:
-        media_queue_set_shuffle(!media_queue_shuffle());
+        options[0] = media_queue_shuffle() ? "Shuffle: on" : "Shuffle: off";
+        options[1] = "Quit";
+        ui_choose("Options", options, 2, -1, option_picked, NULL);
         break;
     case KEY_RSOFT:
         ui_pop();                       /* the music plays on */
@@ -594,6 +655,10 @@ static void fill(void);
 
 static void list_tick(screen_t *s)
 {
+    if (idle_long()) {
+        quit();
+        return;
+    }
     /* a redraw: the elapsed time in the list (the OS runs the queue) */
     note_ensure();
     if (need_fill) {                    /* the screen is up: now the scan */
@@ -604,7 +669,7 @@ static void list_tick(screen_t *s)
 }
 
 static const screen_t list_tpl = {
-    .title = "Music", .left = "In order", .center = "Play", .right = "Back",
+    .title = "Music", .left = "Options", .center = "Play", .right = "Back",
     .enter = list_enter, .leave = list_leave, .draw = list_draw_, .key = list_key_,
     .tick = list_tick, .tick_ms = 500,
 };
@@ -647,6 +712,7 @@ static screen_t *start(void)
 {
     const char *arg = app_arg();
 
+    used();
     ic_play = ui_icon("play");
     ic_music = ui_icon("music");
     list.item = item;

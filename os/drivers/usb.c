@@ -228,6 +228,7 @@ static bool adi_read_checked(uint32_t addr, uint32_t *value)
     uint32_t s = arch_irq_save(), n = ADI_BUDGET, data;
     bool ok = false;
 
+    clock_pll_need();
     while (!(REG32(ADI_STS) & ADI_EMPTY))
         if (--n == 0)
             goto out;
@@ -989,6 +990,36 @@ void usb_wait_unhalted(uint32_t g)
         wait_on(&cfg_sem, 10);
 }
 
+/* What the endpoints look like, for the log when the link is lost. */
+void usb_log_state(const char *why)
+{
+    klog("usb: %s: bulk out busy %d halted %d ctrl %08lx sts %04lx, in busy %d halted %d ctrl %08lx sts %04lx, "
+         "config %d, %lu setups, %lu irqs, polled %d", why,
+         ep_out.busy, halted_out, (unsigned long)R(&ep_out, ctrl), (unsigned long)R(&ep_out, int_sts),
+         ep_in.busy, halted_in, (unsigned long)R(&ep_in, ctrl), (unsigned long)R(&ep_in, int_sts),
+         configured, (unsigned long)usb_stat.setups, (unsigned long)usb_stat.irqs, polled);
+}
+
+/* The shell's usbstall: one second without the ARM (0), also on the crystal
+ * with the PLL off (1). Watchdog armed. Never with the USB clock gates shut while
+ * the link runs: that froze the phone until the battery came out (2026-11-09). */
+void usb_test_stall(int how)
+{
+    uint32_t i = arch_irq_save();
+    int level = clock_level();
+
+    watchdog_arm();
+    if (how == 1) {
+        clock_set_level(0);
+        clock_pll_stop();
+    }
+    udelay(1000000);
+    if (how == 1)
+        clock_set_level(level);
+    watchdog_stop();
+    arch_irq_restore(i);
+}
+
 /* ---- controller -------------------------------------------------------- */
 
 /* The stock vcom_usb bring-up (0x38b62), step for step, with the "USB"
@@ -1071,8 +1102,13 @@ bool usb_cable(void)
     return charger_present();
 }
 
+/* usb_stop gave up waiting: the session may have ended since */
 bool usb_running(void)
 {
+    if (running && stop_req && sem_wait(&exited, 0) == WAIT_OK) {
+        running = false;
+        session_thread = NULL;
+    }
     return running;
 }
 
@@ -1085,8 +1121,8 @@ int usb_start_function(int which)
 {
     uint32_t sessions = usb_stat.sessions;
 
-    if (running)
-        return 0;
+    if (usb_running())
+        return stop_req ? -1 : 0;       /* the last one is still stopping */
     fn = which == USB_FN_NETWORK ? &usb_fn_network : &usb_fn_storage;
     if (!fn->init())
         return -1;

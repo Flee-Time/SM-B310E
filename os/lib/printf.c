@@ -1,4 +1,4 @@
-/* B310E OS — vsnprintf: %d %i %u %x %X %o %p %s %c %%, flags '-' '0',
+/* B310E OS — vsnprintf: %d %i %u %x %X %o %p %s %c %%, flags '-' '0' '+',
  * width, precision for strings, 'l' and 'z' length modifiers.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -25,7 +25,7 @@ static void pad(out_t *o, char c, int n)
 }
 
 static void number(out_t *o, unsigned long v, unsigned base, bool upper,
-                   bool neg, int width, bool left, bool zero)
+                   char sign, int width, bool left, bool zero)
 {
     char tmp[24];
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
@@ -35,11 +35,11 @@ static void number(out_t *o, unsigned long v, unsigned base, bool upper,
         tmp[n++] = digits[v % base];
         v /= base;
     } while (v);
-    len = n + (neg ? 1 : 0);
+    len = n + (sign ? 1 : 0);
     if (!left && !zero)
         pad(o, ' ', width - len);
-    if (neg)
-        emit(o, '-');
+    if (sign)
+        emit(o, sign);
     if (!left && zero)
         pad(o, '0', width - len);
     while (n)
@@ -53,7 +53,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
     out_t o = { buf, size, 0 };
 
     for (; *fmt; fmt++) {
-        bool left = false, zero = false, lng = false;
+        bool left = false, zero = false, lng = false, plus = false;
         int width = 0, prec = -1;
 
         if (*fmt != '%') {
@@ -64,6 +64,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         for (;; fmt++) {
             if (*fmt == '-') left = true;
             else if (*fmt == '0') zero = true;
+            else if (*fmt == '+') plus = true;
             else break;
         }
         if (*fmt == '*') {
@@ -94,7 +95,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         case 'i': {
             long v = lng ? va_arg(ap, long) : va_arg(ap, int);
             number(&o, v < 0 ? -(unsigned long)v : (unsigned long)v, 10,
-                   false, v < 0, width, left, zero);
+                   false, v < 0 ? '-' : plus ? '+' : 0, width, left, zero);
             break;
         }
         case 'u':
@@ -104,13 +105,13 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             unsigned long v = lng ? va_arg(ap, unsigned long)
                                   : va_arg(ap, unsigned int);
             unsigned base = *fmt == 'u' ? 10 : *fmt == 'o' ? 8 : 16;
-            number(&o, v, base, *fmt == 'X', false, width, left, zero);
+            number(&o, v, base, *fmt == 'X', 0, width, left, zero);
             break;
         }
         case 'p':
             emit(&o, '0');
             emit(&o, 'x');
-            number(&o, (uintptr_t)va_arg(ap, void *), 16, false, false,
+            number(&o, (uintptr_t)va_arg(ap, void *), 16, false, 0,
                    8, false, true);
             break;
         case 's': {

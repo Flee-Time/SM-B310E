@@ -6,6 +6,8 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
+#include "os/media.h"
+#include "os/ui.h"
 #include "apps/wavio.h"
 
 #define RING_BYTES  (128u * 1024)       /* 0.7 s of 44.1 kHz stereo */
@@ -14,7 +16,9 @@
 static uint8_t *ring;
 static volatile uint32_t head, tail;    /* bytes; head written, tail read */
 static FIL file;
-static bool file_open, playing, recording, tone, file_eof;
+static bool file_open, playing, recording, tone, file_eof, write_failed;
+static uint32_t synced_at;
+#define SYNC_MS 30000u
 static unsigned channels, rate;
 static uint32_t data_bytes, total_bytes, dropped;
 static uint32_t tone_phase, tone_step;
@@ -145,11 +149,16 @@ const char *wav_play_file(const char *path)
                 goto unsupported;
             channels = fmt[2] | fmt[3] << 8;
             rate = le32(fmt + 4);
+            /* a length past the file could wrap, and read here for ever */
+            if (len < 16 || len - 16 > f_size(&file) - f_tell(&file))
+                goto unsupported;
             f_lseek(&file, f_tell(&file) + len - 16 + (len & 1));
         } else if (!memcmp(ck, "data", 4)) {
             data_bytes = len;
             break;
         } else {
+            if (len > f_size(&file) - f_tell(&file))
+                goto unsupported;
             f_lseek(&file, f_tell(&file) + len + (len & 1));
         }
     }
@@ -237,6 +246,7 @@ static void drain(void)
         tail += n;
         if (f_write(&file, buf, n, &w) != FR_OK || w != n) {
             klog("audio: recording write failed");
+            write_failed = true;
             break;
         }
         total_bytes += n;
@@ -249,6 +259,9 @@ const char *wav_record(unsigned r, int source)
     UINT w;
     FILINFO fi;
 
+    if (media_state() == MEDIA_PLAYING || media_state() == MEDIA_LOADING)  /* one rate for
+                                               both: it would play at ours */
+        media_pause(true);
     wav_stop();
     if (!ring_alloc())
         return "not enough memory";
@@ -271,6 +284,8 @@ const char *wav_record(unsigned r, int source)
         return "recording did not start";
     }
     recording = true;
+    write_failed = false;
+    synced_at = kernel_ticks();
     klog("audio: recording %s, %u Hz, %s", name, rate,
          source == AUDIO_SRC_FM ? "FM" : audio_mic_path() == 0x0c ? "headset mic" : "phone mic");
     return NULL;
@@ -284,6 +299,29 @@ void wav_pump(void)
         refill();
     if (recording)
         drain();
+    if (recording && audio_record_failed()) {
+        klog("audio: recording stopped by a DMA error");
+        wav_stop();                     /* what came is kept */
+    }
+    if (recording && write_failed) {    /* a full card, or a bad one */
+        wav_stop();
+        ui_wake();
+        ui_message("Recording stopped", "The card is full or failed. What was recorded is kept.");
+    }
+    /* The directory and the header follow every so often, so that a battery pulled
+     * or a crash costs half a minute, not the whole recording */
+    if (recording && kernel_ticks() - synced_at >= SYNC_MS) {
+        uint8_t h[44];
+        UINT w;
+        FSIZE_t at = f_tell(&file);
+
+        synced_at = kernel_ticks();
+        header(h, total_bytes);
+        f_lseek(&file, 0);
+        f_write(&file, h, sizeof(h), &w);
+        f_lseek(&file, at);
+        f_sync(&file);
+    }
     if (playing && !audio_playing())
         wav_stop();                     /* played to the end */
 }

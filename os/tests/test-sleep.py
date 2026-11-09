@@ -2,10 +2,14 @@
 """Tools -> Sleep test, and the dark screen's headset, in QEMU.
 
 QEMU does not model the chip's sleep: timer 0 and the stop bit do nothing,
-so this checks only that the test's three steps run and come back (timer 2
-ends each after 3 s), that the kernel's time and the UI go on afterwards,
-and that each step's lines reach the card's log. Whether the chip really
-stops shows on the phone, in the same lines.
+so this checks only that the test's steps run and come back (timer 2 ends
+each after 3 s), that the kernel's time and the UI go on afterwards, and that
+each step's lines reach the card's log. Whether the chip really stops shows on
+the phone, in the same lines.
+
+Dark at 26 MHz the idle loop takes the system sleep and clears the PLL's enable
+bit; lit or held up neither, and the bit is back before the clock goes up. A
+first read of the analog die with it clear sets it again.
 
 With a 4-pole headset in, the codec stays on for its buttons while the screen
 is lit; dark and silent it goes off, so the clock can drop to 26 MHz, and the
@@ -40,6 +44,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     elf, image = args.build / 'b310e-os.elf', args.build / 'b310e-os.bin'
     base, codec = symbol(elf, 'os_status'), symbol(elf, 'hs_powered')
+    sleeps = symbol(elf, 'sleep_idle_count')
+    PLL_CTL = 0x8b000020
     settings = out / 'settings.txt'
     settings.write_text('screen_timeout=15\n')
     card = out / 'card.img'
@@ -93,6 +99,19 @@ def main():
         result['mhz_dark_headset'] = s['cpu_mhz']
         result['codec_dark'] = qt.read(codec) & 0xff
         assert result['codec_dark'] == 0, result
+        # The idle loop's system sleep, and the kernel's time going on through it
+        c0, t0 = qt.read(sleeps), status(qt, base)['ticks']
+        time.sleep(3)
+        result['idle_sleeps_in_3_s'] = qt.read(sleeps) - c0
+        result['ms_in_3_s_dark'] = status(qt, base)['ticks'] - t0
+        assert result['idle_sleeps_in_3_s'] > 0, result
+        assert result['ms_in_3_s_dark'] > 1500, result
+        reads = [qt.read(PLL_CTL) & 1 for _ in range(200)]
+        result['pll_off_reads_of_200'] = reads.count(0)
+        assert reads.count(0) > 0, result
+        starts = symbol(elf, 'pll_starts')
+        result['pll_starts_dark'] = qt.read(starts)
+        assert result['pll_starts_dark'] > 0, result    # the UI's analog reads
         # The first key only wakes; the buttons come back
         qmp.hmp('sendkey down 100')
         wait_for(qt, base, lambda s: s['ui_light'] == 0, 5, 'no wake')
@@ -104,13 +123,19 @@ def main():
                      'headset button dead after waking')
         result['headset_key'] = hex(s['last_key'])
         time.sleep(0.5)
+        c0 = qt.read(sleeps)                # lit: never
+        time.sleep(1)
+        result['idle_sleeps_lit'] = qt.read(sleeps) - c0
+        assert result['idle_sleeps_lit'] == 0, result
+        result['pll_lit'] = qt.read(PLL_CTL) & 1
+        assert result['pll_lit'] == 1, result
 
         # Tools -> Sleep test
         press('ret', 'Menu')
         for _ in range(MENU.index('Tools')):
             press('down', 'Menu')
         press('ret', 'Tools')
-        for _ in range(4):
+        for _ in range(5):                  # Torch, SIM, IMEI, USB, Radio status
             press('down', 'Tools')
         t0 = status(qt, base)['ticks']
         qmp.hmp('sendkey ret 100')
@@ -140,8 +165,9 @@ def main():
     lines = [x for x in log.splitlines() if 'sleep test' in x]
     (out / 'sleep-log.txt').write_text('\n'.join(lines))
     result['log_lines'] = len(lines)
-    for want in ('analog id', 'core stop: start', 'system: start', 'DSP out of reset, gates, T2 on: start',
-                 'DSP program: boot', 'after the last'):
+    for want in ('analog id', 'core stop: start', 'system: start', 'system, 26 MHz: start',
+                 'states, DSP in reset', 'PLL at 26 MHz: control', 'states, DSP out of reset, no program',
+                 'DSP out of reset, gates, T2 on: start', 'DSP program: boot', 'after the last'):
         assert any(want in x for x in lines), (want, lines)
     done = [x for x in lines if 'by the counter' in x]
     assert len(done) >= 7, lines

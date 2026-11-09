@@ -10,6 +10,9 @@
 #include "os/art.h"
 #include "apps/wavio.h"
 
+void app_cpufreq_hold(void);
+void app_cpufreq_release(void);
+
 /* PCM playback for apps: each at its own volume */
 static int app_audio_play(unsigned rate, audio_fill_fn fill, void *ctx)
 {
@@ -136,8 +139,8 @@ const os_api_t os_api = {
     .heap_free = heap_free_bytes,
     .cpu_idle = kernel_idle_permille,
     .cpu_mhz = clock_mhz,
-    .cpufreq_hold = cpufreq_hold,
-    .cpufreq_release = cpufreq_release,
+    .cpufreq_hold = app_cpufreq_hold,
+    .cpufreq_release = app_cpufreq_release,
     .power_off = ui_power_off,
     .reboot = ui_reboot,
     .fs_info = fs_info,
@@ -232,4 +235,6 @@ const os_api_t os_api = {
     .ui_present = ui_present,
     .volume_register = app_volume_register,
     .l1 = &l1_api,
+    .ui_is_dark = ui_is_dark,
+    .ui_depth = ui_depth,
 };

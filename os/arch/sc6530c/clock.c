@@ -19,6 +19,13 @@
  * is set before the source, going down the source changes first. The
  * 26 MHz tick timer is not affected. udelay() scales with the clock.
  *
+ * Bit 0 of 0x8b000020 is the PLL's enable; the status word 0x8b000120 shows bit 3
+ * (PLL down) within a read of clearing it (phone, 2026-11-09). The ARM and the
+ * timers run without it at 26 MHz, but the analog die's bus does not: reads
+ * return 0. So only the idle loop stops it, just before sleeping (sleep_idle),
+ * and clock_pll_need() starts it again: on the way up here, for anything holding
+ * the clock up (SD, USB, the codec, the DSP, the SIM), and in every ADI access.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
@@ -26,6 +33,9 @@
 #define CLK_CTL     0x8b000040u
 #define CLK_SEL     3u
 #define CLK_HALF    4u
+#define PLL_CTL     0x8b000020u
+#define PLL_EN      1u
+#define PLL_LOCK_US 2000u               /* as tried on the phone; not a measured minimum */
 
 static const struct {
     uint8_t sel, half, shift;           /* shift: udelay loops per us, log2 */
@@ -38,6 +48,7 @@ static const struct {
 
 uint32_t udelay_shift = 6;
 static int level = -1;                  /* -1: unknown boot clock, fixed */
+static uint32_t pll_starts;
 static uint64_t level_cycles[CLOCK_LEVELS];
 static uint32_t level_mark;
 
@@ -59,6 +70,7 @@ static void step(int to)
     uint32_t v = REG32(CLK_CTL);
 
     if (to > level) {
+        clock_pll_need();
         if (levels[to].half)
             write_ctl(v |= CLK_HALF);
         write_ctl(v = (v & ~CLK_SEL) | levels[to].sel);
@@ -69,6 +81,28 @@ static void step(int to)
     }
     level = to;
     udelay_shift = levels[to].shift;
+}
+
+/* On the crystal only. */
+void clock_pll_stop(void)
+{
+    if (level == 0)
+        REG32(PLL_CTL) &= ~PLL_EN;
+}
+
+/* Interrupts off: back, and locked. The wait is at the crystal's speed. */
+void clock_pll_need(void)
+{
+    if (!(REG32(PLL_CTL) & PLL_EN)) {
+        REG32(PLL_CTL) |= PLL_EN;
+        pll_starts++;
+        udelay(PLL_LOCK_US);
+    }
+}
+
+uint32_t clock_pll_starts(void)
+{
+    return pll_starts;
 }
 
 void clock_init(void)

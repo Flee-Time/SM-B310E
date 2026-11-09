@@ -439,7 +439,7 @@ static void op_key(screen_t *s, const key_event_t *ev)
 
         ui_pop();                       /* the options; then the action */
         if (row == OP_RENAME) {
-            ui_text_edit("Rename", op.name, 64, false, renamed, NULL);
+            ui_text_edit("Rename", op.name, (int)sizeof(op.name) - 1, false, renamed, NULL);
         } else if (row == OP_DELETE) {
             ui_confirm(op.dir ? "Delete folder" : "Delete file", op.name, delete_yes);
         } else if (row == OP_COPY) {

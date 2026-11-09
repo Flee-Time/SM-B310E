@@ -85,7 +85,9 @@
  * rxlev_measure, cell_c1, cell_select, cell_stay, after probe (os/l1cell.h). */
 /* 2.13 (2026-11-09): l1_api_t: cch_classify, cch_read (the common control
  * channel, receive only). */
-#define OS_API_MINOR 13
+/* 2.14 (2026-11-09): ui_is_dark, so a game can stop while the panel is asleep; ui_depth;
+ * settings: awake_limit_s, player_idle_s; key_event_t.repeat. */
+#define OS_API_MINOR 14
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -354,6 +356,10 @@ struct os_api {
 
     /* 2.11: layer 1 and the DSP */
     const l1_api_t *l1;
+
+    /* 2.14 */
+    bool (*ui_is_dark)(void);
+    int (*ui_depth)(void);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */

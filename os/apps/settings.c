@@ -8,7 +8,7 @@
  *   Display             brightness, screen off after, keypad light
  *   Sound & touch   the volume of music, the alarm, calls, each app; the
  *                       keys' tactile feedback
- *   Power               CPU speed, deep idle
+ *   Power               CPU speed, deep idle, chip sleep
  *   Date & time         (apps/clock.c)
  *   USB                 what a data cable starts in the background
  *   Storage             the card, the cover cache
@@ -134,6 +134,13 @@ static void set_deep_idle(int on)
     kernel_set_tickless(on);
 }
 
+static int get_chip_sleep(void) { return ui_settings.chip_sleep; }
+static void set_chip_sleep(int on)
+{
+    ui_settings.chip_sleep = on;
+    sleep_idle_enable(on);
+}
+
 static void card_detail(char *out, int n)
 {
     const fs_info_t *fi = fs_info();
@@ -215,6 +222,7 @@ static const setting_t sound_rows[] = {
 static const setting_t power_rows[] = {
     { .name = "CPU speed", .icon = &icon_cpu, .kind = S_PICK, .options = cpu_names, .n = 2, .get = get_cpu, .set = set_cpu },
     { .name = "Deep idle", .icon = &icon_power, .kind = S_SWITCH, .get = get_deep_idle, .set = set_deep_idle },
+    { .name = "Chip sleep", .icon = &icon_power, .kind = S_SWITCH, .get = get_chip_sleep, .set = set_chip_sleep },
 };
 static const setting_t storage_rows[] = {
     { .name = "Card", .icon = &icon_card, .kind = S_ACTION, .act = card_info, .detail = card_detail },
@@ -311,7 +319,7 @@ static void about(void)
 static const category_t categories[] = {
     { .title = "Display", .icon = &icon_screen, .rows = display_rows, .n = 3 },
     { .title = "Sound & touch", .icon = &icon_speaker, .rows = sound_rows, .n = 6 },
-    { .title = "Power", .icon = &icon_power, .rows = power_rows, .n = 2 },
+    { .title = "Power", .icon = &icon_power, .rows = power_rows, .n = 3 },
     { .title = "Date & time", .icon = &icon_clock, .rows = time_rows, .n = 3 },
     { .title = "USB", .icon = &icon_usb, .rows = usb_rows, .n = 1 },
     { .title = "Storage", .icon = &icon_card, .rows = storage_rows, .n = 2 },

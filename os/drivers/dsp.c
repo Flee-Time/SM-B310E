@@ -124,6 +124,7 @@
 #define CMD_START       0x10u           /* command 0, word 1: see l1_start() */
 #define FN_MOD          0x297000u       /* hyperframe */
 #define FI_IDLE         0u
+#define FI_SLEEP        1u
 #define FI_POWER        11u
 #define FI_FCCH         9u
 #define FI_SCH          10u
@@ -1081,6 +1082,24 @@ int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
 uint32_t l1_next_fn(void)
 {
     return frame_number;
+}
+
+/* Type 1, the multi-frame sleep (FUN_0004fc5c): nothing received for that many
+ * frames. Word 3 the count; its frame number is the span's last, as for type 9. */
+int l1_sleep_post(int frames)
+{
+    uint16_t fi[11], ext[3];
+    uint32_t saved = frame_number;
+    int rc;
+
+    if (frames < 1 || frames >= 1000)
+        return DSP_ECMD;
+    frame_number = (frame_number + (uint32_t)frames - 1) % FN_MOD;
+    fi_init(fi, ext, FI_SLEEP);
+    fi[3] = (uint16_t)frames;
+    if ((rc = post_fi(fi, ext)) != DSP_OK)
+        frame_number = saved;
+    return rc;
 }
 
 int l1_fi_post(const uint16_t fi[11], const uint16_t ext[3])

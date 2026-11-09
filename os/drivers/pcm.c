@@ -40,6 +40,9 @@ static void *fill_ctx;
 static audio_sink_fn sink;
 static void *sink_ctx;
 static volatile bool running, rec_running;
+static volatile bool starting;          /* audio_play: the codec is ours already */
+static volatile bool rec_failed;
+static unsigned rec_skip;               /* frames still to throw away */
 static bool eof, draining, irq_ready;
 static unsigned completed, rec_next;
 static int32_t gain_q15 = 32768;
@@ -68,7 +71,23 @@ void pcm_set_attenuation(int db10)
 
 bool pcm_busy(void)
 {
-    return running || rec_running;
+    return running || rec_running || starting;
+}
+
+bool audio_record_failed(void)
+{
+    return rec_failed;
+}
+
+/* An app going away: nothing it started may call into its freed code. */
+void audio_drop_code(const void *base, size_t size)
+{
+    uintptr_t lo = (uintptr_t)base;
+
+    if (running && (uintptr_t)fill - lo < size)
+        audio_play_stop();
+    if (rec_running && (uintptr_t)sink - lo < size)
+        audio_record_stop();
 }
 
 unsigned audio_peak(void)
@@ -203,7 +222,8 @@ static void rec_irq(void)
     DMA_REG(DMA_REC, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
     if (!rec_running)
         return;
-    if (status & (1u << 12)) {          /* DMA error */
+    if (status & (1u << 12)) {          /* DMA error: wav_pump ends the file */
+        rec_failed = true;
         rec_hw_stop();
         return;
     }
@@ -214,6 +234,10 @@ static void rec_irq(void)
     rec_arm();                          /* keep the VBC drained first */
     bank = rec_bank[done];
     dcache_flush_range(rec_bank[done], sizeof(rec_bank[0]));
+    if (rec_skip) {                     /* the mic path settling */
+        rec_skip = rec_skip > VBC_FRAMES ? rec_skip - VBC_FRAMES : 0;
+        return;
+    }
     for (unsigned i = 0; i < VBC_FRAMES; i++) {
         unsigned m = (unsigned)(bank[i] < 0 ? -bank[i] : bank[i]);
 
@@ -273,6 +297,8 @@ int audio_play(unsigned rate, audio_fill_fn f, void *ctx)
     if (!f || !audio_rate_ok(rate))
         return -1;
     audio_play_stop();
+    /* until running is set, so no other thread closes the codec under the DMA */
+    starting = true;
     audio_power(true);
     audio_set_rate(rate);
     s = arch_irq_save();
@@ -286,6 +312,7 @@ int audio_play(unsigned rate, audio_fill_fn f, void *ctx)
     REG32(0x2010203c) = DMA_RIGHT + 1;
     arm_stereo();
     running = true;
+    starting = false;
     audio_mute(false);
     VBC_CTRL = (VBC_CTRL & ~VBC_CPU_ACCESS) | VBC_PLAY;
     irq_update();
@@ -324,10 +351,14 @@ int audio_record(unsigned rate, int source, audio_sink_fn f, void *ctx)
     sink_ctx = ctx;
     rec_next = 0;
     peak = 0;
+    /* A phone-mic recording starts with 50 ms at full scale, dying away over about
+     * 300 ms (phone, 2026-11-09): a loud click at the start of every file. */
+    rec_skip = rate * 3u / 10u;
     /* Stock 0xa78e4 order: VBC AD enable, then the DMA channel */
     REG32(REC_MAP) = DMA_REC + 1;
     VBC_CTRL = (VBC_CTRL & ~VBC_CPU_ACCESS) | 0x8000u | VBC_REC;
     rec_arm();
+    rec_failed = false;
     rec_running = true;
     irq_update();
     arch_irq_restore(s);
@@ -342,6 +373,7 @@ void audio_record_stop(void)
     if (was)
         rec_hw_stop();
     arch_irq_restore(s);
-    if (was)
+    if (was || rec_failed)              /* a DMA error stopped it: the route is still on */
         audio_record_route_off();
+    rec_failed = false;
 }
