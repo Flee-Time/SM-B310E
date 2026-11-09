@@ -13,8 +13,10 @@
 
 /* How far one attempt got, for the UI and the log (updated live). */
 typedef struct {
-    uint8_t got_assign;     /* IMMEDIATE ASSIGNMENT received (uplink reached the tower) */
-    uint8_t established;     /* LAPDm link up on the SDCCH (UA) */
+    uint16_t cch_blocks;     /* good CCCH blocks read while waiting for the grant */
+    uint16_t imm_seen;       /* IMMEDIATE ASSIGNMENTs seen (any request reference) */
+    uint8_t got_assign;      /* one matched our RA -> dedicated channel (uplink heard) */
+    uint8_t established;      /* LAPDm link up on the SDCCH (UA) */
     uint8_t reached_auth;    /* AUTHENTICATION REQUEST seen */
     uint8_t sim_ok;          /* the SIM returned SRES for it */
     uint16_t dl_blocks;      /* downlink SDCCH blocks received */

@@ -28,8 +28,10 @@ static int ccch_block(uint32_t m)
 }
 
 /* Read CCCH until an IMMEDIATE ASSIGNMENT whose request reference (RA) matches
- * ours arrives, or the budget runs out. 0 + *ch filled, or -1. */
-static int wait_imm_assign(l1_cell_t *c, uint8_t ra, rr_chan_desc_t *ch, uint32_t ms)
+ * ours arrives, or the budget runs out. 0 + *ch filled, or -1. Counts the good
+ * CCCH blocks and IMMEDIATE ASSIGNMENTs seen into prog for diagnostics. */
+static int wait_imm_assign(l1_cell_t *c, uint8_t ra, rr_chan_desc_t *ch, uint32_t ms,
+                           reg_lu_progress_t *prog)
 {
     uint32_t t0 = kernel_ticks();
     int burst = -1;
@@ -59,8 +61,12 @@ static int wait_imm_assign(l1_cell_t *c, uint8_t ra, rr_chan_desc_t *ch, uint32_
             while (l1_api.rx_read(&rx) == 1) {
                 if ((rx.hdr[0] != 7 && rx.hdr[0] != 8) || rx.hdr[1] != 0)
                     continue;
-                if (rr_parse_imm_assign(rx.data, ch) == 0 && ch->ra == ra)
-                    return 0;
+                prog->cch_blocks++;
+                if (rr_parse_imm_assign(rx.data, ch) == 0) {
+                    prog->imm_seen++;
+                    if (ch->ra == ra)
+                        return 0;
+                }
             }
         }
         thread_sleep(2);
@@ -110,8 +116,11 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, uint8_t cal, int sim_s
     if (l1_api.access_post(c->index, cell_slot, cal, ra) != DSP_OK)
         return REG_ERROR;
     /* 2: IMMEDIATE ASSIGNMENT -> the dedicated channel (uplink reached the tower) */
-    if (wait_imm_assign(c, ra, &ch, LU_RACH_MS) != 0)
+    if (wait_imm_assign(c, ra, &ch, LU_RACH_MS, &p) != 0) {
+        if (prog)
+            *prog = p;
         return REG_ERROR;
+    }
     p.got_assign = 1;
     if (prog)
         *prog = p;

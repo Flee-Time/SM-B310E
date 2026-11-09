@@ -287,6 +287,10 @@ static void worker(void *arg)
     reg_ui.phase = P_TX;
     rc = reg_lu_run(&reg, &cell, 0, 0, SIM_SLOT, (uint8_t)(kernel_ticks() & 0x0f),
                     TX_BUDGET_MS, &reg_prog);
+    klog("register: prog cch=%u imm=%u assign=%u est=%u auth=%u sim=%u dl=%u ul=%u",
+         reg_prog.cch_blocks, reg_prog.imm_seen, reg_prog.got_assign,
+         reg_prog.established, reg_prog.reached_auth, reg_prog.sim_ok,
+         reg_prog.dl_blocks, reg_prog.ul_bursts);
     reg_ui.reject_cause = reg.reject_cause;
     reg_ui.result = rc == REG_ACCEPTED ? RES_ACCEPTED :
                     rc == REG_REJECTED ? RES_REJECTED : RES_NO_RESPONSE;
