@@ -255,6 +255,8 @@ int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux);
  * steer the AFC, so the uplink follows the cell's frequency. rxlev: the cell's
  * level (0..110), which the DSP takes the tracked cell's gain from. */
 int l1_cell_track(int cell, uint8_t rxlev);
+extern uint8_t l1_track_mode;           /* command-3 mode word (test) */
+extern uint16_t l1_track_flags;         /* command-3 flags word (test) */
 
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {

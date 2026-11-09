@@ -605,6 +605,8 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                     continue;
                 if (rx.hdr[1] != 0) {
                     st->dl_bad++;
+                    st->dl_bad_fn = ((rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16)
+                                     + c->fn_offset) % FN_MOD % 51;
                     continue;
                 }
                 st->dl_blocks++;

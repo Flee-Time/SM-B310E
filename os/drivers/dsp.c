@@ -1425,10 +1425,13 @@ int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux)
  * the error only feeds a per-cell receive offset (0xebe5 + cell) and the uplink
  * stays at the crystal's frequency. The Radio lab's {3, 0, 0, 38, 0x0101} read
  * 4 of 4 blocks with 8x better BEP (docs/gsm-plan.md). */
+uint8_t l1_track_mode = 2;              /* dedicated-mode command 3: reaches auth (vs idle 0) */
+uint16_t l1_track_flags = 0x0101u;      /* command-3 word 4 (flags): test knob */
+
 int l1_cell_track(int cell, uint8_t rxlev)
 {
-    const uint16_t cmd[5] = { 3, (uint16_t)(cell & 0x3f), 0, (uint16_t)(rxlev & 0x7f),
-                              0x0101u };
+    const uint16_t cmd[5] = { 3, (uint16_t)(cell & 0x3f), l1_track_mode,
+                              (uint16_t)(rxlev & 0x7f), l1_track_flags };
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;

@@ -228,13 +228,13 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     p.ch_tsc = ch.tsc;
     if (prog)
         *prog = p;
-    /* The cell is already tracked (the camp before the RACH); the dedicated
-     * channel rides the same carrier, so no second command 3 here. The earlier
-     * dm_est built a malformed command 3 that only disturbed the tracking.
-     * 4: SABM carrying LOCATION UPDATING REQUEST, kept for retransmission. */
+    /* Re-assert cell tracking (command 3) for the dedicated phase: the RACH keyed
+     * the PA, which disturbs the AFC, and a drifting AFC fails the SDCCH CRC. The
+     * camp before the RACH is not enough once we have transmitted. */
+    l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
     /* apply the grant's timing advance so the uplink lands in the BTS window */
     l1_tx_ta_set(ch.ta);
-    klog("lu: TA set to %u", ch.ta);
+    klog("lu: retrack + TA %u", ch.ta);
     if (reg_begin(r, ul) < 0)
         return REG_ERROR;
     for (int i = 0; i < LAPDM_BLOCK; i++)
@@ -267,8 +267,8 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                  (unsigned long)st.dl_blocks, (unsigned long)st.dl_bad,
                  (unsigned long)st.dl_fn, st.last_dl[0], st.last_dl[1],
                  (unsigned long)dsp_info.fi_moves);
-            klog("lu:   dm#%d seen=%lu hdr0=%u", dm_dbg,
-                 (unsigned long)st.dl_seen, st.dl_hdr0);
+            klog("lu:   dm#%d seen=%lu hdr0=%u badfn=%lu", dm_dbg,
+                 (unsigned long)st.dl_seen, st.dl_hdr0, (unsigned long)st.dl_bad_fn);
             dm_dbg++;
         }
         if (st.has_dl) {

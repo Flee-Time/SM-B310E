@@ -526,6 +526,17 @@ stop:
  * on the live network, owner-cleared; watch the log for the result. */
 void reg_trigger(void);
 int reg_is_busy(void);
+static void c_trackmode(sess_t *s, int argc, char **argv)
+{
+    uint32_t m, f;
+
+    if (argc > 1 && parse_num(argv[1], &m))
+        l1_track_mode = (uint8_t)m;
+    if (argc > 2 && parse_num(argv[2], &f))
+        l1_track_flags = (uint16_t)f;
+    say(s, "track mode %u, flags 0x%04x\n", l1_track_mode, l1_track_flags);
+}
+
 static void c_reg(sess_t *s, int argc, char **argv)
 {
     (void)argc; (void)argv;
@@ -1546,6 +1557,7 @@ static const cmd_t cmds[] = {
     { "info", "", "build, uptime, CPU, battery, card, network", c_info },
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
+    { "trackmode", "[MODE] [FLAGS]", "command-3 mode/flags for dedicated tracking", c_trackmode },
     { "reg", "", "run a registration attempt (TX, owner-cleared)", c_reg },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
     { "rxcell", "BAND ARFCN [GAIN] [CCH_S] [TRACK]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
