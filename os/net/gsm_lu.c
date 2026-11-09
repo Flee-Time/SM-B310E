@@ -17,8 +17,10 @@
 #include "os/sim.h"
 #include "os/kernel.h"
 
-#define LU_RACH_ATTEMPTS 5              /* RACH retransmissions (a real MS retries) */
-#define LU_RACH_WAIT_MS 600u            /* wait for the grant after each RACH */
+#define LU_RACH_ATTEMPTS 4              /* RACH retransmissions (a real MS retries) */
+#define LU_RACH_WAIT_MS 2000u           /* wait for the grant after each RACH - long
+                                         * enough for the RX to settle after the TX
+                                         * burst and read the CCCH (a short wait gets 0) */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
 
 /* CCCH FN mod 51 of the non-combined config (as l1cell.c cch_start). */

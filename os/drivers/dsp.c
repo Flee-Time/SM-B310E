@@ -893,7 +893,7 @@ int l1_tx_min_power_on(void) { return tx_power_mode == L1_TX_MIN; }
 void l1_tx_power_set(int mode)
 {
     tx_power_mode = mode < L1_TX_OFF ? L1_TX_OFF :
-                    mode > L1_TX_NORMAL ? L1_TX_NORMAL : mode;
+                    mode > L1_TX_MAX ? L1_TX_MAX : mode;
 }
 int l1_tx_power_mode(void) { return tx_power_mode; }
 
@@ -959,16 +959,26 @@ static int send_parameters(void)
             int band = cal[i].type - 4;
             const uint16_t *src = (const uint16_t *)buf;
 
-            for (int k = 0; k < APC_N; k++)
-                sent_apc[band][k] = tx_power_mode == L1_TX_MIN ? APC_MIN : src[APC_FIRST + k];
-            if (tx_power_mode == L1_TX_MIN) {
+            if (tx_power_mode == L1_TX_MIN || tx_power_mode == L1_TX_MAX) {
+                uint16_t v = APC_MIN;           /* MIN: the calibrated minimum */
+
+                if (tx_power_mode == L1_TX_MAX)
+                    for (int k = APC_FIRST; k <= APC_LAST; k++)
+                        if (src[k] > v)         /* MAX: the calibrated maximum setpoint */
+                            v = src[k];
                 for (int k = 0; k < 396; k++)
                     clamped[k] = src[k];
                 for (int k = APC_FIRST; k <= APC_LAST; k++)
-                    clamped[k] = APC_MIN;
-                for (int k = APC_COMP_FIRST; k <= APC_COMP_LAST; k++)
-                    clamped[k] = 0;
+                    clamped[k] = v;             /* all power-control levels -> v */
+                if (tx_power_mode == L1_TX_MIN)
+                    for (int k = APC_COMP_FIRST; k <= APC_COMP_LAST; k++)
+                        clamped[k] = 0;         /* zero the comp deltas at the floor */
                 buf = (const uint8_t *)clamped;
+                for (int k = 0; k < APC_N; k++)
+                    sent_apc[band][k] = v;
+            } else {
+                for (int k = 0; k < APC_N; k++)
+                    sent_apc[band][k] = src[APC_FIRST + k];
             }
         }
         rc = send_block(cal[i].type, buf, cal[i].bytes);

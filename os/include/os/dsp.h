@@ -211,8 +211,9 @@ int l1_cmd_post(const uint16_t cmd[5]);
 #define L1_APC_N     18
 /* TX power interlock modes: OFF refuses all transmit (the safe default), MIN
  * clamps the APC tables to the calibrated minimum, NORMAL sends them as
- * calibrated (a real, owner-cleared registration). Set before l1_start(). */
-enum { L1_TX_OFF, L1_TX_MIN, L1_TX_NORMAL };
+ * calibrated, MAX pins every setpoint to the calibrated maximum (full power, for
+ * a weak-link registration). Set before l1_start(). */
+enum { L1_TX_OFF, L1_TX_MIN, L1_TX_NORMAL, L1_TX_MAX };
 void l1_tx_min_power(int on);           /* compat: on -> MIN, off -> OFF */
 int l1_tx_min_power_on(void);           /* is the MIN clamp armed? */
 void l1_tx_power_set(int mode);         /* L1_TX_* */

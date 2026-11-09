@@ -254,7 +254,8 @@ static void worker(void *arg)
         reg_ui.result = RES_RADIO_FAIL;
         goto done;
     }
-    l1_tx_power_set(L1_TX_NORMAL);       /* normal (calibrated) power before l1_start */
+    l1_tx_power_set(L1_TX_MAX);          /* full (calibrated max) power before l1_start -
+                                          * a weak RACH was not being granted */
     if (l1_start() != DSP_OK || l1_run() != DSP_OK) {
         reg_ui.result = RES_RADIO_FAIL;
         goto done;
@@ -347,7 +348,7 @@ static const char *phase_text(void)
     case P_DSP:  return "Starting radio";
     case P_SCAN: return "Scanning 900";
     case P_FIND: return "Finding home cell";
-    case P_TX:   return "Attempt (normal power)";
+    case P_TX:   return "Attempt (full power)";
     default:     return "Working";
     }
 }
@@ -469,7 +470,7 @@ static void draw(screen_t *s)
             gfx_text_centered(y, line, C_TEXT, FONT_SMALL, 1);
         }
     }
-    gfx_text_centered(UI_BOTTOM - 12, "experimental, normal power", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(UI_BOTTOM - 12, "experimental, full power", C_DIM, FONT_SMALL, 1);
 }
 
 static void confirm_yes(void)
@@ -483,7 +484,7 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT)
         ui_confirm("Register",
-                   "Transmit a NORMAL-power registration to this SIM's home "
+                   "Transmit a FULL-power registration to this SIM's home "
                    "network on the live band?", confirm_yes);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
