@@ -907,6 +907,21 @@ int l1_cal_readback(uint16_t out[APC_BANDS][APC_N])
     return tx_power_mode == L1_TX_MIN ? APC_BANDS : 0;
 }
 
+/* The NV per-band TX-enable bytes (item 3 "class": byte 42 GSM900, 44 DCS1800,
+ * 45 PCS1900, 46 GSM850 - what send_parameters checks before uploading each
+ * band's cal). out[0..3] in that band order; 0, or -1 if the item is missing. */
+int l1_tx_band_caps(uint8_t out[4])
+{
+    const uint8_t *cls = nv_item(NV_CLASS_ID, NV_CLASS_MIN);
+    static const int off[4] = { 42, 44, 45, 46 };
+
+    if (!cls)
+        return -1;
+    for (int i = 0; i < 4; i++)
+        out[i] = cls[off[i]];
+    return 0;
+}
+
 /* The list's types 1, 3..15 (table at FUN_000606ea): type 1 is all of NV item
  * 1. The rest lie end to end in NV item 2 behind its version word, in this
  * order of offset: 3, 4, 12, 5, 13, 6, 14, 7, 15 (8..11 are parts of them). */

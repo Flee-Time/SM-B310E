@@ -217,6 +217,7 @@ void l1_tx_min_power(int on);           /* compat: on -> MIN, off -> OFF */
 int l1_tx_min_power_on(void);           /* is the MIN clamp armed? */
 void l1_tx_power_set(int mode);         /* L1_TX_* */
 int l1_tx_power_mode(void);
+int l1_tx_band_caps(uint8_t out[4]);    /* NV per-band TX enable: 900,1800,1900,850 */
 int l1_cal_readback(uint16_t out[L1_APC_BANDS][L1_APC_N]);
 int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs

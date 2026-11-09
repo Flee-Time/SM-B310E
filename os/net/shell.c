@@ -481,6 +481,22 @@ stop:
     l1_tx_power_set(L1_TX_OFF);          /* restore the safe default */
 }
 
+/* NV per-band TX-enable bytes: whether each band's cal is uploaded to the DSP
+ * (so whether the DSP can key that band at all). */
+static void c_nvband(sess_t *s, int argc, char **argv)
+{
+    static const char *bn[4] = { "GSM900", "DCS1800", "PCS1900", "GSM850" };
+    uint8_t caps[4];
+
+    if (l1_tx_band_caps(caps) != 0) {
+        say(s, "nvband: NV class item (3) not found\n");
+        return;
+    }
+    say(s, "NV per-band TX enable (item 3):\n");
+    for (int i = 0; i < 4; i++)
+        say(s, "  %-8s = 0x%02x (%s)\n", bn[i], caps[i], caps[i] ? "ENABLED" : "disabled");
+}
+
 static void c_info(sess_t *s, int argc, char **argv)
 {
     uint32_t t = kernel_ticks(), idle = kernel_idle_permille(), load = idle < 1000 ? 1000 - idle : 0;
@@ -1385,6 +1401,7 @@ static const cmd_t cmds[] = {
     { "info", "", "build, uptime, CPU, battery, card, network", c_info },
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
+    { "nvband", "", "NV per-band TX enable bytes", c_nvband },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },
