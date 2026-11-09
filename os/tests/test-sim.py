@@ -191,7 +191,7 @@ def run(args, name, slots):
                     titles.append(t)
                     if t == want:
                         return True
-                    if t == 'Tools' and parent == 'Menu':
+                    if t == 'Tools' and parent == 'Menu' and want != 'Power':
                         if search(want, 'Tools', titles):
                             return True
                     if t != parent:

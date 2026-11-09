@@ -155,6 +155,7 @@ typedef struct {
     int usb_default;                /* on the plug: 0 charge only, 1 storage, 2 network */
     int tz_min;                     /* the time zone: minutes from UTC */
     int net_time;                   /* 1: the clock from the network (SNTP) */
+    int dev_mode;                   /* 1: show developer tools (DSP boot, ...) */
 } ui_settings_t;
 
 extern ui_settings_t ui_settings;

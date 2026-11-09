@@ -402,7 +402,7 @@ the only one that carries binary transfers. Three sessions at a time.
 | `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565 (raw port; the helper does these) |
 | `run APP`, `close` | close the app that is open, load and start APP (a path, or a name or file name in `/b310e-os/apps/` or its folders); close it |
 | `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
-| `reboot` | restart to the boot menu |
+| `reboot [soft\|menu\|os\|stock]` | a hard reset; `menu`, `os`, `stock`: with that request to the boot loader; `soft`: `/payloads/b310e-os.bin` again with no reset, which keeps the clock. Plain `reboot` comes back to this OS through the loader |
 | `echo`, `exit` | |
 
 **peek and poke** are allowed without `-f` on: the PSRAM (read and

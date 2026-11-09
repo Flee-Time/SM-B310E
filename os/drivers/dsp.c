@@ -791,6 +791,7 @@ static int send_records(void)
 #define NV_CAL_BYTES    0x1784u
 #define NV_CLASS_ID     3u              /* bytes 42, 44..46: types 4..7 wanted */
 #define NV_CLASS_MIN    47u
+#define NV_IMEI_ID      5u
 
 static const uint8_t *nv_item(uint32_t id, uint32_t min_bytes)
 {
@@ -806,6 +807,36 @@ static const uint8_t *nv_item(uint32_t id, uint32_t min_bytes)
         p = (p + 4 + len + 3) & ~3u;
     }
     return NULL;
+}
+
+/* The phone's own IMEI, from its fixed NV: item 5, 8 bytes, the nibble 0xA and
+ * then 15 digits, low nibble first. Read only. Nothing is logged: the caller
+ * shows it. False unless all of it is digits and the check digit is right. */
+bool nv_imei(char out[16])
+{
+    const uint8_t *b = nv_item(NV_IMEI_ID, 8);
+    uint32_t sum = 0;
+
+    out[0] = 0;
+    if (!b || (b[0] & 0xf) != 0xa)
+        return false;
+    for (int i = 0; i < 15; i++) {
+        uint32_t d = i & 1 ? b[(i + 1) / 2] & 0xf : b[i / 2] >> 4;
+
+        if (d > 9)
+            return false;
+        out[i] = (char)('0' + d);
+        /* Luhn: every second digit from the right, the check digit not doubled */
+        if (i & 1)
+            d = d * 2 > 9 ? d * 2 - 9 : d * 2;
+        sum += d;
+    }
+    if (sum % 10) {
+        out[0] = 0;
+        return false;
+    }
+    out[15] = 0;
+    return true;
 }
 
 /* FUN_000606ea: a block to +0x6f6, then command 0 with the type in word 1. */
@@ -1030,7 +1061,10 @@ int l1_sch_post(uint16_t index, uint8_t gain, int cell)
  * bits 10:8 = the timeslot, word 4 bits 11:8 = the TSC (the CBCH tables,
  * FUN_00050f6a, fill them from a channel description's TN and TSC [L]);
  * word 6 = the serving index over 0xfc00; words 7-9 no monitor channel;
- * word 10 = cell << 10 | 1 << 8 (FUN_0006188a) | the card bit (card 0). */
+ * word 10 = cell << 10 | 1 << 8 (FUN_0006188a) | the card bit (card 0).
+ * Word 6's gain: the stock has 0x3f and takes the gain from command 3. No
+ * cell is tracked here, so it is the stock's starting setting, 25: 0x3f also
+ * decodes a strong cell, with a worse BEP on the phone. */
 int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
 {
     uint16_t fi[11], ext[3];
@@ -1039,7 +1073,7 @@ int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
     fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
     fi[3] = (uint16_t)((tn & 7) << 8);
     fi[4] = (uint16_t)((tsc & 7) << 8);
-    fi[6] = (uint16_t)(0xfc00u | (index & 0x3ffu));
+    fi[6] = (uint16_t)(25u << 10 | (index & 0x3ffu));
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     return post_fi(fi, ext);
 }
@@ -1084,6 +1118,10 @@ const l1_api_t l1_api = {
     .burst_post = l1_burst_post, .next_fn = l1_next_fn, .rx_read = l1_rx_read,
     .fi_post = l1_fi_post, .share_r16 = l1_share_r16, .share_w16 = l1_share_w16,
     .cmd_post = l1_cmd_post, .info = &dsp_info, .probe = &dsp_probe_info,
+    .si_parse = si_parse, .cell_sync = l1_cell_sync, .cell_read = l1_cell_read,
+    .cell_idle = l1_cell_idle, .rxlev_measure = l1_rxlev_measure, .cell_c1 = l1_cell_c1,
+    .cell_select = l1_cell_select, .cell_stay = l1_cell_stay,
+    .cch_classify = l1_cch_classify, .cch_read = l1_cch_read,
 };
 
 /* FUN_0005f692 / FUN_0005f674: "in" is the slot written last; the bytes from

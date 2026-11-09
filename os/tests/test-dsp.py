@@ -101,10 +101,13 @@ def run(args, name, nor):
     probe = symbol(args.elf, 'dsp_probe_info')
     own = symbol(args.elf, 'dsp_selftest_info')
     card = out / 'card.img'
+    settings = out / 'settings.txt'                 # DSP boot shows only in developer mode
+    settings.write_text('dev_mode=1\n', newline='\n')
     subprocess.run([sys.executable, str(REPO / 'ports/rockbox/tests/make-sd-image.py'),
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
                     '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
+                    '--add', f'b310e-os/settings.txt={settings}',
                     '--output', str(card)], check=True, capture_output=True)
     trace = out / 'qemu.log'
     qmp_port, qtest_port = free_port(), free_port()

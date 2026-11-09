@@ -1,16 +1,25 @@
-/* B310E OS — Tools: torch, SIM cards, USB (storage or network), DSP boot,
- * radio status.
+/* B310E OS — Tools: torch, SIM cards, IMEI, USB (storage or network), DSP boot,
+ * radio status. DSP boot is a developer check: it shows only when
+ * Settings -> Developer -> Developer mode is on.
  * (Calculator, Notes, Alarm and the rest are apps since 2026-11-07; the
  * vibrator is Settings -> Sound & touch's tactile feedback.)
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/drivers.h"
+#include "os/dsp.h"
 #include "os/kernel.h"
 #include "os/lib.h"
 #include "os/ui.h"
 #include "os/usb.h"
 
-enum { T_TORCH, T_SIM, T_USB, T_DSP, T_RADIO, T_SLEEP, T_COUNT };
+/* DSP boot (T_DSP) shows only in developer mode: tool_at() skips its slot when
+ * it is off, so the other entries keep their order. */
+enum { T_TORCH, T_SIM, T_IMEI, T_USB, T_DSP, T_RADIO, T_SLEEP, T_COUNT };
+
+static int tool_at(int visible)
+{
+    return !ui_settings.dev_mode && visible >= T_DSP ? visible + 1 : visible;
+}
 
 screen_t *app_dspboot(void);        /* apps/dspboot.c */
 screen_t *app_radio_status(void);   /* apps/gsmstatus.c */
@@ -18,14 +27,24 @@ void app_sleep_test(void);          /* apps/sleeptest.c */
 
 static list_t list;
 
+char tools_imei_shown[16];          /* on the screen only (QEMU test: test-imei.py) */
+
+static void show_imei(void)
+{
+    ui_message("IMEI", nv_imei(tools_imei_shown) ? tools_imei_shown : "No valid IMEI in NOR.");
+}
+
 static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 {
-    switch (i) {
+    switch (tool_at(i)) {
     case T_TORCH:
         snprintf(text, (size_t)tn, "Torch");
         break;
     case T_SIM:
         snprintf(text, (size_t)tn, "SIM cards");
+        break;
+    case T_IMEI:
+        snprintf(text, (size_t)tn, "IMEI");
         break;
     case T_USB:
         snprintf(text, (size_t)tn, "USB");
@@ -45,15 +64,15 @@ static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 static const icon_t *tool_icon(void *ctx, int i)
 {
     static const icon_t *const icons[] = {
-        &icon_torch, &icon_sim, &icon_usb, &icon_cpu, &icon_chart, &icon_power,
+        &icon_torch, &icon_sim, &icon_sim, &icon_usb, &icon_cpu, &icon_chart, &icon_power,
     };
 
-    return icons[i];
+    return icons[tool_at(i)];
 }
 
 static int tool_toggle(void *ctx, int i)
 {
-    return i == T_TORCH ? torch_get() : -1;
+    return tool_at(i) == T_TORCH ? torch_get() : -1;
 }
 
 static void draw(screen_t *s)
@@ -68,18 +87,28 @@ static void key(screen_t *s, const key_event_t *ev)
     if (list_key(&list, ev))
         return;
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT) {
-        if (list.sel == T_TORCH) {
+        switch (tool_at(list.sel)) {
+        case T_TORCH:
             torch_set(!torch_get());
-        } else if (list.sel == T_SIM) {
+            break;
+        case T_SIM:
             ui_push(app_sim());
-        } else if (list.sel == T_USB) {
+            break;
+        case T_IMEI:
+            show_imei();
+            break;
+        case T_USB:
             ui_push(app_usb_menu());
-        } else if (list.sel == T_DSP) {
+            break;
+        case T_DSP:
             ui_push(app_dspboot());
-        } else if (list.sel == T_RADIO) {
+            break;
+        case T_RADIO:
             ui_push(app_radio_status());
-        } else if (list.sel == T_SLEEP) {
+            break;
+        case T_SLEEP:
             app_sleep_test();
+            break;
         }
     } else if (ev->code == KEY_RSOFT) {
         ui_pop();
@@ -93,7 +122,9 @@ static screen_t screen = {
 
 screen_t *app_tools(void)
 {
-    list.count = T_COUNT;
+    /* opened anew: from the top (back from a screen it opened, it stays) */
+    list.sel = list.top = 0;
+    list.count = ui_settings.dev_mode ? T_COUNT : T_COUNT - 1;    /* DSP boot: dev only */
     list.item = item;
     list.icon = tool_icon;
     list.toggle = tool_toggle;

@@ -35,6 +35,7 @@ ui_settings_t ui_settings = {
     VOL_DEFAULTS,
     1, 0,
     0, 1,                            /* UTC until set; the clock from the network */
+    0,                               /* developer mode off */
 };
 
 static screen_t *stack[MAX_DEPTH];
@@ -94,6 +95,7 @@ static const struct {
     { "usb_default", &ui_settings.usb_default, 0, 2 },
     { "time_zone", &ui_settings.tz_min, -720, 840 },
     { "net_time", &ui_settings.net_time, 0, 1 },
+    { "dev_mode", &ui_settings.dev_mode, 0, 1 },
 };
 
 static void settings_load(void)

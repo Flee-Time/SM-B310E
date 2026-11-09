@@ -49,11 +49,7 @@ screen_t *app_radio_status(void);
 #define MIN_FRAMES      60              /* of ~86 in 400 ms at 4.615 ms */
 
 #define SYNC_CELLS      3               /* the strongest 900 channels tried */
-#define SYNC_WINDOW     26              /* SEARCH_NUMBER_BEFORECAMPED */
-#define SYNC_SCH        51              /* SCH reads after it: one multiframe */
 #define SYNC_BUDGET_MS  1500u
-#define SYNC_KEEP       24              /* raw blocks kept for the report */
-#define FN_MOD          2715648u        /* 26 x 51 x 2048 */
 #define BAND900_END     174u            /* arfcn indexes 0..173 are GSM 900 */
 
 enum { R_IDLE, R_SIM, R_DSP, R_L1, R_CLOCK, R_SCAN, R_SYNC, R_BCCH, R_SAVE, R_DONE };
@@ -94,7 +90,7 @@ typedef struct {
     uint32_t sync_index[SYNC_CELLS];    /* arfcn index, 0x3ff none */
     uint32_t sync_sch[SYNC_CELLS];      /* good SCH blocks (type 1, bfi 0) */
     uint32_t sync_bsic[SYNC_CELLS];     /* from the first good SCH, 0xff none */
-    uint32_t sync_fn[SYNC_CELLS];       /* its frame number */
+    uint32_t sync_fn[SYNC_CELLS];       /* cell FN = our frame number + this */
     uint32_t sync_local[SYNC_CELLS];    /* our frame count of its burst */
     uint32_t sync_back[SYNC_CELLS];     /* frames taken off the reported count */
     uint32_t sync_exact[SYNC_CELLS];    /* 1: header +0x08 was 0, no correction */
@@ -106,7 +102,7 @@ typedef struct {
     uint32_t bcch_good[4];              /* type 7/8, bfi 0, by variant (bcch_tag/delta) */
     uint32_t bcch_bad[4];               /* bfi 1 */
     uint32_t bcch_rx_types;             /* bit n: a block of type n came */
-    uint32_t si_seen;                   /* bit n: SI message type 0x18 + n */
+    uint32_t si_seen;                   /* L1_SI*, os/l1cell.h */
     uint32_t mcc, mnc, mnc_digits, lac, cell_id;    /* from SI 3 / SI 4; 0 none */
     uint32_t bcch_msgs;                 /* DSP messages during the step */
     uint32_t bcch_consumed;             /* frames the DSP took in it */
@@ -353,108 +349,14 @@ static void scan(void)
 
 /* ---- 5. sync ------------------------------------------------------------- */
 
-/* The first try at the FCCH/SCH stage, receive only. For each of the
- * strongest 900 channels: one FCCH search (type 9) over 26 frames, then an
- * SCH read (type 10) in each of the next 51 frames, so one of them falls on
- * the cell's SCH whatever its timing. Every block that comes back is counted
- * and the first few kept raw: what the DSP returns after a type 9 is not
- * known from the stock binary (docs/gsm-plan.md). */
-static struct {
-    uint8_t cell;
-    l1_rx_t rx;
-} kept[SYNC_KEEP];
-static uint32_t kept_n;
-
-/* GSM 05.02 SCH information bits, the order OsmocomBB decodes them in. */
-static void sch_decode(const uint8_t *d, uint32_t *bsic, uint32_t *fn)
-{
-    uint32_t t1 = (uint32_t)(d[0] & 3) << 9 | (uint32_t)d[1] << 1 | d[2] >> 7;
-    uint32_t t2 = (d[2] >> 2) & 0x1f;
-    uint32_t t3 = ((uint32_t)(d[2] & 3) << 1 | (d[3] & 1)) * 10 + 1;
-
-    *bsic = d[0] >> 2;
-    *fn = 51 * ((t3 + 26 - t2) % 26) + t3 + 51 * 26 * t1;
-}
-
-static void take_rx(int k)
-{
-    l1_rx_t rx;
-
-    while (l1_rx_read(&rx) == 1) {
-        radio_status.sync_rx++;
-        if (rx.hdr[0] < 32)
-            radio_status.sync_rx_types |= 1u << rx.hdr[0];
-        if (kept_n < SYNC_KEEP) {
-            kept[kept_n].cell = (uint8_t)k;
-            kept[kept_n++].rx = rx;
-        }
-        /* Header +0x08 (hdr[4]) hi - lo: how far before the reported frame
-         * the burst was (the stock's FUN_000461e4 takes hi - lo). On the phone
-         * a block with +0x08 = 0 gave the exact offset, and one with 0x1a07
-         * two frames earlier needed hi - lo - 1, so that is used, and a block
-         * with +0x08 = 0 replaces a corrected one. */
-        if (rx.hdr[0] == 1 && rx.hdr[1] == 0) {
-            bool exact = rx.hdr[4] == 0;
-            int back = exact ? 0 : (int)(rx.hdr[4] >> 8) - (int)(rx.hdr[4] & 0xff) - 1;
-            uint32_t bsic, fn;
-
-            if (back < 0)
-                back = 0;
-            if (!radio_status.sync_sch[k]++ || (exact && !radio_status.sync_exact[k])) {
-                uint32_t local = rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16;
-
-                sch_decode(rx.data, &bsic, &fn);
-                radio_status.sync_bsic[k] = bsic;
-                radio_status.sync_fn[k] = fn;
-                radio_status.sync_local[k] = (local + FN_MOD - (uint32_t)back) % FN_MOD;
-                radio_status.sync_back[k] = (uint32_t)back;
-                radio_status.sync_exact[k] = exact;
-            }
-        }
-    }
-}
-
-static void sync_cell(int k, uint16_t index)
-{
-    uint32_t t0 = kernel_ticks(), end = 0;
-    int sch = 0;
-
-    while (queued() > 2 && kernel_ticks() - t0 < 200) {    /* the ring nearly drained */
-        thread_sleep(2);
-        take_rx(k);
-    }
-    if (l1_fcch_post(index, chan[index].gain, SYNC_WINDOW, k) != DSP_OK)
-        return;
-    posted++;
-    radio_status.sync_tried++;
-    while (kernel_ticks() - t0 < SYNC_BUDGET_MS) {
-        bool batch = false;
-
-        while (sch < SYNC_SCH && queued() < QUEUE_AHEAD) {
-            if (l1_sch_post(index, chan[index].gain, k) != DSP_OK)
-                break;
-            posted++;
-            batch = true;
-            if (++sch == SYNC_SCH)
-                end = posted;
-        }
-        if (batch)
-            l1_ask_more(3);
-        if (sch == SYNC_SCH)
-            feed_idle();
-        l1_poll();
-        take_rx(k);
-        if (end && consumed() >= end + 10)
-            break;
-        thread_sleep(2);
-    }
-}
+/* The strongest 900 channels, each with one FCCH search (drivers/l1cell.c). */
+static l1_cell_t cells[SYNC_CELLS];
+static int selected_n;
 
 static void sync(void)
 {
     uint32_t msgs = dsp_probe_info.msgs;
 
-    kept_n = 0;
     for (int k = 0; k < SYNC_CELLS; k++) {
         uint32_t best = 0, bi = L1_NO_INDEX;
 
@@ -467,8 +369,14 @@ static void sync(void)
                 best = chan[i].best, bi = i;
         }
         radio_status.sync_index[k] = bi;
-        if (bi != L1_NO_INDEX)
-            sync_cell(k, (uint16_t)bi);
+        if (bi == L1_NO_INDEX)
+            continue;
+        radio_status.sync_tried++;
+        if (l1_cell_sync(&cells[k], (uint16_t)bi, chan[bi].gain, k, SYNC_BUDGET_MS) == 1) {
+            radio_status.sync_sch[k] = 1;
+            radio_status.sync_bsic[k] = cells[k].bsic;
+            radio_status.sync_fn[k] = cells[k].fn_offset;
+        }
     }
     radio_status.sync_msgs = dsp_probe_info.msgs - msgs;
     radio_status.sync_msg_last = dsp_probe_info.msg_last;
@@ -476,187 +384,45 @@ static void sync(void)
 
 /* ---- 6. broadcast channel ------------------------------------------------- */
 
-/* On the first synced cell: the 4 BCCH bursts at cell FN mod 51 = 2..5 of
- * BCCH_MF multiframes, idle frames between, tag 7 (it came back as a
- * BCCH/CCCH block). Timeslot 0 and the BCC as the training sequence, as the
- * stock builds them (FUN_000504f8). The tag-7 multiframes cycle the frame
- * offset by 0, -1 and +1 (the SCH correction may be a frame out); the last
- * BCCH_MF8 use tag 8 at offset 0. Blocks are counted per variant.
- * System Information 3 and 4 carry the location area (MCC, MNC, LAC), SI 3
- * the cell identity too (TS 44.018). */
-#define BCCH_MF         9
-#define BCCH_MF8        3
-#define BCCH_BUDGET_MS  4000u
-
-static int bcch_tag(int v)
-{
-    return v == 3 ? 8 : 7;
-}
-
-static uint32_t bcch_delta(int v)
-{
-    return v == 1 ? FN_MOD - 1 : v == 2 ? 1 : 0;
-}
-
-static struct {
-    uint32_t fn0;                       /* our count at burst 0 */
-    uint8_t variant;                    /* tag 7 at 0 / -1 / +1, 3 tag 8 at 0 */
-} bcch_plan[BCCH_MF];
-static struct {
-    int8_t variant;                     /* -1: matched no posted block */
-    l1_rx_t rx;
-} si_kept[12];
-static uint32_t si_kept_n;
-
-static void lai_decode(const uint8_t *p)
-{
-    uint32_t mnc3 = p[1] >> 4;
-
-    radio_status.mcc = (p[0] & 0xf) * 100u + (p[0] >> 4) * 10u + (p[1] & 0xf);
-    radio_status.mnc = (p[2] & 0xf) * 10u + (p[2] >> 4);
-    radio_status.mnc_digits = 2;
-    if (mnc3 != 0xf) {
-        radio_status.mnc = radio_status.mnc * 10u + mnc3;
-        radio_status.mnc_digits = 3;
-    }
-    radio_status.lac = (uint32_t)p[3] << 8 | p[4];
-}
-
-/* d[0] the L2 pseudo length, d[1] 0x06 (RR), d[2] the message type */
-static void si_decode(const uint8_t *d)
-{
-    if (d[1] != 0x06 || d[2] < 0x18 || d[2] > 0x1f)
-        return;
-    radio_status.si_seen |= 1u << (d[2] - 0x18);
-    if (d[2] == 0x1b) {                 /* SI 3: cell identity, then the LAI */
-        radio_status.cell_id = (uint32_t)d[3] << 8 | d[4];
-        lai_decode(d + 5);
-    } else if (d[2] == 0x1c && !radio_status.mcc) {     /* SI 4: the LAI first */
-        lai_decode(d + 3);
-    }
-}
-
-static void take_bcch(void)
-{
-    l1_rx_t rx;
-
-    while (l1_rx_read(&rx) == 1) {
-        uint32_t fn = rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16;
-        int v = -1;
-
-        radio_status.bcch_rx++;
-        if (rx.hdr[0] < 32)
-            radio_status.bcch_rx_types |= 1u << rx.hdr[0];
-        for (int i = 0; i < BCCH_MF; i++)
-            if (bcch_plan[i].fn0 != ~0u && (fn + FN_MOD - bcch_plan[i].fn0) % FN_MOD <= 4)
-                v = bcch_plan[i].variant;
-        if (si_kept_n < 12) {
-            si_kept[si_kept_n].variant = (int8_t)v;
-            si_kept[si_kept_n++].rx = rx;
-        }
-        if ((rx.hdr[0] != 7 && rx.hdr[0] != 8) || v < 0)
-            continue;
-        if (rx.hdr[1] == 0) {
-            radio_status.bcch_good[v]++;
-            si_decode(rx.data);
-        } else {
-            radio_status.bcch_bad[v]++;
-        }
-    }
-}
+/* Selection among the channels that gave an SCH (drivers/l1cell.c). */
+static int chosen = -1;
 
 static void bcch(void)
 {
-    int k = -1;
-    uint32_t off, t0 = kernel_ticks(), msgs = dsp_probe_info.msgs, c0 = consumed(), last;
-    int mf = 0, burst = -1;
-    uint16_t index;
-    int bcc;
+    uint32_t t0 = kernel_ticks(), msgs = dsp_probe_info.msgs;
+    uint16_t index[SYNC_CELLS];
+    uint8_t from[SYNC_CELLS];
+    int n = 0;
 
-    si_kept_n = 0;
-    for (int i = 0; i < BCCH_MF; i++)
-        bcch_plan[i].fn0 = ~0u;
-    last = c0;
-    for (int i = 0; i < SYNC_CELLS && k < 0; i++)
-        if (radio_status.sync_sch[i])
-            k = i;
-    if (k < 0)
+    chosen = -1;
+    for (int i = 0; i < SYNC_CELLS; i++)
+        if (radio_status.sync_sch[i]) {
+            from[n] = (uint8_t)i;
+            index[n++] = (uint16_t)radio_status.sync_index[i];
+        }
+    selected_n = n;
+    if (!n)
         return;
-    radio_status.bcch_cell = (uint32_t)k;
-    index = (uint16_t)radio_status.sync_index[k];
-    /* The other cells were searched after this one, and the DSP may keep the
-     * slot timing and frequency of the last search: sync this cell again. The
-     * first sync's result stays if this one finds no SCH. */
-    {
-        uint32_t sch = radio_status.sync_sch[k], fn = radio_status.sync_fn[k];
-        uint32_t local = radio_status.sync_local[k], back = radio_status.sync_back[k];
-        uint32_t exact = radio_status.sync_exact[k];
+    chosen = l1_cell_select(index, n, 0, 0, cells);
+    /* None suitable: still the first that read, for its parameters. l1_rxlev_measure
+     * reads 0 on the phone for now, so no cell comes out suitable (docs/gsm-plan.md). */
+    for (int i = 0; i < n && chosen < 0; i++)
+        if (cells[i].si_seen)
+            chosen = i;
+    radio_status.bcch_cell = from[chosen >= 0 ? chosen : 0];
+    if (chosen >= 0) {
+        const l1_cell_t *c = &cells[chosen];
 
-        radio_status.sync_sch[k] = 0;
-        radio_status.sync_exact[k] = 0;
-        sync_cell(k, index);
-        radio_status.bcch_resync = radio_status.sync_sch[k];
-        if (!radio_status.sync_sch[k]) {
-            radio_status.sync_fn[k] = fn;
-            radio_status.sync_local[k] = local;
-            radio_status.sync_back[k] = back;
-            radio_status.sync_exact[k] = exact;
-        }
-        radio_status.sync_sch[k] += sch;
+        radio_status.bcch_resync = 1;
+        radio_status.bcch_good[0] = c->good;
+        radio_status.bcch_bad[0] = c->bad;
+        radio_status.si_seen = c->si_seen;
+        radio_status.mcc = c->mcc;
+        radio_status.mnc = c->mnc;
+        radio_status.mnc_digits = c->mnc_digits;
+        radio_status.lac = c->lac;
+        radio_status.cell_id = c->ci;
     }
-    t0 = kernel_ticks();
-    c0 = last = consumed();
-    bcc = (int)(radio_status.sync_bsic[k] & 7);
-    off = (radio_status.sync_fn[k] + FN_MOD - radio_status.sync_local[k] % FN_MOD) % FN_MOD;
-
-    while (kernel_ticks() - t0 < BCCH_BUDGET_MS) {
-        bool batch = false;
-
-        while (queued() < QUEUE_AHEAD && (mf < BCCH_MF || burst >= 0)) {
-            uint32_t local = l1_next_fn();
-            int nv = mf >= BCCH_MF - BCCH_MF8 ? 3 : mf % 3;
-            uint32_t m = (local + off + bcch_delta(nv)) % FN_MOD % 51;
-            int rc;
-
-            if (burst < 0 && m == 2 && mf < BCCH_MF) {
-                burst = 0;
-                bcch_plan[mf].fn0 = local;
-                bcch_plan[mf].variant = (uint8_t)nv;
-            }
-            if (burst >= 0) {
-                int v = bcch_plan[mf].variant;
-
-                rc = l1_burst_post(index, bcch_tag(v), burst, 0, bcc, k);
-                if (rc == DSP_OK && ++burst == 4) {
-                    burst = -1;
-                    mf++;
-                    radio_status.bcch_blocks++;
-                }
-            } else {
-                rc = l1_idle_post(1);
-            }
-            if (rc != DSP_OK)
-                break;
-            posted++;
-            batch = true;
-        }
-        if (batch)
-            l1_ask_more(3);
-        if (mf >= BCCH_MF && burst < 0)
-            feed_idle();
-        l1_poll();
-        take_bcch();
-        if (consumed() != last) {
-            last = consumed();
-            radio_status.bcch_last_move_ms = kernel_ticks() - t0;
-        }
-        if (mf >= BCCH_MF && burst < 0 && queued() <= QUEUE_AHEAD &&
-            (l1_next_fn() + FN_MOD - bcch_plan[BCCH_MF - 1].fn0) % FN_MOD > 30)
-            break;
-        thread_sleep(2);
-    }
-    take_bcch();
-    radio_status.bcch_consumed = consumed() - c0;
     radio_status.bcch_msgs = dsp_probe_info.msgs - msgs;
     radio_status.bcch_ms = kernel_ticks() - t0;
 }
@@ -696,9 +462,9 @@ static void save_report(void)
          (unsigned long)radio_status.pm_stray, (unsigned long)radio_status.channels_heard,
          radio_status.stalled ? ", STALLED" : "");
     LINE("elapsed %lu ms\n", (unsigned long)radio_status.elapsed_ms);
-    LINE("sync: %lu cells tried, %lu blocks, types seen %08lx, DSP messages %lu\n",
-         (unsigned long)radio_status.sync_tried, (unsigned long)radio_status.sync_rx,
-         (unsigned long)radio_status.sync_rx_types, (unsigned long)radio_status.sync_msgs);
+    LINE("sync: %lu cells tried, DSP messages %lu, the last %08lx\n",
+         (unsigned long)radio_status.sync_tried, (unsigned long)radio_status.sync_msgs,
+         (unsigned long)radio_status.sync_msg_last);
     for (int k = 0; k < SYNC_CELLS; k++) {
         int arfcn;
         const char *band;
@@ -707,71 +473,46 @@ static void save_report(void)
             continue;
         band = band_of(radio_status.sync_index[k], &arfcn);
         if (radio_status.sync_sch[k])
-            LINE("sync cell %d: %s %d, %lu good SCH, BSIC %lu (NCC %lu BCC %lu), fn %lu "
-                 "at our %lu (%s, %lu back)\n", k,
-                 band, arfcn, (unsigned long)radio_status.sync_sch[k],
-                 (unsigned long)radio_status.sync_bsic[k],
+            LINE("sync cell %d: %s %d, BSIC %lu (NCC %lu BCC %lu), frame offset %lu\n", k,
+                 band, arfcn, (unsigned long)radio_status.sync_bsic[k],
                  (unsigned long)radio_status.sync_bsic[k] >> 3,
                  (unsigned long)radio_status.sync_bsic[k] & 7,
-                 (unsigned long)radio_status.sync_fn[k],
-                 (unsigned long)radio_status.sync_local[k],
-                 radio_status.sync_exact[k] ? "exact" : "corrected",
-                 (unsigned long)radio_status.sync_back[k]);
+                 (unsigned long)radio_status.sync_fn[k]);
         else
-            LINE("sync cell %d: %s %d, no good SCH\n", k, band, arfcn);
+            LINE("sync cell %d: %s %d, no SCH\n", k, band, arfcn);
     }
-    LINE("sync: last DSP message %08lx\n", (unsigned long)radio_status.sync_msg_last);
-    if (radio_status.bcch_cell != 0xff) {
-        LINE("bcch: BEP reports %lu in all, the last %04lx %04lx\n",
-             (unsigned long)dsp_probe_info.beps, (unsigned long)dsp_probe_info.bep_last[0],
+    for (int i = 0; i < selected_n; i++)
+        LINE("select: index %u, rxlev %d, BSIC %u, C1 %d, barred %u, %s%s\n", cells[i].index,
+             cells[i].rxlev, cells[i].bsic, cells[i].c1, cells[i].barred,
+             cells[i].suitable ? "suitable" : "not suitable", i == chosen ? ", shown below" : "");
+    if (chosen >= 0) {
+        const l1_cell_t *c = &cells[chosen];
+
+        LINE("bcch: %lu good, %lu bad, %lu not System Information, "
+             "SI seen %08lx, %lu ms, DSP messages %lu; BEP last %04lx %04lx\n",
+             (unsigned long)c->good, (unsigned long)c->bad, (unsigned long)c->other,
+             (unsigned long)c->si_seen, (unsigned long)radio_status.bcch_ms,
+             (unsigned long)radio_status.bcch_msgs, (unsigned long)dsp_probe_info.bep_last[0],
              (unsigned long)dsp_probe_info.bep_last[1]);
-        LINE("bcch: %lu ms, frames taken %lu, the last at %lu ms; DSP messages %lu, the last 8:",
-             (unsigned long)radio_status.bcch_ms, (unsigned long)radio_status.bcch_consumed,
-             (unsigned long)radio_status.bcch_last_move_ms,
-             (unsigned long)radio_status.bcch_msgs);
-        for (uint32_t i = 0; i < 8; i++)
-            LINE(" %08lx", (unsigned long)dsp_probe_info.msg_log[(dsp_probe_info.msgs + i) % 8]);
-        LINE("\n");
-        LINE("bcch: cell %lu, %lu blocks posted, %lu received (types %08lx); good/bad by "
-             "variant: tag 7 at 0 %lu/%lu, -1 %lu/%lu, +1 %lu/%lu; tag 8 %lu/%lu; SI seen %02lx; "
-             "resync %lu good SCH, fn %lu at our %lu (%s)\n",
-             (unsigned long)radio_status.bcch_cell, (unsigned long)radio_status.bcch_blocks,
-             (unsigned long)radio_status.bcch_rx, (unsigned long)radio_status.bcch_rx_types,
-             (unsigned long)radio_status.bcch_good[0], (unsigned long)radio_status.bcch_bad[0],
-             (unsigned long)radio_status.bcch_good[1], (unsigned long)radio_status.bcch_bad[1],
-             (unsigned long)radio_status.bcch_good[2], (unsigned long)radio_status.bcch_bad[2],
-             (unsigned long)radio_status.bcch_good[3], (unsigned long)radio_status.bcch_bad[3],
-             (unsigned long)radio_status.si_seen, (unsigned long)radio_status.bcch_resync,
-             (unsigned long)radio_status.sync_fn[radio_status.bcch_cell],
-             (unsigned long)radio_status.sync_local[radio_status.bcch_cell],
-             radio_status.sync_exact[radio_status.bcch_cell] ? "exact" : "corrected");
         if (radio_status.mcc)
             LINE("network: MCC %03lu MNC %0*lu, LAC %lu, cell id %lu\n",
                  (unsigned long)radio_status.mcc, (int)radio_status.mnc_digits,
                  (unsigned long)radio_status.mnc, (unsigned long)radio_status.lac,
                  (unsigned long)radio_status.cell_id);
-        LINE("# bcch blocks: variant; hdr[0..8]; data[0..22]\n");
-        for (uint32_t b = 0; b < si_kept_n; b++) {
-            const l1_rx_t *x = &si_kept[b].rx;
-            char d[23 * 3 + 1];
-
-            for (int i = 0; i < 23; i++)
-                snprintf(d + i * 3, 4, "%02x ", x->data[i]);
-            LINE("%d; %04x %04x %04x %04x %04x %04x %04x %04x %04x; %s\n", si_kept[b].variant,
-                 x->hdr[0], x->hdr[1], x->hdr[2], x->hdr[3], x->hdr[4], x->hdr[5],
-                 x->hdr[6], x->hdr[7], x->hdr[8], d);
+        if (c->si_seen & L1_SI3)
+            LINE("cell: CCCH conf %u, AG blocks %u, paging multiframes %u, T3212 %u, attach %u\n",
+                 c->ccch_conf, c->bs_ag_blks_res, c->bs_pa_mfrms, c->t3212, c->att);
+        if (c->si_seen & (L1_SI3 | L1_SI4))
+            LINE("selection: rxlev access min %u, TX power max %u, hysteresis %u, barred %u\n",
+                 c->rxlev_access_min, c->ms_txpwr_max_cch, c->hysteresis, c->barred);
+        if (c->si_seen & L1_SI2) {
+            LINE("neighbours (900, BA %u, NCC permitted %02x):", c->ba_ind, c->ncc_permitted);
+            if (!c->neighbours.decoded)
+                LINE(" %s, not decoded", l1_list_format(c->neighbours.format));
+            for (int i = 0; i < c->neighbours.count && i < L1_CELL_ARFCNS; i++)
+                LINE(" %u", c->neighbours.arfcn[i]);
+            LINE("\n");
         }
-    }
-    LINE("# raw blocks: cell; hdr[0..8]; data[0..23]\n");
-    for (uint32_t b = 0; b < kept_n; b++) {
-        const l1_rx_t *x = &kept[b].rx;
-        char d[24 * 3 + 1];
-
-        for (int i = 0; i < 24; i++)
-            snprintf(d + i * 3, 4, "%02x ", x->data[i]);
-        LINE("%u; %04x %04x %04x %04x %04x %04x %04x %04x %04x; %s\n", kept[b].cell,
-             x->hdr[0], x->hdr[1], x->hdr[2], x->hdr[3], x->hdr[4], x->hdr[5], x->hdr[6],
-             x->hdr[7], x->hdr[8], d);
     }
     LINE("# index,band,arfcn,best_raw(1/16),rxlev,valid,saturated,floor,gain_hint\n");
     for (uint32_t i = 0; chan && i < CHANNELS; i++) {
@@ -872,109 +613,105 @@ static void start(void)
 
 /* ---- screen -------------------------------------------------------------- */
 
-static void row(int y, const char *label, const char *value, uint16_t c)
+/* The Turkish networks (MCC 286); other networks show the numeric code. */
+static const char *operator_name(uint16_t mcc, uint16_t mnc)
 {
-    ui_kv(UI_PAD + 6, y, LCD_WIDTH - 2 * UI_PAD - 12, label, value, c);
+    if (mcc == 286) {
+        if (mnc == 1)
+            return "Turkcell";
+        if (mnc == 2)
+            return "Vodafone";
+        if (mnc == 3)
+            return "Turk Telekom";
+    }
+    return NULL;
 }
 
-static const char *verdict(uint16_t *c)
+static const char *phase_text(void)
 {
-    static const char *const phases[] = {
-        "-", "reading SIM...", "booting DSP...", "layer 1...", "frame clock...",
-        "scanning...", "syncing...", "reading BCCH...", "saving...",
-    };
-    static char synced[24];
+    switch (radio_status.phase) {
+    case R_SIM:
+        return "Reading SIM";
+    case R_DSP:
+    case R_L1:
+        return "Starting DSP";
+    case R_CLOCK:
+        return "Frame clock";
+    case R_SCAN:
+        return "Scanning channels";
+    case R_SYNC:
+        return "Finding cells";
+    case R_BCCH:
+        return "Reading cells";
+    case R_SAVE:
+        return "Saving report";
+    default:
+        return "Working";
+    }
+}
 
-    *c = C_TEXT;
-    if (!radio_status.busy && (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING))
-        return "DSP in use: Run later";
-    if (radio_status.busy)
-        return phases[radio_status.phase < R_DONE ? radio_status.phase : 0];
-    if (!radio_status.runs)
-        return "-";
-    if (radio_status.dsp_result != DSP_OK || radio_status.l1_result != DSP_OK) {
-        *c = C_BAD;
-        return "DSP not answering";
-    }
-    if (radio_status.frames_taken < MIN_FRAMES) {
-        *c = C_BAD;
-        return "no frame clock";
-    }
-    if (radio_status.mcc && !radio_status.busy) {
-        snprintf(synced, sizeof(synced), "%03lu-%0*lu cell %lu", (unsigned long)radio_status.mcc,
-                 (int)radio_status.mnc_digits, (unsigned long)radio_status.mnc,
-                 (unsigned long)radio_status.cell_id);
-        *c = C_OK;
-        return synced;
-    }
-    for (int k = 0; k < SYNC_CELLS; k++)
-        if (radio_status.sync_sch[k]) {
-            int arfcn;
+/* One cell: operator name, ARFCN and BSIC, an RSSI bar and the level in dBm. The
+ * serving (chosen) cell is drawn lit and in amber. Receive only: these are the
+ * cells the phone found and read, not a sweep of the band. */
+static void cell_card(int y, const l1_cell_t *c, bool serving)
+{
+    const char *name = operator_name(c->mcc, c->mnc);
+    int arfcn, full = LCD_WIDTH - 2 * UI_PAD - 12, barw, rxlev = c->rxlev;
+    const char *band = band_of(c->index, &arfcn);
+    char buf[40];
 
-            band_of(radio_status.sync_index[k], &arfcn);
-            snprintf(synced, sizeof(synced), "cell %d: BSIC %lu", arfcn,
-                     (unsigned long)radio_status.sync_bsic[k]);
-            *c = C_OK;
-            return synced;
-        }
-    if (radio_status.channels_heard) {
-        *c = radio_status.stalled ? C_WARN : C_OK;
-        return radio_status.stalled ? "scan stalled" : "radio receiving";
+    gfx_round(UI_PAD, y, LCD_WIDTH - 2 * UI_PAD, 26, UI_RADIUS, serving ? C_CARD_HI : C_CARD);
+    if (name)
+        snprintf(buf, sizeof(buf), "%s", name);
+    else if (c->mcc)
+        snprintf(buf, sizeof(buf), "%u-%0*u", c->mcc, (int)c->mnc_digits, c->mnc);
+    else
+        snprintf(buf, sizeof(buf), "cell");
+    gfx_text(UI_PAD + 6, y + 3, buf, serving ? C_ACCENT : C_TEXT, FONT_SMALL, 1, 0);
+    if (c->barred)
+        gfx_text(UI_PAD + 6 + gfx_text_width(buf, FONT_SMALL, 1) + 4, y + 3, "barred",
+                 C_BAD, FONT_SMALL, 1, 0);
+    if (rxlev >= 0) {
+        snprintf(buf, sizeof(buf), "%d dBm", rxlev - 110);
+        gfx_text(LCD_WIDTH - UI_PAD - 6 - gfx_text_width(buf, FONT_SMALL, 1), y + 3, buf,
+                 C_DIM, FONT_SMALL, 1, 0);
     }
-    *c = C_WARN;
-    return "nothing heard";
+    snprintf(buf, sizeof(buf), "%s %d  BSIC %u", band, arfcn, c->bsic);
+    gfx_text(UI_PAD + 6, y + 13, buf, C_DIM, FONT_SMALL, 1, 0);
+    if (rxlev < 0)
+        rxlev = 0;
+    barw = rxlev > 63 ? full : rxlev * full / 63;
+    gfx_fill(UI_PAD + 6, y + 21, full, 3, C_CARD_HI);
+    if (barw > 0)
+        gfx_fill(UI_PAD + 6, y + 21, barw, 3,
+                 rxlev >= 40 ? C_OK : rxlev >= 25 ? C_WARN : C_BAD);
 }
 
 static void draw(screen_t *s)
 {
-    char buf[32];
-    int y = UI_TOP + 3, w = LCD_WIDTH - 2 * UI_PAD;
-    uint16_t c;
-    const char *v = verdict(&c);
+    int y = UI_TOP + 3;
     bool done = radio_status.runs && !radio_status.busy;
 
-    gfx_round(UI_PAD, y, w, 124, UI_RADIUS, C_CARD);
-    gfx_text_centered(y + 5, v, c, FONT_SMALL, 1);
-    for (int i = 0; i < SIM_SLOTS; i++) {
-        static const char *const st[] = { "no card", "ready", "PIN", "error" };
-        uint32_t k = radio_status.sim[i];
-        bool known = done || radio_status.phase > R_SIM;
+    if (!done) {
+        const char *busy = dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING ?
+                           "DSP in use: Run later" :
+                           radio_status.busy ? phase_text() : "Press Run to scan";
 
-        snprintf(buf, sizeof(buf), "SIM %d", i + 1);
-        row(y + 18 + i * 11, buf, known ? st[k] : "-",
-            !known ? C_DIM : k == SIM_READY ? C_OK : k == SIM_NONE ? C_DIM : C_WARN);
+        gfx_round(UI_PAD, y, LCD_WIDTH - 2 * UI_PAD, 22, UI_RADIUS, C_CARD);
+        gfx_text_centered(y + 7, busy, C_ACCENT, FONT_SMALL, 1);
+        gfx_text_centered(UI_BOTTOM - 12, "receive only", C_DIM, FONT_SMALL, 1);
+        return;
     }
-    if (radio_status.dsp_result == 1)
-        snprintf(buf, sizeof(buf), "-");
-    else if (radio_status.dsp_result != DSP_OK)
-        snprintf(buf, sizeof(buf), "%s", dsp_strerror(radio_status.dsp_result));
-    else
-        snprintf(buf, sizeof(buf), "%lu records", (unsigned long)radio_status.records);
-    row(y + 40, "DSP", buf, radio_status.l1_result == DSP_OK ? C_OK : C_TEXT);
-    snprintf(buf, sizeof(buf), "%lu, %lu us", (unsigned long)radio_status.frames_taken,
-             (unsigned long)radio_status.frame_us);
-    row(y + 51, "Frames", buf, C_TEXT);
-    snprintf(buf, sizeof(buf), "%lu/%lu, %lu ch", (unsigned long)radio_status.pm_valid,
-             (unsigned long)radio_status.pm_results, (unsigned long)radio_status.channels_heard);
-    row(y + 62, "Scan", buf, C_TEXT);
-    for (int k = 0; k < 4; k++) {
-        uint32_t i = radio_status.top_index[k];
-        int arfcn;
-        const char *band;
-
-        if (i == L1_NO_INDEX)
-            break;
-        band = band_of(i, &arfcn);
-        snprintf(buf, sizeof(buf), "%s %d", band, arfcn);
-        {
-            char lv[12];
-
-            snprintf(lv, sizeof(lv), "%lu", (unsigned long)((radio_status.top_level[k] + 8) >> 4));
-            row(y + 75 + k * 11, buf, lv, C_TEXT);
-        }
+    gfx_text_centered(y, selected_n ? "Cells heard" : "No cell found",
+                      selected_n ? C_TEXT : C_WARN, FONT_BODY, 1);
+    y += 15;
+    for (int i = 0; i < selected_n && i < 4; i++) {
+        cell_card(y, &cells[i], i == chosen);
+        y += 28;
     }
-    gfx_text_centered(UI_BOTTOM - 12, radio_status.saved ? "report: radio-report.txt" :
-                      "receive only", C_DIM, FONT_SMALL, 1);
+    gfx_text_centered(UI_BOTTOM - 12,
+                      radio_status.saved ? "receive only, report saved" : "receive only",
+                      C_DIM, FONT_SMALL, 1);
 }
 
 static void enter(screen_t *s)

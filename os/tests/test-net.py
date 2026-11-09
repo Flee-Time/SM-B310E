@@ -36,6 +36,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import runpy
 import socket
 import struct
@@ -504,6 +505,9 @@ def main():
     parser.add_argument('--background', action='store_true',
                         help='no screen: Settings -> USB "Network" on the card, the cable '
                              'plugged at boot; enumeration, DHCP, ping and the shell only')
+    parser.add_argument('--soft-reboot', action='store_true',
+                        help='end with "reboot soft" (the image on the card, no reset), '
+                             'not a hard reset')
     args = parser.parse_args()
     build = args.build.resolve()
     out = (args.output or build / 'test-net').resolve()
@@ -525,7 +529,8 @@ def main():
                     '--fat32', '--size-mib', '64', '--seconds', '1', '--force',
                     '--runtime', str(REPO / 'sdcard/.rockbox'),
                     '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
-                    '--add', f'b310e-os/apps/stopwatch.app={app}', *extra,
+                    '--add', f'b310e-os/apps/stopwatch.app={app}',
+                    '--add', f'payloads/b310e-os.bin={image}', *extra,
                     '--output', str(card)], check=True, capture_output=True)
 
     qmp_port, qtest_port, usb_port = BOOT['free_port'](), BOOT['free_port'](), BOOT['free_port']()
@@ -845,18 +850,49 @@ def main():
             helper.put('/b310e-os/apps/helper.app', app_bytes)
             assert helper.cmd('run "/b310e-os/apps/helper.app"').startswith('OK')
             wait_title('Stopwatch')
+            # run again, straight away, with another build under the same name:
+            # the new file starts, not the copy not yet unloaded. The name in
+            # the header is outside the CRC, so another module can stand in.
+            lab = bytearray((build / 'modules/radiolab.app').read_bytes())
+            lab[28:48] = app_bytes[28:48]
+            helper.put('/b310e-os/apps/helper.app', bytes(lab))
+            assert helper.cmd('run "/b310e-os/apps/helper.app" "fresh=1"').startswith('OK')
+            wait_title('Radio lab')
+            end = time.monotonic() + 30
+            while 'lab: radiolab: done' not in (lab_log := helper.cmd('log')):
+                assert time.monotonic() < end, lab_log[-2000:]
+                time.sleep(0.5)
+            assert 'started again' not in lab_log[-4000:], lab_log[-4000:]
+            helper.put('/b310e-os/apps/helper.app', app_bytes)
+            assert helper.cmd('run "/b310e-os/apps/helper.app"').startswith('OK')
+            wait_title('Stopwatch')
             assert helper.cmd('close').startswith('OK')
             wait_title('USB network')
+            # the System Information parser, on the radio lab's made-up blocks
+            helper.put('/b310e-os/apps/radiolab.app', (build / 'modules/radiolab.app').read_bytes())
+            assert helper.cmd('run "/b310e-os/apps/radiolab.app" "si=1"').startswith('OK')
+            end = time.monotonic() + 15
+            while 'lab: si check: ' not in (lab_log := helper.cmd('log')):
+                assert time.monotonic() < end, lab_log[-2000:]
+                time.sleep(0.2)
+            assert 'si check failed' not in lab_log, lab_log[-2000:]
+            done_line = re.search(r'si check: (\d+) of (\d+) passed', lab_log)
+            assert done_line and done_line.group(1) == done_line.group(2), lab_log[-2000:]
+            result['si_check'] = done_line.group(0)
+            assert helper.cmd('close').startswith('OK')
             # an app with an argument (run APP "ARG"): the radio lab, which
             # ends at once here (no DSP program in QEMU) and logs its argument
             helper.put('/b310e-os/apps/radiolab.app', (build / 'modules/radiolab.app').read_bytes())
             assert helper.cmd('run "/b310e-os/apps/radiolab.app" "arfcn=54 | tag=8"').startswith('OK')
             wait_title('Radio lab')
             end = time.monotonic() + 30
-            while 'lab: radiolab: done' not in (lab_log := helper.cmd('log')):
+            while 'lab: radiolab: arg "arfcn=54 | tag=8"' not in (lab_log := helper.cmd('log')):
                 assert time.monotonic() < end, lab_log[-2000:]
                 time.sleep(0.5)
-            assert 'lab: radiolab: arg "arfcn=54 | tag=8"' in lab_log, lab_log[-2000:]
+            while 'lab: radiolab: done' not in lab_log.split('arg "arfcn=54 | tag=8"')[-1]:
+                assert time.monotonic() < end, lab_log[-2000:]
+                time.sleep(0.5)
+                lab_log = helper.cmd('log')
             assert helper.cmd('close').startswith('OK')
             wait_title('USB network')
             result['app_argument'] = True
@@ -876,7 +912,7 @@ def main():
             time.sleep(0.5)
             s = netstat()
             result['net_stat'] = s
-            assert s['shell_sessions'] == 3 and s['files_in'] >= 6 and s['apps_run'] == 4, s
+            assert s['shell_sessions'] == 3 and s['files_in'] >= 6 and s['apps_run'] == 7, s
             assert s['tx_timeouts'] == 0 and s['shell_open'] == 0, s
             shot('usb-network')
 
@@ -917,8 +953,19 @@ def main():
             adi = sh.cmd('adi 0x82001184')
             assert adi.startswith('0x82001184 = 0x'), adi
             assert sh.cmd('adi 0x20000000').startswith('usage')
+            # reboot's arguments that leave the session up: a bad one, the loader's
+            # requests with no loader in this NOR, soft with no image on the card
+            assert sh.cmd('reboot nonsense').startswith('usage'), 'bad argument'
+            for how in ('menu', 'os', 'stock'):
+                refused = sh.cmd(f'reboot {how}')
+                assert 'not in NOR' in refused, refused
+            assert sh.cmd('mv /payloads/b310e-os.bin /payloads/away.bin').strip() == 'OK'
+            missing = sh.cmd('reboot soft')
+            assert 'ERR The file is not on the card' in missing, missing
+            assert sh.cmd('mv /payloads/away.bin /payloads/b310e-os.bin').strip() == 'OK'
             ticks = status(qt, base)['ticks']
-            sh.send(b'reboot\n')
+            how = 'soft' if args.soft_reboot else ''
+            sh.send(f'reboot {how}\n'.encode())
             sh.read_until(b'rebooting')
             end = time.monotonic() + 30
             while True:                                         # the OS starts over
@@ -972,7 +1019,11 @@ def main():
     (out / 'card-log.txt').write_text(log_text)
     result['card_log'] = [l for l in log_text.splitlines() if 'net:' in l or 'usb: network' in l]
     assert 'usb: network session 1 ended (unplugged)' in log_text, result['card_log']
-    assert 'reboot to the boot menu' in log_text
+    if args.soft_reboot:
+        assert 'restart: /payloads/b310e-os.bin' in log_text and 'no reset' in log_text
+        assert 'reboot: hard reset' not in log_text
+    else:
+        assert 'reboot: hard reset' in log_text and 'no reset' not in log_text
     assert 'net: /nettest/data.bin received' in log_text
     result['image_files_verified'] = True
     (out / 'result.json').write_text(json.dumps(result, indent=2, default=str))

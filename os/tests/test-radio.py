@@ -185,6 +185,19 @@ def run(args, name, nor, pin):
             assert title() == 'Radio status'
 
             press('f2', 'Tools')
+            # back from a screen it opened, a list keeps its place...
+            key('ret')
+            wait(lambda: title() == 'Radio status' and state()['runs'] >= 3 and
+                 not state()['busy'], 40, 'the list lost its place')
+            press('f2', 'Tools')
+            # ...and opened anew it starts at the top: Center is the Torch's, on
+            # and off again, not Radio status
+            press('f2', 'Menu')
+            press('ret', 'Tools')
+            for _ in range(2):
+                key('ret')
+                time.sleep(0.6)
+                assert title() == 'Tools', f'the list kept its old place: {title()!r}'
             press('esc', 'B310E OS')
             find('Power')
             press('ret', 'Power off')

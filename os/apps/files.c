@@ -492,7 +492,7 @@ static void options(browser_t *b, entry_t *e)
     if (!op.count)
         return;
     op_list.count = op.count;
-    op_list.sel = 0;
+    op_list.sel = op_list.top = 0;
     op_list.item = op_item;
     ui_push(&op_screen);
 }

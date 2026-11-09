@@ -222,6 +222,14 @@ static const setting_t storage_rows[] = {
 };
 
 static const char *const usb_names[] = { "Charge only", "Storage (disk)", "Network (shell)" };
+static int get_dev(void) { return ui_settings.dev_mode; }
+static void set_dev(int on) { ui_settings.dev_mode = on; }
+
+static const setting_t dev_rows[] = {
+    { .name = "Developer mode", .icon = &icon_cpu, .kind = S_SWITCH,
+      .get = get_dev, .set = set_dev },
+};
+
 static int get_usb(void) { return ui_settings.usb_default; }
 static void set_usb(int v) { ui_settings.usb_default = v; }
 
@@ -307,6 +315,7 @@ static const category_t categories[] = {
     { .title = "Date & time", .icon = &icon_clock, .rows = time_rows, .n = 3 },
     { .title = "USB", .icon = &icon_usb, .rows = usb_rows, .n = 1 },
     { .title = "Storage", .icon = &icon_card, .rows = storage_rows, .n = 2 },
+    { .title = "Developer", .icon = &icon_cpu, .rows = dev_rows, .n = 1 },
     { .title = "About", .icon = &icon_info, .act = about },
 };
 
@@ -439,6 +448,8 @@ static screen_t settings = {
 
 screen_t *app_settings(void)
 {
+    /* opened anew: from the top (back from a screen it opened, it stays) */
+    cat_list.sel = cat_list.top = 0;
     cat_list.count = ARRAY_SIZE(categories);
     cat_list.item = cat_item;
     cat_list.icon = cat_icon;
@@ -515,5 +526,7 @@ static screen_t power = {
 
 screen_t *app_power(void)
 {
+    /* opened anew: from the top (back from a screen it opened, it stays) */
+    power_list.sel = power_list.top = 0;
     return &power;
 }

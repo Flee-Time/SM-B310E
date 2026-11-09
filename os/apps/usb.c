@@ -503,6 +503,8 @@ screen_t *app_usb_net(void)
 
 screen_t *app_usb_menu(void)
 {
+    /* opened anew: from the top (back from a screen it opened, it stays) */
+    menu_list.sel = menu_list.top = 0;
     menu_list.count = 2;
     menu_list.item = menu_item;
     menu_list.icon = menu_icon;

@@ -1008,14 +1008,36 @@ static void c_shot(sess_t *s, int argc, char **argv)
 
 /* ---- the UI: apps, keys, reboot -------------------------------------------- */
 
+#define RUN_WAIT_MS   3000u             /* its threads, to end by themselves */
+#define RUN_KILLED_MS 1000u             /* after app_kill */
+
 static const char *run_err;
 static char run_arg[LINE_MAX + 1];      /* the app's argument, "" none */
+static bool run_loaded;
 
 static void ui_run_app(void *arg)
 {
     usb_net_close_apps();
-    run_err = app_open_arg((const char *)arg, run_arg[0] ? run_arg : NULL);
+    run_err = app_open_fresh((const char *)arg, run_arg[0] ? run_arg : NULL);
     ui_wake();
+}
+
+/* Unloading happens in the UI loop, after this call. */
+static void ui_check_loaded(void *arg)
+{
+    run_loaded = app_of_file((const char *)arg) != NULL;
+    if (run_loaded)
+        ui_collect_apps();
+}
+
+static void ui_kill_loaded(void *arg)
+{
+    app_t *a = app_of_file((const char *)arg);
+
+    if (a) {
+        app_kill(a);
+        ui_collect_apps();
+    }
 }
 
 static void ui_close_apps(void *arg)
@@ -1023,9 +1045,16 @@ static void ui_close_apps(void *arg)
     usb_net_close_apps();
 }
 
+static const char *reboot_err;
+
 static void ui_do_reboot(void *arg)
 {
     ui_reboot();
+}
+
+static void ui_do_chain(void *arg)
+{
+    reboot_err = ui_chain(OS_IMAGE_PATH, "Restarting");     /* only returns on an error */
 }
 
 /* wait for the UI thread, giving up when the stack stops */
@@ -1037,6 +1066,22 @@ static bool on_ui(sess_t *s, void (*fn)(void *), void *arg)
     }
     say(s, "ERR stopping\n");
     return false;
+}
+
+/* false: still loaded after ms, or the stack is stopping (on_ui said so) */
+static bool wait_unloaded(sess_t *s, const char *path, uint32_t ms)
+{
+    uint32_t t0 = kernel_ticks();
+
+    for (;;) {
+        if (!on_ui(s, ui_check_loaded, (void *)path))
+            return false;
+        if (!run_loaded)
+            return true;
+        if (kernel_ticks() - t0 >= ms)
+            return false;
+        thread_sleep(20);
+    }
 }
 
 static void c_run(sess_t *s, int argc, char **argv)
@@ -1061,6 +1106,20 @@ static void c_run(sess_t *s, int argc, char **argv)
             snprintf(s->path, sizeof(s->path), APP_DIR "/%s", s->path2);
     } else if (!resolve(s, name, s->path))
         return;
+    /* A copy of it still loaded goes first (a closed app until the UI loop
+     * unloads it, one with a thread or a notification): the point of run is
+     * the file just uploaded, so old code never starts again. */
+    if (!on_ui(s, ui_close_apps, NULL))
+        return;
+    if (!wait_unloaded(s, s->path, RUN_WAIT_MS)) {
+        if (net_stopping || !on_ui(s, ui_kill_loaded, s->path))
+            return;
+        if (!wait_unloaded(s, s->path, RUN_KILLED_MS)) {
+            if (!net_stopping)
+                say(s, "ERR %s: the old copy is still loaded\n", s->path);
+            return;
+        }
+    }
     if (!on_ui(s, ui_run_app, s->path))
         return;
     if (run_err) {
@@ -1110,11 +1169,46 @@ static void c_key(sess_t *s, int argc, char **argv)
     say(s, "OK\n");
 }
 
+/* reboot: a hard reset (the watchdog), back to this OS through the boot loader
+ * (ui_reboot). With an argument, what comes after it: menu, os or stock, a
+ * request to the loader. reboot soft: the image on the card again with no reset,
+ * so the clock stays. */
 static void c_reboot(sess_t *s, int argc, char **argv)
 {
-    say(s, "rebooting to the boot menu\n");
+    static const struct { const char *arg; unsigned req; } requests[] = {
+        { "menu", BOOT_REQ_MENU }, { "os", BOOT_REQ_OS }, { "stock", BOOT_REQ_STOCK },
+    };
+    const char *how = argc > 1 ? argv[1] : NULL;
+    unsigned req = 0;
+
+    if (how && !strcmp(how, "soft")) {
+        if (!need_card(s))
+            return;
+        say(s, "rebooting B310E OS from the card, no reset\n");
+        flush(s);
+        tcp_flush(s->c, 1000);
+        if (on_ui(s, ui_do_chain, NULL))
+            say(s, "ERR %s\n", reboot_err);
+        return;
+    }
+    if (how) {
+        for (size_t i = 0; i < sizeof(requests) / sizeof(requests[0]); i++)
+            if (!strcmp(how, requests[i].arg))
+                req = requests[i].req;
+        if (!req) {
+            say(s, "usage: reboot [soft | menu | os | stock]\n");
+            return;
+        }
+        if (!arch_boot_loader()) {
+            say(s, "ERR the boot loader is not in NOR\n");
+            return;
+        }
+    }
+    say(s, "rebooting: hard reset%s%s\n", how ? ", then " : "", how ? how : "");
     flush(s);
     tcp_flush(s->c, 1000);
+    if (req)
+        arch_boot_request(req, NULL);
     on_ui(s, ui_do_reboot, NULL);
 }
 
@@ -1157,7 +1251,7 @@ static const cmd_t cmds[] = {
     { "run", "APP [ARG]", "close the open app, load and start APP (with ARG)", c_run },
     { "close", "", "close the open app", c_close },
     { "key", "NAME...", "press keys", c_key },
-    { "reboot", "", "restart to the boot menu", c_reboot },
+    { "reboot", "[soft|menu|os|stock]", "hard reset; soft: the card's OS again, no reset", c_reboot },
     { "echo", "TEXT", "print TEXT", c_echo },
     { "exit", "", "end the session", c_exit },
     { NULL, NULL, NULL, NULL },

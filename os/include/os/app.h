@@ -81,7 +81,11 @@
  * means its own. */
 /* 2.11 (2026-11-08): l1, after volume_register: layer 1 and the DSP
  * (os/dsp.h, l1_api_t) for the radio experiments in os/modules/radiolab. */
-#define OS_API_MINOR 11
+/* 2.12 (2026-11-09): l1_api_t: si_parse, cell_sync, cell_read, cell_idle,
+ * rxlev_measure, cell_c1, cell_select, cell_stay, after probe (os/l1cell.h). */
+/* 2.13 (2026-11-09): l1_api_t: cch_classify, cch_read (the common control
+ * channel, receive only). */
+#define OS_API_MINOR 13
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -361,6 +365,9 @@ extern const os_api_t os_api;
 const char *app_open(const char *path);
 /* The same with an argument (app_arg() in it); NULL: none. */
 const char *app_open_arg(const char *path, const char *arg);
+/* The file itself, or an error if an app of that name is still loaded. */
+const char *app_open_fresh(const char *path, const char *arg);
+app_t *app_of_file(const char *path);   /* the loaded app that file would replace */
 /* An app by its name or file name, with an argument (app_arg() in it). */
 const char *app_launch(const char *name, const char *arg);
 /* Its path, in APP_DIR or in a folder of its own there; false if none. */

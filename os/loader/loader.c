@@ -391,6 +391,7 @@ static const char *load(FIL *f, app_t *a, const app_file_t *h)
 }
 
 static const char *open_with(const char *path, const char *arg);
+static const char *open_file(const char *path, const char *arg, bool fresh);
 
 /* An app already loaded: its start() again, with the new argument. */
 static const char *restart(app_t *a, const char *arg)
@@ -419,6 +420,26 @@ const char *app_open(const char *path)
 const char *app_open_arg(const char *path, const char *arg)
 {
     return open_with(path, arg);
+}
+
+/* The loaded app that a file would replace: the one its header names. */
+app_t *app_of_file(const char *path)
+{
+    app_file_t h;
+
+    if (app_peek(path, &h))
+        return NULL;
+    for (app_t *a = apps; a; a = a->next)
+        if (!strcmp(a->name, h.name))
+            return a;
+    return NULL;
+}
+
+/* The file on the card, never a copy still loaded: an error if there is one
+ * (the shell's run, which has waited for it to go: app_of_file). */
+const char *app_open_fresh(const char *path, const char *arg)
+{
+    return open_file(path, arg, true);
 }
 
 /* In dir (and, deeper levels down, in its folders): the .app whose name
@@ -534,6 +555,11 @@ thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *
 
 static const char *open_with(const char *path, const char *arg)
 {
+    return open_file(path, arg, false);
+}
+
+static const char *open_file(const char *path, const char *arg, bool fresh)
+{
     app_file_t h;
     FIL f;
     UINT n = 0;
@@ -557,7 +583,7 @@ static const char *open_with(const char *path, const char *arg)
                                          * thread): start that one again */
         if (!strcmp(a->name, h.name)) {
             f_close(&f);
-            return restart(a, arg);
+            return fresh ? "still loaded" : restart(a, arg);
         }
     a = kzalloc(sizeof(*a));
     if (a) {

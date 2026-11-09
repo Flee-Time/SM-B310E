@@ -17,6 +17,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "os/l1cell.h"
 
 enum {
     DSP_OK = 0,
@@ -141,6 +142,10 @@ int l1_start(void);
  * the status bits cleared. Call it while layer 1 runs, every frame or so. */
 void l1_poll(void);
 
+/* This phone's IMEI from its fixed NV in NOR, read only: 15 digits and a NUL,
+ * or false (and "") when it is not there or its check digit is wrong. */
+bool nv_imei(char out[16]);
+
 /* Stock "arfcn index" (RF_TOTAL_CHANS = 971 over five bands) for a band
  * and ARFCN; the band order is a guess (docs/gsm-plan.md). 0x3ff: none. */
 enum { L1_BAND_GSM900, L1_BAND_DCS1800, L1_BAND_PCS1900, L1_BAND_GSM850 };
@@ -223,6 +228,18 @@ typedef struct l1_api {
     int (*cmd_post)(const uint16_t cmd[5]);
     volatile dsp_info_t *info;
     volatile dsp_probe_t *probe;
+    /* 2.12: a cell (os/l1cell.h) */
+    int (*si_parse)(l1_cell_t *c, const uint8_t d[23]);
+    int (*cell_sync)(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t budget_ms);
+    int (*cell_read)(l1_cell_t *c, int max_blocks, uint32_t want, uint32_t budget_ms);
+    void (*cell_idle)(uint32_t ms);
+    int (*rxlev_measure)(uint16_t index, int samples, uint32_t budget_ms);
+    int (*cell_c1)(const l1_cell_t *c, int rxlev, bool dcs);
+    int (*cell_select)(const uint16_t *index, int n, uint16_t mcc, uint16_t mnc, l1_cell_t *cells);
+    int (*cell_stay)(l1_cell_t *c, uint32_t ms, l1_stay_t *st);
+    /* 2.13: the common control channel */
+    int (*cch_classify)(const uint8_t d[23]);
+    int (*cch_read)(l1_cell_t *c, uint32_t ms, l1_cch_t *st);
 } l1_api_t;
 
 extern const l1_api_t l1_api;

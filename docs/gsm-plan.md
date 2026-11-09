@@ -170,7 +170,8 @@ the ones Ghidra gave. The OS side is `os/drivers/dsp.c`.
   512–885) + 299 (PCS 512–810) + 124 (GSM 850 128–251) [L].
 - The order of those bands inside the index is a guess [G]. P-GSM
   first, so index = ARFCN for 0–124, is the likely one.
-  `l1_arfcn_index()` uses that order.
+  `l1_arfcn_index()` uses that order. **Correction (2026-11-09):** only P-GSM
+  is right; see "The arfcn index order" under "BCCH decodes".
 
 **POWERMONQ results** (+0x5c0, 30 × 8 bytes; in +0x6b0, out +0x6b2) [C]
 - FUN_0005ed64 reads them, called from FUN_0005aad0 / FUN_0005ab44 /
@@ -424,11 +425,11 @@ most of them.
 
 **Results come back on the received-blocks ring (+0x40c), not as
 responses** [C]
-- The response handler (`dspintisr.c`, FUN_0004ee54) only accepts
-  word 0 low byte = 4.
-  - Word 1 bit 0 = "more frames needed": it sets 0x0422face and wakes
-    layer 1.
-  - Word 1 bits 1–5 are DSP error asserts.
+- The response handler (`dspintisr.c`, FUN_0004ee54) switches on word 0's
+  low byte. **Correction (2026-11-09):** it does not accept only type 4;
+  about 20 types go to layer-1 messages (see "BCCH decodes" below).
+  - For type 4: word 1 bit 0 = "more frames needed", which sets 0x0422face
+    and wakes layer 1. Word 1 bits 1–5 are DSP error asserts.
 - Header of a received block (72 bytes, read by FUN_0005f692, swapped
   pairwise from +0x12):
 
@@ -461,10 +462,9 @@ responses** [C]
   FUN_000484e4).
 - No static writer of that offset was found, apart from ±1 helpers with no
   callers (FUN_00048b1c / FUN_00048b56).
-- No command for timing or AFC was found: the only ids seen are 0 and
-  2/0x1b/0x2f.
-- So the DSP most likely keeps timing and frequency itself after FCCH and
-  SCH. Which ARM path sets the offset is still open.
+- **Correction (2026-11-09):** the stock has 38 functions that send commands
+  (FUN_0004b3a4 .. FUN_0004ba44), not only ids 0 and 2/0x1b/0x2f. Command 3 sets
+  the serving cell, and that is what moves its frequency into the AFC (below).
 
 **Cell states and order** (`cellsyncinfo.c`, `gsmframegen.c`) [C]
 - Cell states (FUN_0004806e): 1 free; 2 FCCH needed; 4 after a type 9 is
@@ -829,9 +829,11 @@ ARFCN and RXLEV) to settle the band order and the rxlev sense.
   status 3 at 10 (rxlev 0), no status 2. 863 indexes gave a valid reading.
 - Per band, by the [G] index order: 900 median 26, max 39; 1800 median 15,
   max 38; **1900 median 0, max 15; 850 median 1, max 14**.
-- 1900 and 850 are not used here and read at the floor. That settles two
-  guesses [L, close to C]:
-  - the band order of the arfcn index (`l1_arfcn_index()`) is right;
+- 1900 and 850 are not used here and read at the floor. That was taken to
+  settle two guesses [L]:
+  - the band order of the arfcn index. **Correction (2026-11-09):** it does not;
+    the DSP's own order differs, so the per-band names above are wrong outside
+    P-GSM (see "The arfcn index order");
   - bits 11:4 are rxlev in the GSM sense: bigger is stronger, and
     rxlev = dBm + 110.
 - Strongest on 900: ARFCN 122 (39), 54 and 56 (38, valid at the default
@@ -995,9 +997,10 @@ All on ARFCN 54 (BSIC 36), with the phone on the USB shell [C]:
   idle frames between, at offsets -4..+4. The handler (0x8ee6) runs and
   schedules a receive, so the decode fails.
 - So no receive works once the FCCH search window has ended: normal
-  bursts (type 2) and SCH (type 10) alike. Timing or frequency from the
-  search is not kept for later frames [L]. The search shifts the frame
-  timer itself (0xdb85 adds to the adjust 0xecb9).
+  bursts (type 2) and SCH (type 10) alike. **Correction (2026-11-09):** these
+  runs posted failing type 10 reads and used an offset one frame out; see
+  "BCCH decodes" below. Also, the search shifts the frame timer only while it
+  runs (0xdb85) and takes the shift back at its end (0x8ea9).
 - Some "exact" SCH blocks (+0x08 = 0) are false decodes: BSIC 41 or 58
   with a wild offset on ARFCN 54. The sync must also check the BSIC.
 
@@ -1068,9 +1071,9 @@ data). That is how the tables below were resolved.
 - Type 10 (0x8ee6) uses gain = 2·setting − [0x0187], clamped at ≥ 0. With
   setting 25 that is index ≈ 50, about −2 dB.
 - Our type 2 has w6 bits 15:10 = 0x3f, so gain = 126, clamped to 71: about
-  21 dB less gain than the SCH that worked. This is the likeliest reason
-  for bfi 1 [L]. The stock ARM may OR a gain into w6 after
-  FUN_000504f8 (as FUN_0005cafe does for type 9); that is unchecked [G].
+  21 dB less gain than the SCH that worked. **Correction (2026-11-09):** this
+  was not the reason for bfi 1; 0x3f decodes a strong cell too, with a worse
+  BEP.
 
 **Timing: per-cell table and the frame cell** [C for the code, L for the effect]
 - 0xeb22 + 4·cell (48 cells; 0x32 = none) holds: +0 valid, +1 timing in
@@ -1086,10 +1089,9 @@ data). That is how the tables below were resolved.
   timing reaches later receive windows.
 - Idle and power frames set the frame cell to 0x32 (0x7cd5), and the FCCH
   search realigns the timer itself (0xdb85).
-- With the same cell index for the SCH and the read, the read window ends
-  up where the FCCH left it. The SCH's fine offset is cancelled out (the
-  −T on leaving the cell is undone by the +T on returning). A stale T from
-  an earlier sync of another ARFCN on cell 0 adds to the confusion [L].
+- **Correction (2026-11-09):** the search takes its timer shift back at its
+  end, so the cell's T is the only record of its timing. Idle frames leave the
+  cell and a read enters it, adding T each time, so reads at T are aligned [L].
 - [0x78] and [0xbb] are set to 0x32 only by L1 init 0xbfb2. Only command
   2 reaches it, with word 1 & 0xf = 0xf, which frees all 4 slots; it also
   clears 0xff72 bit 2 and empties the frame ring. Our driver never sends
@@ -1099,15 +1101,19 @@ data). That is how the tables below were resolved.
   0xae37 + 4c (ARM +0xc6e + 8·cell).
 
 **Command 3 (0x9ab4)** [C for the fields, L for the meaning]
-- It puts a cell into the tracked slots: word 1 = cell; word 2 = gain
-  index 0..71 ([0x119b] = 0xb915); word 4 bit 0 = use the current slot;
-  word 4 bits 11:8 = a slot mask.
+- It puts a cell into the tracked slots: word 1 = cell; word 2 = a mode
+  (0..3, FUN_0004b410); word 3 = the gain, from the stock's per-channel byte
+  (FUN_0005df9e), taken × 2/3 as the index 0..71 ([0x119b] = 0xb915); word 4
+  bit 0 = start tracking; word 4 bits 11:8 = the card. **Correction
+  (2026-11-09):** the first note had the gain in word 2, so that test ran at
+  index 0, +46 dB.
 - A tracked cell skips the +[0xeafe] gain offset and gets its own slot
   context (0xff0e/0xff0f).
 - It looks like dedicated-mode or serving-cell AGC. Idle BCCH should not
   need it.
 
-**Tests, best first** (one change each, ARFCN 56, tag 7)
+**Tests, best first** (one change each, ARFCN 56, tag 7). All superseded by
+"BCCH decodes" below; none of them could work with the sync of that time.
 1. [L] w6 = setting << 10 | index, with setting 25 (0x6400 | idx), then
    10 and 40. Keep everything else.
 2. [L] Use a different cell index per synced ARFCN: 1, 2, … (never 0 and
@@ -1122,7 +1128,199 @@ data). That is how the tables below were resolved.
    equal the arfcn index; word 1 is a quality value, min-merged at 0x1131
    [G].
 
-### Handoff for the next agent (2026-11-08)
+### BCCH decodes (phone, 2026-11-09)
+
+**System Information passes its CRC on the phone** [C]. Radio lab, receive only:
+24 of 24 blocks good on 4 cells of 2 networks (ARFCN 54, 56, 120, 122), giving
+SI 1, 2, 3, 4 and 13, with MCC, MNC, LAC and cell id. The contents repeat with
+the multiframe. The LAC and cell id are not written here: this file is public,
+and they locate the phone.
+
+**Two things were wrong, and each hid the other** [C]
+
+1. **Failed type 10 reads ruin what follows.** Same cell, one run, offset right:
+
+   | SCH reads after the FCCH search | Blocks good | Last BEP word 1 |
+   |---|---|---|
+   | 51 | 0 of 6 | 0x4a47 |
+   | none | 6 of 6 | 0x0010 |
+   | 51 | 0 of 6 | 0x4518 |
+   | 3 | 0 of 6 | 0x42f6 |
+   | none, gain setting 10 | 6 of 6 | 0x0116 |
+   | none, gain setting 40 | 6 of 6 | 0x03aa |
+
+   So use the SCH that the search itself returns, and post no type 10 unless the
+   SCH is due. This fits the old "one good SCH per search" too, though that was
+   not tested on its own.
+2. **The frame offset was one out.** Cell FN = SCH FN + (our frame − reported
+   frame) + (hi − lo of +0x08), the stock's own formula (FUN_000461e4), not
+   hi − lo − 1. A sweep of the old offset by −4..+4 gave CRC-good BCCH only at +1.
+   (−3 was CRC-good too, but that is the CCCH block at cell FN 6..9.) A type 10 has
+   +0x08 = 0 and reports the frame after its own [L].
+
+The earlier gain, cell-index and command tests could show nothing because of
+these two. Word 6's gain turned out not to be the blocker: settings 0x3f, 10, 25
+and 40 all decode a strong cell, at different BEP. `l1_burst_post()` now uses 25.
+
+**Why failed reads do it: the AFC** [C for the code, L that it is the cause]
+- The DSP keeps its AFC word at q + 0x43, q being the word at [[0xee08]] + 1. The
+  centre value, from the parameter blocks, is at 0xed85: 0x20d2 on this phone.
+  0x42c4 writes an AFC word to the radio (its RF words 0xd200, 0x0820 are in the
+  dump).
+- 0x3de5 ([0x117e]) runs when an SCH read fails (0xd9de) or a search gives up. If
+  0xff72 bit 3 (camped) is clear, it **sets the AFC back to 0xed85**.
+- A per-cell offset table is at 0xebe5 + cell. Bursts of an untracked cell add their
+  error to it (0x3b7c). It reaches the AFC only through 0xc02f, which runs after
+  command 3 and also sets 0xff72 bit 3. A tracked cell's error goes straight to the
+  AFC (0x79b3). So **command 3 is the way to stay on a cell's frequency** [L].
+- Not read yet: where the search itself changes the AFC. 0xdb3d saves it and 0x3e29
+  restores it on one path; the write in between was not found [G].
+
+**Responses** [C] FUN_0004ee54 switches on word 0's low byte. Seen on the phone:
+- 1: a received block is ready. 0x27: a BEP report. 4: frames (above).
+- 8: one per type 10 here. Word 1 = cell, | 0x100 when word 4 holds a frequency
+  offset (0xfff3), else word 4 = 0xffff. The stock keeps that offset per cell
+  (+0xae, +0xb0, 0x5ae0e) and passes it to the next type 9 in word 8 [L].
+- DSP message 5 (param 600) comes once per burst and is not an error.
+
+**Command 3 for real idle mode** [C for the fields] FUN_000589d8 sends
+`{3, cell, mode, FUN_0005df9e(), flag | 1 << (8 + card)}`. For a tracked cell the
+gain comes from this, which is why the stock's type 2 can carry 0x3f [L]. In the
+lab `c3=38` (`{3, 0, 0, 38, 0x0101}`) gave 4 of 4 with w6 = 0xfc36, BEP word 1
+0x0269 against 0x1614 without.
+
+**The arfcn index order** [C on the DSP side] 0x5287 maps index to band:
+0–124 and 499–547 band 0 (P-GSM, E-GSM), 125–498 band 1 (374 channels, DCS),
+548–671 band 3 (124, GSM 850), 672–970 band 2 (299, PCS). The band names are from
+the sizes [L]. `l1_arfcn_index()` has another order, right only for P-GSM, so Radio
+status's per-band figures are named wrongly outside it.
+- A scan regrouped this way fits [L]: 850 and PCS, not used here, have median rxlev
+  0; DCS has separate peaks. The flat 34–36 stretch the first scan called "1800, ARFCN
+  844–883, LTE at 1872–1879 MHz" falls on E-GSM in this order, ARFCN 982–1021, so
+  that guess is doubtful too [G].
+- **Not proven on air, so `l1_arfcn_index()` is not changed:** the 42 strongest DCS
+  indexes gave no SCH (control, index 54: good in 6 of 6 runs). It may be that no GSM
+  cell is there, so this does not show the order wrong. The next check is an ARFCN
+  known from the stock's field test or from a neighbour list.
+
+**Holding on to a cell** [C] 500 blocks without command 3 and 500 with it, about 2
+minutes each on ARFCN 54: **none bad**. The frame offset was the same at the start of
+each (645817), so no frame slipped in 2 minutes. So after one search the DSP stays on
+the cell at least that long, tracking or not. BEP word 1 moved between 0x0000 and
+0x032f in both, with no trend.
+
+**CCCH** The sweep step above landed on the common control channel, which carries
+paging and assignments for other phones. A phone must read it to be paged, but acts
+only on its own identity. Radio lab now logs contents for System Information only
+and counts anything else by type. Keep it so: the paging layer should filter by the
+phone's own identity first and store nothing else.
+
+**Tools**
+- `run` used to restart the old code of an app still loaded, so an uploaded build
+  wasn't used ("arg: sch ignored" with a file of the right CRC). It now waits for the
+  old copy to go, ends its threads if it does not, and otherwise reports an error.
+  Checked on the phone: `run` with no `close` between, and in the middle of a Radio
+  lab test, which stops it (`done (stopped)`), with the DSP clean for the next run.
+- Shell `reboot` is a hard reset back to this OS through the boot loader (from v1.18;
+  docs/sdboot.md), and `reboot soft` restarts from the card with no reset. Either lets
+  a new image be tested with no one at the phone. On the phone (2026-11-09, cable in,
+  no key): `reboot soft` back in 18 s, `reboot os` in 16 s.
+- Driving the phone's screens with `key`: the first press only wakes a dark screen,
+  so check with `shot` before pressing Center. Lists open at the top since
+  2026-11-09, and keep their place only when you come back from a screen they opened.
+- Close the app when done and end each session with `exit`, or it holds the telnet
+  sessions.
+
+**Radio status on the phone (2026-11-09)** [C] Same fixes, from the phone's menu:
+9 of 9 blocks good on ARFCN 54 (the last report: 0 of 9), SI 1, 2, 3 and 4 seen, and
+the report's `network:` line appears for the first time. Sync found an SCH on the
+first of the 3 strongest channels and none on the other two (ARFCN 21, 25); why is
+not known [G].
+
+**IMEI** Tools → IMEI (`nv_imei()`, drivers/dsp.c): fixed NV item 5, 8 bytes, nibble
+0xA then 15 digits, low nibble first, with its Luhn check digit. Read only, on the
+screen only, never logged or written here. QEMU test: `os/tests/test-imei.py`, with a
+made-up NOR. On the phone it matches item 5 of the owner's dump. A second IMEI for
+SIM 2, if the phone has one, was not looked for [G].
+
+**The cell layer** `drivers/l1cell.c`, `os/l1cell.h`, for apps through `l1_api_t` (API
+2.12). Receive only.
+- `l1_cell_sync()`: one FCCH search and its SCH, with the fixes above, and no type 10.
+- `l1_cell_read()`: BCCH blocks of a synced cell until the wanted types have come.
+- `si_parse()`: SI 1, 2, 3, 4 into `l1_cell_t` (LAI, cell id, CCCH configuration,
+  access minimum, TX power maximum, hysteresis, barred, channel lists), per TS 44.018.
+  Anything else is refused and not stored. RACH control keeps only what decides
+  whether a phone may use the cell; nothing here sends a RACH.
+- Lists are decoded in bit map 0 only, which is what the cells here send. Range formats
+  are flagged, not decoded yet.
+- Radio status uses it; so does Radio lab, unless `sch=` or raw reads are asked for.
+  `si=1` runs the parser on made-up blocks, also in QEMU (test-net).
+
+**The layer on the phone (2026-11-09)** [C]
+- ARFCN 54, 56, 120, 122: synced every time, reads stop after 4 to 6 blocks with SI 1
+  to 4 in, no bad block. Parser self-check 22 of 22 there too.
+- It checks itself: each cell's own ARFCN is in its SI 1 channel list, and 54 and 56
+  list each other in SI 2. 54 and 56 have one frame offset, as 120 and 122 do, so each
+  pair is one site [L]. Not yet compared with the stock's field test.
+- 120 and 122 also send SI 2quater, seen and not used.
+- Radio status: 3 of 3 channels synced (ARFCN 54, 56, 122), the parameters in its
+  report, 1.1 s for the BCCH step. The run before this layer synced 1 of 3, but on other
+  channels (54, 21, 25, the scan's pick), so that is no measure of the layer.
+
+**Selection and camping on the phone (2026-11-09)** [C]
+- `l1_rxlev_measure()`: type-11 frames, the stock's gain rule, averaged. The first
+  version fed idle frames into the ring every loop, so no measurement frame ever had
+  room (it returned 0 for every channel); fixed by posting the measurement frames to
+  fill the ring and feeding idle only once they are all in.
+- `l1_cell_select()`: a cell and its SI 2 neighbours measured, synced and read; each
+  gets rxlev, C1 and suitable. On the phone, ARFCN 54's list gives real levels
+  (rxlev 45, 47, 5, ...), C1 = rxlev here (access min 0, TX power fits), and the
+  strongest suitable cell is chosen, which can be a neighbour, not the first.
+- `l1_cell_stay()`: 30 s on ARFCN 54, 128 good blocks, **no bad block, no re-sync, no
+  offset change**, rxlev steady at 50-51. So the phone holds a cell receive-only, its
+  timing steady over 30 s.
+- Radio status now chooses among the cells it synced and reports C1 for each.
+
+**RACH Control Parameters** parsed into `l1_cell_t` (max_retrans, tx_integer, the
+access-control classes), besides cell-barred and reestablish, which select a cell.
+Nothing sends a RACH: these are for the transmit step, to agree with the user first.
+
+**The common control channel (phone, 2026-11-09)** [C] `l1_cch_read()` reads the CCCH
+of a camped cell: the nine 4-burst blocks per 51-multiframe of the non-combined
+configuration (all four cells here), tag 7 as for BCCH. `l1_cch_classify()` returns the
+RR message type; a paging request's mobile identities are never read or stored (they are
+other phones'). On ARFCN 54, 15 s: 569 blocks, **0 bad**, 553 paging requests, 8 access
+grants (immediate assignment), 8 others (type 0x07 = System Information 2quater on the
+extended BCCH). So the phone hears the live network's paging and grants, receive only.
+This is the last receive step: decoding a page is receive, answering it is transmit.
+
+**Channel-list formats** `arfcn_list()` now names the format (TS 44.018 10.5.2.1b:
+bit map 0, range 1024/512/256/128, variable bit map) with the standard masks, and shows
+it in the report. **Only bit map 0 is decoded**, which is what all four cells here send.
+The range formats are a binary-tree encoding (10.5.2.13); its decode was prototyped and
+round-tripped in scratch (gsm/range.py), but the exact spec bit-widths, W-indexing and
+F0 handling could not be pinned down against a reference or a real range-format cell
+(none on this network), so a decoder is **not shipped**: a wrong one would invent
+plausible ARFCNs silently. If a range-format cell turns up, validate the first decode
+against a known list (e.g. the stock firmware's neighbour list) before trusting it.
+
+**Next** [L]
+- Compare a cell's parameters with the stock's field test on the same spot.
+- Cell selection from those parameters (path loss C1, barred, the strongest suitable
+  cell), staying on it, and looking at neighbours.
+- Range-format channel lists (TS 44.018 10.5.2.13): the cells here use bit map 0, so
+  the format is identified but not decoded; needed only for a cell whose list is a range.
+- A DCS cell, to settle the index order outside P-GSM.
+
+**After receive is stable: registering** The user wants to register with the SIM in the
+phone, on its real network. A private test cell isn't possible: a full-duplex SDR can't
+be sourced in Turkey (user, 2026-11-09), so os-design.md's "private network first" no
+longer holds as written. Not started: nothing here transmits. Before any transmit code,
+the safeguards are to be agreed with the user, since a mistake then affects other people
+on the cell. To look at then: what can be checked with a receive-only dongle, staying with
+the stock's calibration and its DSP's burst handling, and a hard limit on attempts.
+
+### Handoff for the next agent (2026-11-08, table updated 2026-11-09)
 
 **Where GSM stands.** Each step is verified on the phone unless marked.
 
@@ -1132,8 +1330,9 @@ data). That is how the tables below were resolved.
 | DSP boot, parameter records, frame clock (4615 µs) | works (0867fbc) |
 | Power scan, type 11, stock gain rule 25 → 10 / 40 | works: real levels, band order and rxlev sense settled |
 | FCCH (type 9) then SCH (type 10) | works: one good SCH per search, BSIC and FN decode |
-| BCCH (type 2) | **blocked**: every block bfi 1. The likeliest fix is the w6 gain ("Tests, best first" above) |
-| System Information, idle mode, paging | not started |
+| BCCH (type 2) | works: CRC good on 4 cells in Radio lab, 9 of 9 in Radio status |
+| System Information | SI 1, 2, 3, 4, 13 read; 3 and 4 decoded |
+| Idle mode (command 3, AFC tracking), paging by own identity | next |
 | Layers 2/3 (OsmocomBB), calls, SMS, transmit | not started; transmit only on a shielded test network (os-design.md) |
 
 **Code map**
@@ -1146,7 +1345,7 @@ data). That is how the tables below were resolved.
   decodes SI 3 and SI 4 (MCC, MNC, LAC, cell id), so a `network:` line
   appears in the report once a block passes its CRC.
 - `os/modules/radiolab` (live over USB, see above): the faster loop for
-  one-change experiments.
+  one-change experiments. Its defaults are now the settings that work.
 - QEMU: `os/tests/test-radio.py --nor <dump>` and `test-dsp.py --nor`.
   QEMU runs no DSP program, so they only check that the plumbing works and
   that nothing is reported that did not happen. The phone is the only
@@ -1159,6 +1358,7 @@ data). That is how the tables below were resolved.
   `consumed()`).
 - **Drain every DSP-written ring.** That means responses, BEP reports and
   rx blocks. A full ring makes the DSP assert (ids 3, 0x1900).
+- **Post no type 10 that may fail while not camped:** it breaks the reads after it.
 - The 6-bit gain field only takes the stock's three settings: 25 to start,
   10 after status 3, 40 after status 2. Status 3 at 10 means nothing is
   there.

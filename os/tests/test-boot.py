@@ -46,7 +46,8 @@ FIELDS = ('magic ticks idle_permille selftest_done selftest_pass pi_wait_ms '
           'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz audio_icon').split()
 MAGIC = 0x534f3342
 MENU = ['Apps', 'Files', 'Tools', 'System', 'Settings', 'Power']
-SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'USB', 'Storage', 'About']
+SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'USB', 'Storage',
+            'Developer', 'About']
 DISPLAY = ['Brightness', 'Screen off', 'Keypad light']
 ST_ALL = 0x3f
 FS_PATTERN = bytes((i * 7 + (i >> 8)) & 0xff for i in range(512))
