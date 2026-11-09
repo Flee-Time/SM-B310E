@@ -1029,28 +1029,30 @@ int l1_start(void)
     return rc;
 }
 
-/* [G] the five bands in the stock's index order; their sizes add up to
- * RF_TOTAL_CHANS (971). */
+/* [C] the index->band order read from the stock DSP (FUN at 0x5287), sizes adding
+ * to RF_TOTAL_CHANS (971): 0-124 P-GSM, 125-498 DCS1800, 499-547 E-GSM, 548-671
+ * GSM850, 672-970 PCS1900. (The earlier [G] order put DCS at 174-547 and was right
+ * only for P-GSM 0-124 - see docs/gsm-plan.md "The arfcn index order".) */
 uint16_t l1_arfcn_index(int band, int arfcn)
 {
     switch (band) {
     case L1_BAND_GSM900:
         if (arfcn >= 0 && arfcn <= 124)
-            return (uint16_t)arfcn;
+            return (uint16_t)arfcn;                     /* P-GSM: 0..124 */
         if (arfcn >= 975 && arfcn <= 1023)
-            return (uint16_t)(125 + arfcn - 975);
+            return (uint16_t)(499 + arfcn - 975);       /* E-GSM: 499..547 */
         break;
     case L1_BAND_DCS1800:
         if (arfcn >= 512 && arfcn <= 885)
-            return (uint16_t)(174 + arfcn - 512);
-        break;
-    case L1_BAND_PCS1900:
-        if (arfcn >= 512 && arfcn <= 810)
-            return (uint16_t)(548 + arfcn - 512);
+            return (uint16_t)(125 + arfcn - 512);       /* 125..498 */
         break;
     case L1_BAND_GSM850:
         if (arfcn >= 128 && arfcn <= 251)
-            return (uint16_t)(847 + arfcn - 128);
+            return (uint16_t)(548 + arfcn - 128);       /* 548..671 */
+        break;
+    case L1_BAND_PCS1900:
+        if (arfcn >= 512 && arfcn <= 810)
+            return (uint16_t)(672 + arfcn - 512);       /* 672..970 */
         break;
     }
     return L1_NO_INDEX;

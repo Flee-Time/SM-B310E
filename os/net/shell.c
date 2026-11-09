@@ -497,6 +497,56 @@ static void c_nvband(sess_t *s, int argc, char **argv)
         say(s, "  %-8s = 0x%02x (%s)\n", bn[i], caps[i], caps[i] ? "ENABLED" : "disabled");
 }
 
+/* Receive-only: sync a band/ARFCN (FCCH + SCH) and read its System Information,
+ * to prove the band's RX path and the arfcn-index->band mapping. No transmit. */
+static void c_rxcell(sess_t *s, int argc, char **argv)
+{
+    uint32_t band = 0, arfcn = 0;
+    l1_cell_t *c;
+    uint16_t index;
+    int rc, synced;
+
+    if (argc < 3 || !parse_num(argv[1], &band) || !parse_num(argv[2], &arfcn)) {
+        say(s, "usage: rxcell BAND ARFCN  (BAND 0=GSM900 1=DCS1800)\n");
+        return;
+    }
+    if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING) {
+        say(s, "rxcell: the DSP is busy\n");
+        return;
+    }
+    if (!(c = kmalloc(sizeof *c))) {
+        say(s, "rxcell: out of memory\n");
+        return;
+    }
+    l1_tx_power_set(L1_TX_OFF);          /* receive only */
+    if ((rc = dsp_boot()) != DSP_OK || (rc = l1_start()) != DSP_OK ||
+        (rc = l1_run()) != DSP_OK) {
+        say(s, "rxcell: DSP/L1 bring-up failed: %d\n", rc);
+        goto stop;
+    }
+    txb_idle(300);
+    index = l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 : L1_BAND_GSM900, (int)arfcn);
+    if (index == L1_NO_INDEX) {
+        say(s, "rxcell: no index for band %lu arfcn %lu\n",
+            (unsigned long)band, (unsigned long)arfcn);
+        goto stop;
+    }
+    synced = l1_cell_sync(c, index, 25, 0, 2000);
+    say(s, "rxcell: band %lu arfcn %lu index %u -> sync %d\n",
+        (unsigned long)band, (unsigned long)arfcn, index, synced);
+    if (synced == 1) {
+        say(s, "  SCH ok: BSIC %u (NCC %u BCC %u), frame offset %lu\n", c->bsic,
+            c->bsic >> 3, c->bsic & 7, (unsigned long)c->fn_offset);
+        l1_cell_read(c, 24, L1_SI3 | L1_SI4, 3000);
+        say(s, "  SI 0x%08lx, MCC %u MNC %0*u, LAC %u, cell %u, %lu good blocks\n",
+            (unsigned long)c->si_seen, c->mcc, (int)c->mnc_digits, c->mnc, c->lac,
+            c->ci, (unsigned long)c->good);
+    }
+stop:
+    dsp_stop();
+    kfree(c);
+}
+
 static void c_info(sess_t *s, int argc, char **argv)
 {
     uint32_t t = kernel_ticks(), idle = kernel_idle_permille(), load = idle < 1000 ? 1000 - idle : 0;
@@ -1402,6 +1452,7 @@ static const cmd_t cmds[] = {
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
+    { "rxcell", "BAND ARFCN", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },
