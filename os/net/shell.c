@@ -33,6 +33,7 @@
 #include "os/app.h"
 #include "os/arch.h"
 #include "os/drivers.h"
+#include "os/dsp.h"
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
@@ -406,6 +407,78 @@ static void c_simauth(sess_t *s, int argc, char **argv)
         say(s, "auth OK: RUN GSM ALGORITHM returned SRES+Kc (not shown)\n");
     else
         say(s, "auth failed: %s (0x%04x)\n", sim_strerror(rc), (unsigned)rc);
+}
+
+/* Keep the frame-instruction ring fed for ms (so the DSP clock never runs dry
+ * between bursts); the register app's proven feed rule. */
+#define TXB_RING_FREE  25               /* l1_fi_free() with the ring empty */
+#define TXB_AHEAD      8
+static void txb_idle(uint32_t ms)
+{
+    uint32_t t0 = kernel_ticks();
+
+    while (kernel_ticks() - t0 < ms) {
+        int n = l1_fi_free() - (TXB_RING_FREE - TXB_AHEAD);
+
+        if (n > 0 && l1_idle_post(n) == DSP_OK)
+            l1_ask_more(3);
+        l1_poll();
+        thread_sleep(1);
+    }
+}
+
+/* Transmit test: fire COUNT access bursts (~20 ms apart, a visible train) on the
+ * uplink of a band/ARFCN, at the minimum power (default) or, with "norm", the
+ * calibrated normal power. For watching emission on an SDR - e.g. a DCS1800 train
+ * checked near 900 MHz (its half-frequency). Keys the PA: a deliberate, bounded,
+ * developer test. Boots the DSP, fires, and leaves TX off again. */
+static void c_txburst(sess_t *s, int argc, char **argv)
+{
+    uint32_t band = 0, arfcn = 0, count = 0;
+    int normal = 0, ok = 0, rc;
+    uint16_t index;
+    long ukhz;
+
+    if (argc < 4 || !parse_num(argv[1], &band) || !parse_num(argv[2], &arfcn) ||
+        !parse_num(argv[3], &count)) {
+        say(s, "usage: txburst BAND ARFCN COUNT [norm]  (BAND 0=GSM900 1=DCS1800)\n");
+        return;
+    }
+    normal = argc > 4 && streq(argv[4], "norm");
+    if (count > 500)
+        count = 500;                    /* hard cap */
+    if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING) {
+        say(s, "txburst: the DSP is busy (Radio status / Register?)\n");
+        return;
+    }
+    l1_tx_power_set(normal ? L1_TX_NORMAL : L1_TX_MIN);  /* before l1_start() */
+    if ((rc = dsp_boot()) != DSP_OK || (rc = l1_start()) != DSP_OK ||
+        (rc = l1_run()) != DSP_OK) {
+        say(s, "txburst: DSP/L1 bring-up failed: %d\n", rc);
+        goto stop;
+    }
+    txb_idle(300);                      /* let the frame clock settle */
+    index = l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 : L1_BAND_GSM900, (int)arfcn);
+    ukhz = band == 1 ? 1710200L + 200L * ((long)arfcn - 512) : 890000L + 200L * (long)arfcn;
+    if (index == L1_NO_INDEX) {
+        say(s, "txburst: no arfcn index for band %lu arfcn %lu\n",
+            (unsigned long)band, (unsigned long)arfcn);
+        goto stop;
+    }
+    say(s, "txburst: %s power, band %lu arfcn %lu = uplink %ld kHz (half %ld kHz), "
+        "index %u; firing %lu burst(s), ~20 ms apart...\n", normal ? "NORMAL" : "minimum",
+        (unsigned long)band, (unsigned long)arfcn, ukhz, ukhz / 2, index,
+        (unsigned long)count);
+    for (uint32_t i = 0; i < count; i++) {
+        if (l1_access_post(index, 0, 0, 0x3f) == DSP_OK)    /* cal 0, channel request 0x3f */
+            ok++;
+        txb_idle(20);                   /* space the bursts; keep the clock alive */
+    }
+    say(s, "txburst: fired %d of %lu on %ld kHz; watch %ld kHz for its harmonic\n",
+        ok, (unsigned long)count, ukhz, ukhz / 2);
+stop:
+    dsp_stop();
+    l1_tx_power_set(L1_TX_OFF);          /* restore the safe default */
 }
 
 static void c_info(sess_t *s, int argc, char **argv)
@@ -1311,6 +1384,7 @@ static const cmd_t cmds[] = {
     { "help", "", "this list", c_help },
     { "info", "", "build, uptime, CPU, battery, card, network", c_info },
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
+    { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },
