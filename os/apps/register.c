@@ -312,6 +312,24 @@ static const char *phase_text(void)
     }
 }
 
+/* GSM900 arfcn index -> ARFCN and uplink frequency in kHz (integer, no float
+ * printf in the freestanding build). idx 0..124 is P-GSM (ARFCN 0..124), idx
+ * 125..173 is E-GSM (ARFCN 975..1023); uplink = 890 MHz + 0.2 MHz * n, with n
+ * taken as ARFCN-1024 in the extended band. Returns the ARFCN, or -1. */
+static int arfcn_from_index(uint16_t idx, int *ul_khz)
+{
+    int arfcn;
+
+    if (idx < 125)
+        arfcn = (int)idx;
+    else if (idx < G900)
+        arfcn = 975 + (int)idx - 125;
+    else
+        return *ul_khz = 0, -1;
+    *ul_khz = 890000 + 200 * (arfcn >= 975 ? arfcn - 1024 : arfcn);
+    return arfcn;
+}
+
 /* The non-rejected outcomes (REJECTED carries a cause number, drawn separately). */
 static void result_line(const char **msg, uint32_t *color)
 {
@@ -359,6 +377,16 @@ static void draw(screen_t *s)
         y += 12;
         snprintf(line, sizeof line, "LAC %u", reg_ui.lac);
         gfx_text_centered(y, line, C_DIM, FONT_SMALL, 1);
+        if (reg_ui.arfcn_index != L1_NO_INDEX) {
+            int ul, arfcn = arfcn_from_index(reg_ui.arfcn_index, &ul);
+
+            if (arfcn >= 0) {
+                y += 12;
+                snprintf(line, sizeof line, "ARFCN %d  UL %d.%d MHz", arfcn,
+                         ul / 1000, (ul % 1000) / 100);
+                gfx_text_centered(y, line, C_ACCENT, FONT_SMALL, 1);
+            }
+        }
     }
     gfx_text_centered(UI_BOTTOM - 12, "experimental, minimum power", C_DIM, FONT_SMALL, 1);
 }
