@@ -136,6 +136,10 @@
 #define TXBUF_SIZE      0x3eu
 #define TXBUF_IN        0x338u
 #define TXBUF_OUT       0x33au          /* the DSP's consumer index */
+/* The transmit power control level (PCL), double-buffered: FUN_0005f810(pcl, t)
+ * writes it at +0x3ec + 2 t, and the next TX frame's word 5 says so with bit 9
+ * and t in bits 11:10 (FUN_00062cce, from FUN_0004fe0a). */
+#define TXPWR_PCL       0x3ecu
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
@@ -998,6 +1002,12 @@ static int send_start(void)
     return rc == DSP_OK ? wait_cmd_taken(irqs) : rc;
 }
 
+/* Per DSP cell number: the gain setting its type-2 reads use (l1_burst_post). */
+#define CELL_SLOTS 64
+static uint8_t cell_gain[CELL_SLOTS];   /* 0x80 | setting; 0 = unset */
+static uint8_t txpwr_toggle;            /* the power-level buffer in use (0/1) */
+static bool txpwr_pending;              /* flag it in the next TX frame's word 5 */
+
 int l1_start(void)
 {
     int rc;
@@ -1015,6 +1025,9 @@ int l1_start(void)
     sm_clear(0, SHARE_CLEAR);
     *sm(SHARE_START) = START_MARK;      /* a plain store, as the stock's */
     frame_number = 0;
+    memset(cell_gain, 0, sizeof cell_gain);     /* no cell synced in this session */
+    txpwr_toggle = 0;                   /* the share is cleared: no level set */
+    txpwr_pending = false;
     dsp_info.fi_out = sm_r16(FI_OUT);
     rc = send_records();
     /* The stock's list (NOR 0xc800c) is 0, 0x10, 1, 3..15, 0x10: the records,
@@ -1161,18 +1174,28 @@ int l1_sch_post(uint16_t index, uint8_t gain, int cell)
  * FUN_00050f6a, fill them from a channel description's TN and TSC [L]);
  * word 6 = the serving index over 0xfc00; words 7-9 no monitor channel;
  * word 10 = cell << 10 | 1 << 8 (FUN_0006188a) | the card bit (card 0).
- * Word 6's gain: the stock has 0x3f and takes the gain from command 3. No
- * cell is tracked here, so it is the stock's starting setting, 25: 0x3f also
- * decodes a strong cell, with a worse BEP on the phone. */
+ * Word 6's gain: the stock has 0x3f and takes the gain from command 3, its
+ * per-channel AGC setting. No cell is tracked here, so word 6 carries that
+ * setting itself: the cell's, from l1_cell_gain_set() (rxlev / 2), else the
+ * stock's starting 25. A fixed 25 lost ~3 of 4 CCCH blocks on a rxlev-33 cell
+ * the stock reads at full bars (2026-11-09). */
+void l1_cell_gain_set(int cell, uint8_t gain)
+{
+    if (cell >= 0 && cell < CELL_SLOTS)
+        cell_gain[cell] = (uint8_t)(0x80u | (gain & 0x3fu));
+}
+
 int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
 {
     uint16_t fi[11], ext[3];
+    uint16_t g = cell >= 0 && cell < CELL_SLOTS && (cell_gain[cell] & 0x80u) ?
+                 (uint16_t)(cell_gain[cell] & 0x3fu) : 25u;
 
     fi_init(fi, ext, FI_BLOCK);
     fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
     fi[3] = (uint16_t)((tn & 7) << 8);
     fi[4] = (uint16_t)((tsc & 7) << 8);
-    fi[6] = (uint16_t)(25u << 10 | (index & 0x3ffu));
+    fi[6] = (uint16_t)(g << 10 | (index & 0x3ffu));
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     return post_fi(fi, ext);
 }
@@ -1224,16 +1247,41 @@ static int tx_desc_post(uint16_t tag, uint16_t type, const uint8_t *buf, uint32_
 
 /* One GSM access burst (RACH) - the osmocom RACH_REQ primitive. The stock
  * FUN_0004fe0a reduced to a standalone key-up: word 7 = the channel index
- * (l1_arfcn_index), word 10 = the cal slot, no hopping, band field 0. The TX
- * descriptor is the stock's {0, cal, 0, ra}: byte 1 the channel's RF-cal byte
- * (0 is accepted as a default), byte 3 the 8-bit channel request (random access).
- * The arm command {4,0,1} (command group 4) follows and the DSP keys the PA for
- * that one frame. STILL REFUSES unless the minimum-power clamp is armed - the
- * safety interlock stays until full-power registration is separately agreed.
+ * (l1_arfcn_index) under the stock's 0x3f in bits 15:10 (its skeleton's 0xffff
+ * kept; we had 0 there), word 10 = the cell slot, no hopping, band field 0. The
+ * TX descriptor is the stock's {0, bsic, 0, ra}: byte 1 is the cell table's +32
+ * byte (FUN_00048b90), which FUN_0004ce38 compares with SCH byte 0 >> 2 - the
+ * BSIC, which the burst's parity is coded with (TS 45.003 4.6). It was read as an
+ * RF-cal byte and sent as 0, so a BTS with any other BSIC dropped every burst.
+ * Byte 3 is the 8-bit channel request. The arm command {4,0,1} (command group 4)
+ * follows and the DSP keys the PA for that one frame. Refused in L1_TX_OFF.
  * SDR-verified 2026-11-09 to emit spec-compliant access bursts. */
-int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
+uint8_t l1_access_w7hi = 0x3f;          /* access frame word 7 bits 15:10 (test knob) */
+
+/* The stock's TX power control (FUN_00062cce / FUN_00062ca4 / FUN_0005f810): the
+ * level goes to share +0x3ec + 2 t, t toggling per change, and the next TX frame
+ * carries word 5 = bit 9 | t << 10 so the DSP takes it. Without it the DSP has no
+ * level: with word 7's 0x3f (the stock's) it sent nothing, with other values a
+ * weak, misshapen output ~50 dB under the stock's (SDR, 2026-11-10). */
+void l1_tx_level_set(uint8_t pcl)
 {
-    uint8_t desc[4] = { 0, cal, 0, ra };
+    txpwr_toggle ^= 1u;
+    sm_w16(TXPWR_PCL + 2u * txpwr_toggle, (uint16_t)(pcl & 0x1f));
+    txpwr_pending = true;
+}
+
+/* Word 5 for a TX frame: the power-update flag once after l1_tx_level_set. */
+static uint16_t txpwr_w5(void)
+{
+    if (!txpwr_pending)
+        return 0;
+    txpwr_pending = false;
+    return (uint16_t)(0x200u | (uint16_t)txpwr_toggle << 10);
+}
+
+int l1_access_post(uint16_t index, int slot, uint8_t bsic, uint8_t ra)
+{
+    uint8_t desc[4] = { 0, (uint8_t)(bsic & 0x3f), 0, ra };
     uint16_t fi[11], ext[3];
     int rc;
 
@@ -1244,8 +1292,8 @@ int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
     fi_init(fi, ext, FI_ACCESS);
     fi[0] = (uint16_t)(FI_ACCESS | 0xa000u);    /* the stock's type-6 flag bits */
     fi[3] = 0;                           /* no hopping, power band 0 */
-    fi[5] = 0;
-    fi[7] = (uint16_t)(index & 0x3ffu);
+    fi[5] = txpwr_w5();                  /* a new power level, if one was set */
+    fi[7] = (uint16_t)((uint16_t)(l1_access_w7hi & 0x3f) << 10 | (index & 0x3ffu));
     fi[10] = (uint16_t)(0x3ffu | (uint16_t)(slot & 0x3f) << 10);
     if ((rc = post_fi(fi, ext)) != DSP_OK)
         return rc;
@@ -1261,11 +1309,12 @@ int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
  *  - the burst is a type-2 rx frame rewritten to type 7: word0 = 7 | 0xa000,
  *    words 6 and 7 = the ARFCN index, word 10 = the cal slot, word 3's high
  *    nibble cleared; word1 carries the tag/burst/FN and word4 the TSC as for rx;
- *  - then a {0, cal, 0, burst} control descriptor and the arm command {4,0,1}.
+ *  - then a {0, bsic, 0, burst} control descriptor (byte 1 the cell table's +32
+ *    byte, the BSIC, as for the access burst) and the arm command {4,0,1}.
  * A caller posts the four bursts (burst 0..3) of a block in order on the
- * assigned timeslot. Serving-cell context (ARFCN index, cal slot, TN, TSC, cell,
- * cal byte) comes from the immediate assignment; pass it in rather than reading a
- * stock scell struct.
+ * assigned timeslot. Serving-cell context (ARFCN index, cell slot, TN, TSC, cell,
+ * BSIC) comes from the immediate assignment and the SCH; pass it in rather than
+ * reading a stock scell struct.
  *
  * RE-FAITHFUL + compile-checked, but NOT HARDWARE-VERIFIED: a dedicated channel
  * only exists after a network immediate-assignment, so this can be exercised only
@@ -1273,7 +1322,7 @@ int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra)
  * confirmed against real behaviour. The min-power clamp interlock still applies.
  * See docs/l1-osmocom.md. */
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
-                   uint8_t cal, const uint8_t block[23])
+                   uint8_t bsic, const uint8_t block[23])
 {
     uint16_t fi[11], ext[3];
     int rc;
@@ -1292,13 +1341,14 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     fi[4] = (uint16_t)((tsc & 7) << 8);
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);        /* word0: type 7 + flags */
+    fi[5] = txpwr_w5();                             /* a new power level, if set */
     fi[6] = (uint16_t)(index & 0x3ffu);             /* word6 = ARFCN index */
     fi[7] = (uint16_t)(index & 0x3ffu);             /* word7 = ARFCN index */
     fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
     fi[3] = (uint16_t)(fi[3] & 0x0fffu);            /* clear word3 bits 15:12 */
     if ((rc = post_fi(fi, ext)) != DSP_OK)
         return rc;
-    { const uint8_t ctl[4] = { 0, cal, 0, (uint8_t)(burst & 3) };
+    { const uint8_t ctl[4] = { 0, (uint8_t)(bsic & 0x3f), 0, (uint8_t)(burst & 3) };
       if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
           return rc; }
     { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
@@ -1321,6 +1371,24 @@ int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux)
 {
     uint16_t g = gain <= 1 ? gain : gain == 3 ? 2 : gain == 4 ? 3 : 0;
     uint16_t cmd[5] = { 3, sel, g, (uint16_t)(frame_number & 0xffffu), aux };
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    return post_cmd(cmd);
+}
+
+/* Command 3 as the stock's idle camping sends it (FUN_000589d8): {3, cell, mode,
+ * rxlev, flag | 1 << (8 + card)}, read on the DSP side by 0x9ab4 as cell, mode
+ * (0..3), the gain source and bit 0 = start tracking. A tracked cell's burst
+ * frequency error goes straight to the AFC (0x79b3) and 0xff72 bit 3 (camped) is
+ * set, so the synthesiser follows the cell - the transmitter included. Untracked,
+ * the error only feeds a per-cell receive offset (0xebe5 + cell) and the uplink
+ * stays at the crystal's frequency. The Radio lab's {3, 0, 0, 38, 0x0101} read
+ * 4 of 4 blocks with 8x better BEP (docs/gsm-plan.md). */
+int l1_cell_track(int cell, uint8_t rxlev)
+{
+    const uint16_t cmd[5] = { 3, (uint16_t)(cell & 0x3f), 0, (uint16_t)(rxlev & 0x7f),
+                              0x0101u };
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;

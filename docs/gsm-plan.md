@@ -1412,6 +1412,122 @@ uplink ARFCN and watch it on the NooElec. Transmit only after the legal/safety
 specifics (BTK/type-approval, attempt cap, min gain) are agreed; the antenna may
 also be removed as an independent hardware backstop. (App API 2.15.)
 
+### Receive gain the stock's way, and the home cell (phone, 2026-11-09)
+
+The stock shows full bars on Türk Telekom (286-03) where the OS kept failing to
+find it. Three things the OS did differently from the stock [C for the stock code]:
+
+- **Sync gain.** FUN_0005cafe gives the FCCH search's gain hint: the per-index
+  byte at 0x04286a32 + 6·idx + 3, halved, if set; else the BA entry's +5 byte
+  (the averaged rxlev; FUN_0005c7e4 seeds the sweep table with it << 4) halved
+  and capped at 45; else 0x0422f031 (25). So **setting = rxlev / 2**, which holds
+  the signal at one level in the receiver (gain index ≈ 2·setting, 1 dB apart).
+  The OS synced everything at 25. Now `l1_gain_for_rxlev()`; `l1_cell_select`
+  and `l1_cell_stay` (the camped AGC) use it too.
+- **Read gain.** `l1_burst_post` had a fixed 25 in word 6 for every BCCH, CCCH
+  and SDCCH read. Now each DSP cell slot keeps the setting it was synced with
+  (`l1_cell_gain_set`, cleared by `l1_start`).
+- **Scan.** The Register scan took one look at 25 and dropped status 2 and 3, so
+  a weak cell was in some scans and not others. It now follows FUN_0005c3e2: 25
+  first, status 3 → 10, status 2 → 40, valid results averaged over 4 sweeps.
+
+Receive only, `rxcell 0 ARFCN GAIN 6` (CCCH blocks in 6 s):
+
+| ARFCN | gain 3 | 5 | 8 | 12 | 16 | 20 |
+|---|---|---|---|---|---|---|
+| 998 (idx 522, TT) | 227/0 | 227/0 | 227/0 | 227/0 | 227/0 | 227/0 |
+| 1000 (idx 524, TT) | 179/48 | 181/46 | 160/67 | 195/32 | 107/120 | no sync |
+
+So the two TT cells differ more than gain does: 998 decodes every block, 1000
+loses 15–50%. The earlier failed attempts were all on 1000 (74 good CCCH blocks
+in 8 s), where a lost IMMEDIATE ASSIGNMENT is a failed attempt. Register now
+probes each home cell's CCCH for 1.5 s and uses the best of up to 3 (one at 90%
+or better is taken at once), skips channels a foreign cell lists in SI 1 / SI 2,
+and keeps the cell it used in `/b310e-os/gsm-home-cell.txt` (`mcc mnc index`,
+read before the DSP starts, written after it stops) to try first next time, as
+the stock keeps its last cell.
+
+- `l1_rxlev_measure` is erratic on these cells: 998 read rxlev 11 in one run and
+  40 (−70 dBm) in the next. Status 3 at 10 counts as a 0 sample, which drags
+  the average down; why a −70 dBm cell answers "too weak" at all is open [G].
+- Grants were matched on the RA byte only. 998 hands out about 10 a second, so
+  another phone's grant with our RA came every ~25 s. The request reference's
+  T1'/T3/T2 (TS 44.018 10.5.2.30) is now checked too, ±4 frames of the RACH's
+  cell FN, and the offset is logged (`refd`).
+- **Only one RACH was ever sent** (every build since cdb8c46). The grant wait
+  filled the whole frame ring (`while fi_free() > 0`), so when it ran out the next
+  `l1_access_post` got DSP_EFULL, and that return path skipped copying the progress
+  out, so the log showed `cch=0` (the 22:39 build, one RACH and no retry, had
+  shown 74 good CCCH blocks in the 2 s after its burst: the receiver was fine). The
+  wait now keeps 8 queued, finishes a started 4-burst block before a RACH (also
+  `l1_cch_read`), reports on every exit (`rach=` in the log) and sends at most the
+  cell's M + 1 attempts (RACH control, capped at 4).
+- `l1_cell_sync` on a channel with no BCCH took its whole budget (1.5 s): the
+  early exit wanted the ring at AHEAD / 2 while `feed_idle` keeps it at AHEAD. It
+  now gives up once the search has surely run (queued + window + SETTLE + 20
+  frames): 314 ms, while BCCH cells still sync in 54–88 ms.
+- **The RACH was coded with BSIC 0** [C]. With retries working (`rach=2`, 119
+  CCCH blocks heard), no grant ever carried our RA. FUN_0004fe0a's descriptor is
+  {0, X, 0, RA} with X = the serving cell record's +32 byte; FUN_00048b90 /
+  FUN_00048bc0 get and set +32 of the 32 × 180-byte cell table, and FUN_0004ce38
+  (good SCH, idle) compares it with SCH byte 0 >> 2 (0xff = unknown): **+32 is the
+  BSIC**. An access burst's 6 parity bits are XORed with the BSIC (TS 45.003 4.6),
+  so with 0 the BTS dropped every burst. FUN_00050426 (uplink normal bursts)
+  sends the same byte. `l1_access_post` / `l1_uplink_post` now take the BSIC
+  (`reg_lu_run` passes `c->bsic`); TT 997's is 54 (NCC 6, BCC 6). Word 7 of the
+  access frame also keeps the stock's 0x3f in bits 15:10 (it was 0).
+- With the BSIC right, still no grant (2 RACHes, ~150 CCCH blocks heard, no RA
+  hit). Next difference: the stock camps (command 3, tracking on) before any
+  access, so its AFC follows the cell and the uplink is on the cell's frequency;
+  untracked, the error only feeds a per-cell receive offset and the uplink stays
+  at the crystal's. `l1_cell_track()` sends {3, cell, 0, rxlev, 0x0101}; receive
+  only, CCCH stays at 98–100% tracked (997, 54), so it is safe. Register now
+  camps and reads 1.5 s tracked before the RACH. Header +0x0e of CCCH blocks reads
+  0, so it is no frequency readout.
+- Camped too (CCCH 98% tracked), still no grant (2 RACHes, 151 blocks, 6 grants
+  heard, none ours). The access frame, the descriptor {0, BSIC, 0, RA} and the
+  arm command {4, 0, 1, 0, 0} (FUN_0004b49a builds {4, r0, r1, 0, r2}) now match
+  the stock, and FUN_0004fb10 before the RACH is plain idle frames (the spacing).
+  Left: transmit power (the owner's SDR showed the stock's RACH far stronger),
+  and the RF-path setup the stock does and we don't (1800 receive is dead too).
+  The stock has ~45 DSP command types (builders FUN_0004b3a4..FUN_0004ba44); we
+  send 0, 1, 2, 3, 4, 0x1b and 0x2f.
+- **Our transmitter, measured** (NooElec at 885 MHz, 2.048 MS/s, gain 40.2 dB,
+  same spot; `txburst 0 997 N max w7=V`, BSIC 0 so the BTS drops them; scripts in
+  the session scratchpad: burst.py, timeline.py). TT's uplink is quiet with our
+  phone silent (3 captures). With word 7 bits 15:10 = 0x3f (the stock skeleton's,
+  set that morning) **nothing is sent**, so the last Register runs sent no RACH
+  at all. With 0 (as before), and in some runs with 2, 19 or 31 (not 5, 8, 12,
+  16, 24), the radio sends **clusters of 4–5 full-slot (~0.6 ms) bursts on
+  consecutive frames, every ~110 ms**, about 17 dB over the noise, not the 30
+  single access bursts ~20 ms apart that were posted. The BTS downlink is ~9 dB
+  over the noise at the same gain, so a real +33 dBm burst from beside the
+  antenna should be some 70 dB stronger than it: our transmit is tens of dB low,
+  as the owner saw. Next: the stock's RACH captured the same way.
+- **The stock, and the cause** (same SDR set-up, gain 29.7 dB). The stock's
+  bursts on 884.6 MHz peak at 0 dBFS, +54 dB over the noise: single ~0.6 ms
+  bursts in groups of 4 on consecutive frames (SDCCH blocks). Ours with
+  `L1_TX_NORMAL` (the calibration tables sent as they are): single ~0.4 ms
+  access bursts, 18.5-23 ms apart, +55 dB - **the same level and the right
+  shape**, with word 7 at 0x3f or 0, camped or not. With `L1_TX_MAX` (setpoints
+  16..33 all overwritten with the top one): nothing, or the weak clusters above.
+  So every Register attempt since 7886bfd (23:00, 9 Nov) sent no usable RACH;
+  before it the BSIC was 0 and only one RACH went out. Register now uses
+  `L1_TX_NORMAL`. Do not rewrite the APC table: the DSP needs its real shape.
+- The stock sets the power level through share +0x3ec + 2 t (FUN_0005f810),
+  flagged in the next TX frame's word 5 as bit 9 | t << 10 (FUN_00062cce);
+  `l1_tx_level_set()` does the same and Register sets MS_TXPWR_MAX_CCH (not
+  above PCL 5) before the RACH. Its effect is not measured yet: the dongle clips
+  at this range for PCL 5, 12 and 19 alike [G].
+- 10 Nov, just after midnight: 998 no longer syncs at any gain and its level jumps
+  (5–36), while 997 (idx 521) syncs in 54–88 ms at −69 dBm with 100% CCCH. It looks
+  like 998 stopped being a BCCH carrier [G].
+- Not done: command 3 (the stock tracks its serving cell with it, which locks
+  the AFC; 8× better BEP in the lab). `l1_dm_est` fills command 3 as
+  {3, sel, gain, frame, aux}, but 0x9ab4 reads {3, cell, mode, gain, flags}
+  (see "Command 3" above), so its dedicated-mode use needs checking before the
+  SDCCH step can be trusted.
+
 ## Milestones
 
 1. **M0:** confirm the carrier still runs 2G, and that stock calls and

@@ -436,20 +436,32 @@ static void c_txburst(sess_t *s, int argc, char **argv)
 {
     static const char *modename[] = { "off", "minimum", "NORMAL", "MAX" };
     uint32_t band = 0, arfcn = 0, count = 0;
-    int mode = L1_TX_MIN, ok = 0, rc;
+    int mode = L1_TX_MIN, ok = 0, rc, pcl = -1, camp = 0, slot = 0;
     uint16_t index;
     long ukhz;
 
     if (argc < 4 || !parse_num(argv[1], &band) || !parse_num(argv[2], &arfcn) ||
         !parse_num(argv[3], &count)) {
-        say(s, "usage: txburst BAND ARFCN COUNT [norm|max]  (BAND 0=GSM900 1=DCS1800)\n");
+        say(s, "usage: txburst BAND ARFCN COUNT [norm|max] [pcl=N] [w7=V]  (BAND 0=GSM900"
+               " 1=DCS1800; pcl: the power control level, the stock's way)\n");
         return;
     }
+    l1_access_w7hi = 0x3f;               /* the stock's, unless w7= says otherwise */
     for (int i = 4; i < argc; i++) {
+        uint32_t v;
+
         if (streq(argv[i], "norm"))
             mode = L1_TX_NORMAL;
         else if (streq(argv[i], "max"))
             mode = L1_TX_MAX;
+        else if (argv[i][0] == 'w' && argv[i][1] == '7' && argv[i][2] == '=' &&
+                 parse_num(argv[i] + 3, &v))
+            l1_access_w7hi = (uint8_t)(v & 0x3f);
+        else if (argv[i][0] == 'p' && argv[i][1] == 'c' && argv[i][2] == 'l' &&
+                 argv[i][3] == '=' && parse_num(argv[i] + 4, &v) && v < 32)
+            pcl = (int)v;
+        else if (streq(argv[i], "camp"))
+            camp = 1;
     }
     if (count > 500)
         count = 500;                    /* hard cap */
@@ -465,18 +477,37 @@ static void c_txburst(sess_t *s, int argc, char **argv)
     }
     txb_idle(300);                      /* let the frame clock settle */
     index = l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 : L1_BAND_GSM900, (int)arfcn);
-    ukhz = band == 1 ? 1710200L + 200L * ((long)arfcn - 512) : 890000L + 200L * (long)arfcn;
+    ukhz = band == 1 ? 1710200L + 200L * ((long)arfcn - 512) :
+           890000L + 200L * ((long)arfcn - (arfcn >= 975 ? 1024L : 0L));   /* E-GSM: n - 1024 */
     if (index == L1_NO_INDEX) {
         say(s, "txburst: no arfcn index for band %lu arfcn %lu\n",
             (unsigned long)band, (unsigned long)arfcn);
         goto stop;
     }
+    if (camp) {                         /* as the stock transmits: synced and tracked */
+        static l1_cell_t tc;
+        int rxlev = l1_rxlev_measure(index, 6, 600);
+        l1_cch_t st;
+
+        if (l1_cell_sync(&tc, index, l1_gain_for_rxlev(rxlev), 0, 2000) != 1) {
+            say(s, "txburst: camp: no sync on index %u (rxlev %d)\n", index, rxlev);
+            goto stop;
+        }
+        slot = tc.slot;
+        rc = l1_cell_track(tc.slot, (uint8_t)(2 * tc.gain));
+        memset(&st, 0, sizeof st);
+        l1_cch_read(&tc, 1000, &st);    /* the AFC settles on the cell */
+        say(s, "txburst: camped on index %u, BSIC %u, rxlev %d, command 3 %d, CCCH %lu/%lu\n",
+            index, tc.bsic, rxlev, rc, (unsigned long)st.blocks, (unsigned long)st.bad);
+    }
+    if (pcl >= 0)
+        l1_tx_level_set((uint8_t)pcl);  /* flagged in the first burst's word 5 */
     say(s, "txburst: %s power, band %lu arfcn %lu = uplink %ld kHz (half %ld kHz), "
-        "index %u; firing %lu burst(s), ~20 ms apart...\n", modename[mode],
-        (unsigned long)band, (unsigned long)arfcn, ukhz, ukhz / 2, index,
-        (unsigned long)count);
+        "index %u, word 7 bits 15:10 = 0x%02x, PCL %d; firing %lu burst(s), ~20 ms apart...\n",
+        modename[mode], (unsigned long)band, (unsigned long)arfcn, ukhz, ukhz / 2, index,
+        l1_access_w7hi, pcl, (unsigned long)count);
     for (uint32_t i = 0; i < count; i++) {
-        if (l1_access_post(index, 0, 0, 0x3f) == DSP_OK)    /* cal 0, channel request 0x3f */
+        if (l1_access_post(index, slot, 0, 0x3f) == DSP_OK) /* BSIC 0: no BTS takes it */
             ok++;
         txb_idle(20);                   /* space the bursts; keep the clock alive */
     }
@@ -484,6 +515,7 @@ static void c_txburst(sess_t *s, int argc, char **argv)
         ok, (unsigned long)count, ukhz, ukhz / 2);
 stop:
     dsp_stop();
+    l1_access_w7hi = 0x3f;
     l1_tx_power_set(L1_TX_OFF);          /* restore the safe default */
 }
 
@@ -507,17 +539,24 @@ static void c_nvband(sess_t *s, int argc, char **argv)
  * to prove the band's RX path and the arfcn-index->band mapping. No transmit. */
 static void c_rxcell(sess_t *s, int argc, char **argv)
 {
-    uint32_t band = 0, arfcn = 0, gain = 25;
+    uint32_t band = 0, arfcn = 0, gain = 0, cch_s = 0, track = 0;
     l1_cell_t *c;
     uint16_t index;
-    int rc, synced;
+    int rc, synced, rxlev = -1;
 
     if (argc < 3 || !parse_num(argv[1], &band) || !parse_num(argv[2], &arfcn)) {
-        say(s, "usage: rxcell BAND ARFCN [GAIN]  (BAND 0=900 1=1800; GAIN 0-63, def 25)\n");
+        say(s, "usage: rxcell BAND ARFCN [GAIN] [CCH_S]  (BAND 0=900 1=1800; GAIN 1-63,"
+               " 0 = the stock rule rxlev/2 (default); CCH_S: seconds of CCCH to count)\n");
         return;
     }
     if (argc > 3)
         parse_num(argv[3], &gain);
+    if (argc > 4)
+        parse_num(argv[4], &cch_s);
+    if (argc > 5)
+        parse_num(argv[5], &track);
+    if (cch_s > 30)
+        cch_s = 30;
     if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING) {
         say(s, "rxcell: the DSP is busy\n");
         return;
@@ -539,9 +578,17 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
             (unsigned long)band, (unsigned long)arfcn);
         goto stop;
     }
-    synced = l1_cell_sync(c, index, (uint8_t)gain, 0, 2000);
-    say(s, "rxcell: band %lu arfcn %lu index %u gain %lu -> sync %d\n",
-        (unsigned long)band, (unsigned long)arfcn, index, (unsigned long)gain, synced);
+    rxlev = l1_rxlev_measure(index, 6, 600);
+    if (!gain)
+        gain = l1_gain_for_rxlev(rxlev);
+    {
+        uint32_t ts = kernel_ticks();
+
+        synced = l1_cell_sync(c, index, (uint8_t)gain, 0, 2000);
+        say(s, "rxcell: band %lu arfcn %lu index %u rxlev %d (%d dBm) gain %lu -> sync %d"
+            " in %lu ms\n", (unsigned long)band, (unsigned long)arfcn, index, rxlev,
+            rxlev - 110, (unsigned long)gain, synced, (unsigned long)(kernel_ticks() - ts));
+    }
     if (synced == 1) {
         say(s, "  SCH ok: BSIC %u (NCC %u BCC %u), frame offset %lu\n", c->bsic,
             c->bsic >> 3, c->bsic & 7, (unsigned long)c->fn_offset);
@@ -549,6 +596,26 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
         say(s, "  SI 0x%08lx, MCC %u MNC %0*u, LAC %u, cell %u; %lu good / %lu bad blocks\n",
             (unsigned long)c->si_seen, c->mcc, (int)c->mnc_digits, c->mnc, c->lac,
             c->ci, (unsigned long)c->good, (unsigned long)c->bad);
+        /* receive only: the channel the grant comes on; with TRACK, again after
+         * command 3 (camping: the AFC follows the cell), to compare */
+        for (int pass = 0; cch_s && pass < (track ? 2 : 1); pass++) {
+            l1_cch_t st;
+            int32_t h7;
+            uint32_t n7;
+
+            if (pass == 1)
+                say(s, "  command 3 (track, rxlev %u): %d\n", 2 * c->gain,
+                    l1_cell_track(c->slot, (uint8_t)(2 * c->gain)));
+            memset(&st, 0, sizeof st);
+            l1_cch_hdr7(&h7, &n7);      /* reset */
+            rc = l1_cch_read(c, cch_s * 1000u, &st);
+            l1_cch_hdr7(&h7, &n7);
+            say(s, "  CCCH %lus%s: %lu good / %lu bad, %lu grants, %lu paging, hdr+0e avg %ld"
+                " (rc %d)\n", (unsigned long)cch_s, pass ? " tracked" : "",
+                (unsigned long)st.blocks, (unsigned long)st.bad,
+                (unsigned long)st.imm_assign, (unsigned long)st.paging,
+                n7 ? (long)(h7 / (int32_t)n7) : 0L, rc);
+        }
     }
 stop:
     dsp_stop();
@@ -1460,7 +1527,7 @@ static const cmd_t cmds[] = {
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
-    { "rxcell", "BAND ARFCN [GAIN]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
+    { "rxcell", "BAND ARFCN [GAIN] [CCH_S] [TRACK]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },

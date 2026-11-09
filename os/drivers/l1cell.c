@@ -260,6 +260,18 @@ int l1_rxlev_measure(uint16_t index, int samples, uint32_t budget_ms)
     return got ? (sum + got / 2) / got : 0;
 }
 
+/* FUN_0005cafe: the channel's stored level (BA entry +5, the averaged rxlev that
+ * FUN_0005c7e4 also seeds the sweep table with) halved, capped at 45, or the
+ * default 25 (0x0422f031) when there is none. It is the gain hint of the FCCH
+ * search; before this the OS synced everything at 25 and lost weak cells. */
+uint8_t l1_gain_for_rxlev(int rxlev)
+{
+    if (rxlev <= 0)
+        return GAIN_START;
+    rxlev /= 2;
+    return (uint8_t)(rxlev > 45 ? 45 : rxlev);
+}
+
 /* ---- sync ------------------------------------------------------------------ */
 
 /* GSM 05.02 SCH information bits, the order OsmocomBB decodes them in */
@@ -275,7 +287,7 @@ static void sch_decode(const uint8_t *d, uint32_t *bsic, uint32_t *fn)
 
 int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t budget_ms)
 {
-    uint32_t t0 = kernel_ticks(), end_fn;
+    uint32_t t0 = kernel_ticks(), end_fn, t_post, fail_ms;
     l1_rx_t rx;
     int rc;
 
@@ -283,14 +295,21 @@ int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t 
     c->index = index;
     c->gain = gain;
     c->slot = (uint8_t)slot;
+    l1_cell_gain_set(slot, gain);       /* its BCCH/CCCH/SDCCH reads run at it too */
     while (queued() > 2 && kernel_ticks() - t0 < 200) {     /* nearly drained */
         l1_poll();
         thread_sleep(2);
     }
     while (l1_rx_read(&rx) == 1)        /* nothing old */
         ;
+    /* A channel with no BCCH gives up once the search has surely run: what was
+     * queued, the window, SETTLE and a margin, at 4.615 ms a frame. The frame test
+     * below hardly ever fired (feed_idle keeps AHEAD queued, never AHEAD / 2), so
+     * every such channel took the whole budget: 1.5 s each in Register's search. */
+    fail_ms = (uint32_t)(queued() + WINDOW + SETTLE + 20) * 5u;
     if ((rc = l1_fcch_post(index, gain, WINDOW, slot)) != DSP_OK)
         return rc;
+    t_post = kernel_ticks();
     end_fn = (l1_next_fn() + SETTLE) % FN_MOD;
     /* No type 10 reads: one that fails sets the DSP's frequency back to its
      * centre value when it is not camped, and later reads fail (phone). The
@@ -315,7 +334,8 @@ int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t 
         }
         if (rc < 0)
             return rc;
-        if ((l1_next_fn() + FN_MOD - end_fn) % FN_MOD < FN_MOD / 2 && queued() <= AHEAD / 2)
+        if ((l1_next_fn() + FN_MOD - end_fn) % FN_MOD < FN_MOD / 2 &&
+            (queued() <= AHEAD / 2 || kernel_ticks() - t_post >= fail_ms))
             break;                      /* the window has gone by, and no SCH */
         thread_sleep(2);
     }
@@ -409,6 +429,19 @@ int l1_cch_classify(const uint8_t d[23])
     return d[2];                        /* the message type; identities not read */
 }
 
+/* Header +0x0e of the good CCCH blocks, summed: a signed halfword the stock
+ * logs, SNR or frequency error [G]. Diagnostic only (l1_cch_hdr7). */
+static int32_t hdr7_sum;
+static uint32_t hdr7_n;
+
+void l1_cch_hdr7(int32_t *sum, uint32_t *n)
+{
+    *sum = hdr7_sum;
+    *n = hdr7_n;
+    hdr7_sum = 0;
+    hdr7_n = 0;
+}
+
 static void take_cch(l1_cch_t *st)
 {
     l1_rx_t rx;
@@ -422,6 +455,8 @@ static void take_cch(l1_cch_t *st)
             st->bad++;
             continue;
         }
+        hdr7_sum += (int16_t)rx.hdr[7];
+        hdr7_n++;
         st->blocks++;
         type = l1_cch_classify(rx.data);
         if (type < 0) {
@@ -448,14 +483,18 @@ int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st)
     memset(st, 0, sizeof(*st));
     if (!c->synced)
         return DSP_ECMD;
-    while (kernel_ticks() - t0 < ms) {
-        bool batch = false;
+    /* past ms, only the block already started is completed: the caller may post a
+     * RACH next, which must not land inside a half-posted block */
+    for (;;) {
+        bool batch = false, over = kernel_ticks() - t0 >= ms;
 
-        while (queued() < AHEAD) {
+        if (over && burst < 0)
+            break;
+        while (queued() < AHEAD && !(over && burst < 0)) {
             uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
             int rc;
 
-            if (burst < 0 && cch_start(m))
+            if (burst < 0 && !over && cch_start(m))
                 burst = 0;
             if (burst >= 0) {
                 rc = l1_burst_post(c->index, TAG_BCCH, burst, 0, c->bsic & 7, c->slot);
@@ -499,7 +538,7 @@ static int sdcch_burst(int base, uint32_t m)
  * (l1_burst_post) and uplink (l1_uplink_post) primitives. The uplink block framing
  * (one TXBUFQ write vs per burst) and the dedicated tag are confirmed at the
  * cleared registration; it is HW-testable only there. */
-int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
+int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 uint32_t ms, const uint8_t *ul, l1_dm_t *st)
 {
     uint32_t t0 = kernel_ticks();
@@ -520,7 +559,7 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
             if (db >= 0) {
                 rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
             } else if (ub >= 0 && ul) {
-                rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, cal, ul);
+                rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, bsic, ul);
                 if (rc == DSP_OK)
                     st->ul_bursts++;
             } else {
@@ -568,7 +607,7 @@ int l1_cell_select(const uint16_t *index, int n, uint16_t mcc, uint16_t mnc, l1_
     for (int i = 0; i < n; i++) {
         l1_cell_t *c = &cells[i];
         int rxlev = l1_rxlev_measure(index[i], SELECT_SAMPLES, SELECT_MEASURE_MS);
-        int rc = l1_cell_sync(c, index[i], (uint8_t)GAIN_START, i, SELECT_SYNC_MS);
+        int rc = l1_cell_sync(c, index[i], l1_gain_for_rxlev(rxlev), i, SELECT_SYNC_MS);
 
         c->rxlev = rxlev >= 0 ? (int16_t)rxlev : -1;
         c->suitable = false;
@@ -618,6 +657,9 @@ int l1_cell_stay(l1_cell_t *c, uint32_t ms, l1_stay_t *st)
                 st->rxlev_min = (int16_t)rxlev;
             if (rxlev > st->rxlev_max)
                 st->rxlev_max = (int16_t)rxlev;
+            /* the stock's camped AGC: the cell's reads follow its level */
+            c->gain = l1_gain_for_rxlev(rxlev);
+            l1_cell_gain_set(c->slot, c->gain);
         }
         if ((rc = l1_cell_read(c, STAY_BLOCKS, 0, 2000u)) < 0)
             return rc;

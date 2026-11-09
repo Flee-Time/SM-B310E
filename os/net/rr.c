@@ -57,6 +57,7 @@ int rr_parse_imm_assign(const uint8_t block[23], rr_chan_desc_t *d)
     if (rr_parse_chan_desc(block + 4, d) < 0)
         return -1;
     d->ra = block[7];
+    d->ref_fn = (uint16_t)(block[8] << 8 | block[9]);   /* T1'(5) T3(6) T2(5) */
     d->ta = (uint8_t)(block[10] & 0x3f);        /* timing advance, 6 bits */
     return 0;
 }

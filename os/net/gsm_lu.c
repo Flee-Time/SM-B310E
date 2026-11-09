@@ -22,6 +22,27 @@
                                          * enough for the RX to settle after the TX
                                          * burst and read the CCCH (a short wait gets 0) */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
+#define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
+#define LU_REF_SLACK    4               /* frames either side of our RACH's: the grant's
+                                         * request reference is the frame the BTS heard
+                                         * it in, and our local->cell FN map is +-1 at best */
+
+/* TS 44.018 10.5.2.30: T1' = FN div 1326 mod 32, T3 = FN mod 51, T2 = FN mod 26. */
+static uint16_t ref_of_fn(uint32_t fn)
+{
+    return (uint16_t)((fn / 1326u % 32u) << 11 | (fn % 51u) << 5 | (fn % 26u));
+}
+
+/* How many frames the grant's request reference is from our RACH's frame, or 127
+ * if not within LU_REF_SLACK. The RA byte alone is 8 bits: a busy cell grants ~10
+ * a second, so another phone's grant with our RA comes every ~25 s. */
+static int ref_delta(uint16_t ref, uint32_t rach_fn)
+{
+    for (int d = -LU_REF_SLACK; d <= LU_REF_SLACK; d++)
+        if (ref_of_fn((rach_fn + LU_FN_MOD + (uint32_t)d) % LU_FN_MOD) == ref)
+            return d;
+    return 127;
+}
 
 /* CCCH FN mod 51 of the non-combined config (as l1cell.c cch_start). */
 static int ccch_block(uint32_t m)
@@ -30,51 +51,94 @@ static int ccch_block(uint32_t m)
            m == 32 || m == 36 || m == 42 || m == 46;
 }
 
-/* Read CCCH until an IMMEDIATE ASSIGNMENT whose request reference (RA) matches
- * ours arrives, or the budget runs out. 0 + *ch filled, or -1. Counts the good
- * CCCH blocks and IMMEDIATE ASSIGNMENTs seen into prog for diagnostics. */
-static int wait_imm_assign(l1_cell_t *c, uint8_t ra, rr_chan_desc_t *ch, uint32_t ms,
-                           reg_lu_progress_t *prog)
+/* Keep the frame ring LU_AHEAD deep, as every other L1 loop does ("keep about 8
+ * instructions queued", docs/gsm-plan.md). The first version filled all of it,
+ * so when a grant wait ran out the ring was full and the next RACH got DSP_EFULL:
+ * every retransmission build sent one RACH, never a second. */
+#define LU_FI_EMPTY     25              /* l1_fi_free() with the ring empty */
+#define LU_AHEAD        8
+
+/* Top the ring up with this cell's CCCH bursts (4 per block, each block from its
+ * first burst) and idle frames. finishing: start no new block and stop once the
+ * current one is all posted, so a RACH never lands inside a half-posted block.
+ * DSP_OK or the post's error. */
+static int cch_pump(l1_cell_t *c, int *burst, int finishing)
+{
+    while (l1_api.fi_free() > LU_FI_EMPTY - LU_AHEAD) {
+        uint32_t m = (l1_api.next_fn() + c->fn_offset) % LU_FN_MOD % 51u;
+        int rc;
+
+        if (*burst < 0 && !finishing && ccch_block(m))
+            *burst = 0;
+        if (*burst >= 0) {
+            rc = l1_api.burst_post(c->index, 7, *burst, 0, c->bsic & 7, c->slot);
+            if (rc == DSP_OK && ++*burst == 4)
+                *burst = -1;
+        } else if (finishing) {
+            return DSP_OK;
+        } else {
+            rc = l1_api.idle_post(1);
+        }
+        if (rc != DSP_OK)
+            return rc;
+    }
+    return DSP_OK;
+}
+
+/* Received blocks: count the good CCCH ones and look for our grant. 1 when
+ * IMMEDIATE ASSIGNMENT for our RA and frame came (*ch filled), else 0. */
+static int take_cch(uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
+                    reg_lu_progress_t *prog)
+{
+    l1_rx_t rx;
+
+    while (l1_api.rx_read(&rx) == 1) {
+        if ((rx.hdr[0] != 7 && rx.hdr[0] != 8) || rx.hdr[1] != 0)
+            continue;
+        prog->cch_blocks++;
+        if (rr_parse_imm_assign(rx.data, ch) == 0) {
+            prog->imm_seen++;
+            if (ch->ra == ra) {
+                int d = ref_delta(ch->ref_fn, rach_fn);
+
+                prog->ra_hits++;
+                prog->ref_d = (int8_t)d;
+                if (d != 127)
+                    return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Read CCCH until an IMMEDIATE ASSIGNMENT whose request reference (RA and frame)
+ * matches our RACH (sent in cell frame rach_fn) arrives, or the budget runs out.
+ * Either way the block being posted is completed and the ring left LU_AHEAD
+ * deep, so the next post has room. 1 + *ch filled, 0 none, or a DSP_E* error. */
+static int wait_imm_assign(l1_cell_t *c, uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
+                           uint32_t ms, reg_lu_progress_t *prog)
 {
     uint32_t t0 = kernel_ticks();
-    int burst = -1;
+    int burst = -1, got = 0, rc;
 
-    while (kernel_ticks() - t0 < ms) {
-        while (l1_api.fi_free() > 0) {
-            uint32_t m = (l1_api.next_fn() + c->fn_offset) % 51u;
-            int rc;
-
-            if (burst < 0 && ccch_block(m))
-                burst = 0;
-            if (burst >= 0) {
-                rc = l1_api.burst_post(c->index, 7, burst, 0, c->bsic & 7, c->slot);
-                if (rc == DSP_OK && ++burst == 4)
-                    burst = -1;
-            } else {
-                rc = l1_api.idle_post(1);
-            }
-            if (rc != DSP_OK)
-                return -1;
-        }
+    while (!got && kernel_ticks() - t0 < ms) {
+        if ((rc = cch_pump(c, &burst, 0)) != DSP_OK)
+            return rc;
         l1_api.ask_more(3);
         l1_api.poll();
-        {
-            l1_rx_t rx;
-
-            while (l1_api.rx_read(&rx) == 1) {
-                if ((rx.hdr[0] != 7 && rx.hdr[0] != 8) || rx.hdr[1] != 0)
-                    continue;
-                prog->cch_blocks++;
-                if (rr_parse_imm_assign(rx.data, ch) == 0) {
-                    prog->imm_seen++;
-                    if (ch->ra == ra)
-                        return 0;
-                }
-            }
-        }
+        got = take_cch(ra, rach_fn, ch, prog);
         thread_sleep(2);
     }
-    return -1;
+    for (int w = 0; burst >= 0 && w < 200; w++) {       /* bounded: ~0.4 s */
+        if ((rc = cch_pump(c, &burst, 1)) != DSP_OK)
+            return rc;
+        l1_api.ask_more(3);
+        l1_api.poll();
+        if (!got)
+            got = take_cch(ra, rach_fn, ch, prog);
+        thread_sleep(2);
+    }
+    return got;
 }
 
 /* SIM auth runs on its own thread: RUN GSM ALGORITHM blocks ~1s, and a
@@ -99,14 +163,16 @@ static void sim_auth_thread(void *arg)
 
 /* Run one location-update attempt on a synced cell. Returns REG_ACCEPTED,
  * REG_REJECTED or REG_ERROR, and fills prog (may be NULL) as it goes. r must be
- * reg_init'd; cal is the channel's RF-cal byte; ra is the CHANNEL REQUEST byte
- * (establishment cause = location updating). The TX power mode (os/dsp.h) must be
- * L1_TX_MIN or L1_TX_NORMAL, set before l1_start(). */
-int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, uint8_t cal, int sim_slot,
+ * reg_init'd; ra is the CHANNEL REQUEST byte (establishment cause = location
+ * updating). The bursts carry the cell's BSIC (c->bsic, from its SCH), which the
+ * BTS checks an access burst's parity against. The TX power mode (os/dsp.h) must
+ * be set (not L1_TX_OFF) before l1_start(). */
+int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                uint8_t ra, uint32_t budget_ms, reg_lu_progress_t *prog)
 {
     rr_chan_desc_t ch;
     uint8_t ul[LAPDM_BLOCK];
+    uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
     int have_ul, sim_pending = 0;
     uint32_t t0;
@@ -120,21 +186,32 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, uint8_t cal, int sim_s
      * the cell's RACH control (one burst is easily lost to collision/weak decode).
      * The low nibble (random reference) is varied per attempt. */
     {
-        int granted = 0;
+        /* the cell's RACH control: at most M + 1 attempts (TS 44.018 10.5.2.29) */
+        static const uint8_t retrans[4] = { 1, 2, 4, 7 };
+        int granted = 0, attempts = 1 + retrans[c->max_retrans & 3];
 
-        for (int att = 0; att < LU_RACH_ATTEMPTS && !granted; att++) {
+        if (attempts > LU_RACH_ATTEMPTS)
+            attempts = LU_RACH_ATTEMPTS;
+        for (int att = 0; att < attempts && !granted; att++) {
             uint8_t ra_a = (uint8_t)((ra & 0xf0) | ((ra + att) & 0x0f));
+            /* the access instruction carries the next frame number (our count) */
+            uint32_t rach_fn = (l1_api.next_fn() + c->fn_offset) % LU_FN_MOD;
+            int rc;
 
-            if (l1_api.access_post(c->index, cell_slot, cal, ra_a) != DSP_OK)
-                return REG_ERROR;
-            if (wait_imm_assign(c, ra_a, &ch, LU_RACH_WAIT_MS, &p) == 0)
-                granted = 1;
-        }
-        if (!granted) {
+            if (l1_api.access_post(c->index, cell_slot, bsic, ra_a) != DSP_OK)
+                break;                  /* reported below: rach_sent tells how far */
+            p.rach_sent++;
             if (prog)
                 *prog = p;
-            return REG_ERROR;
+            rc = wait_imm_assign(c, ra_a, rach_fn, &ch, LU_RACH_WAIT_MS, &p);
+            if (rc < 0)
+                break;
+            granted = rc == 1;
         }
+        if (prog)
+            *prog = p;
+        if (!granted)
+            return REG_ERROR;
     }
     p.got_assign = 1;
     if (prog)
@@ -153,7 +230,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, uint8_t cal, int sim_s
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
 
-        l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, cal, LU_BLOCK_MS,
+        l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, bsic, LU_BLOCK_MS,
                         have_ul ? ul : (const uint8_t *)0, &st);
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);

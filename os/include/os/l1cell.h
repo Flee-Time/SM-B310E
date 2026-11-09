@@ -88,8 +88,16 @@ typedef struct {
  * unchanged. */
 int si_parse(l1_cell_t *c, const uint8_t d[23]);
 
+/* The stock's gain setting for a channel of this RXLEV (FUN_0005cafe): rxlev / 2,
+ * at most 45; 25 when it was not measured (rxlev <= 0). It keeps the signal at
+ * one level in the receiver: the DSP's gain index is about 2 x setting, 1 dB
+ * apart, bigger meaning less gain. */
+uint8_t l1_gain_for_rxlev(int rxlev);
+
 /* FCCH search and its SCH on one arfcn index. Clears c. slot: the DSP's cell
- * number. 1 synced, 0 no SCH in budget_ms, or a DSP_E* error. */
+ * number. gain: the setting (l1_gain_for_rxlev); every later read of this slot
+ * runs at it too (l1_cell_gain_set). 1 synced, 0 no SCH in budget_ms, or a
+ * DSP_E* error. */
 int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t budget_ms);
 
 /* Up to max_blocks BCCH blocks of a synced cell, parsed, until want's types have
@@ -150,6 +158,10 @@ int l1_cch_classify(const uint8_t d[23]);
 /* CCCH blocks of a synced cell for ms, counted into st. 0, or a DSP_E* error. */
 int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st);
 
+/* Diagnostic: the sum and count of the good CCCH blocks' header +0x0e (signed;
+ * SNR or frequency error [G]) since the last call, which resets them. */
+void l1_cch_hdr7(int32_t *sum, uint32_t *n);
+
 /* Dedicated channel (SDCCH/8) traffic for ms: downlink blocks received and
  * uplink bursts sent. The osmocom DATA_IND/DATA_REQ pump; HW-testable only at
  * registration. */
@@ -160,7 +172,7 @@ typedef struct {
     uint8_t last_dl[23];                /* the last good downlink block */
     int has_dl;
 } l1_dm_t;
-int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t cal,
+int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 uint32_t ms, const uint8_t *ul, l1_dm_t *st);
 
 #endif

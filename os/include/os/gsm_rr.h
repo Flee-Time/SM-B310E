@@ -36,6 +36,9 @@ typedef struct {
     uint8_t maio, hsn;
     uint8_t ta;                         /* timing advance (6 bits) */
     uint8_t ra;                         /* request reference: the RACH request byte */
+    uint16_t ref_fn;                    /* request reference octets 2-3 (TS 44.018
+                                         * 10.5.2.30): T1' << 11 | T3 << 5 | T2 of the
+                                         * frame the RACH was heard in */
 } rr_chan_desc_t;
 
 /* The L3 message type of a CCCH/DCCH block (its PD must be RR), or -1. */

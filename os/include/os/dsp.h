@@ -182,6 +182,12 @@ int l1_sch_post(uint16_t index, uint8_t gain, int cell);
  * (0 for broadcast channels); tsc: the training sequence (their BCC). */
 int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
 
+/* The gain setting every type-2 read of DSP cell `cell` runs at (BCCH, CCCH,
+ * SDCCH downlink). The stock reads a cell at its AGC setting, the measured
+ * rxlev / 2 (FUN_0005cafe); l1_cell_sync() records the one it synced with.
+ * Unset (after l1_start()): the stock's starting 25. */
+void l1_cell_gain_set(int cell, uint8_t gain);
+
 /* The frame number the next posted instruction carries (our own count:
  * received blocks report it, so cell FN = it + the offset an SCH gives). */
 uint32_t l1_next_fn(void);
@@ -220,14 +226,32 @@ void l1_tx_power_set(int mode);         /* L1_TX_* */
 int l1_tx_power_mode(void);
 int l1_tx_band_caps(uint8_t out[4]);    /* NV per-band TX enable: 900,1800,1900,850 */
 int l1_cal_readback(uint16_t out[L1_APC_BANDS][L1_APC_N]);
-int l1_access_post(uint16_t index, int slot, uint8_t cal, uint8_t ra);
+/* bsic: the target cell's BSIC (l1_cell_t.bsic, from its SCH). An access burst's
+ * parity is XORed with it (TS 45.003 4.6), so a wrong one is dropped by the BTS.
+ * The stock takes it from its cell table's +32 byte; this was taken for an RF-cal
+ * byte and sent as 0 until 2026-11-10. */
+int l1_access_post(uint16_t index, int slot, uint8_t bsic, uint8_t ra);
+/* Word 7 bits 15:10 of the access frame: the stock's 0x3f (its skeleton's 0xffff
+ * kept); 0 before 2026-11-10. A test knob (shell txburst w7=) while what the field
+ * does is measured on the SDR. */
+extern uint8_t l1_access_w7hi;
+/* The TX power control level for the bursts that follow (GSM PCL: on 900, 5 =
+ * 33 dBm .. 19 = 5 dBm), the stock's way: share +0x3ec double-buffered, flagged
+ * in the next TX frame's word 5. Before a RACH: MS_TXPWR_MAX_CCH, not above the
+ * phone's class (PCL 5). The APC tables (l1_tx_power_set) still bound it. */
+void l1_tx_level_set(uint8_t pcl);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs
- * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. */
+ * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. bsic: the
+ * serving cell's, as for l1_access_post (the stock's FUN_00050426 sends it too). */
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
-                   uint8_t cal, const uint8_t block[23]);
+                   uint8_t bsic, const uint8_t block[23]);
 /* DM_EST (dedicated-mode establish): the command-3 piece only. Needs the L1
  * state-machine / RF-control layer + scheduler to work. See docs/l1-osmocom.md. */
 int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux);
+/* Camp on DSP cell `cell` the stock's way (command 3, tracking on): its bursts
+ * steer the AFC, so the uplink follows the cell's frequency. rxlev: the cell's
+ * level (0..110), which the DSP takes the tracked cell's gain from. */
+int l1_cell_track(int cell, uint8_t rxlev);
 
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {
