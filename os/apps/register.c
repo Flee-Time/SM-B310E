@@ -3,9 +3,10 @@
  * registration stack (L1 RACH + CCCH + SDCCH, LAPDm, RR, MM, the FSM, SIM auth).
  *
  * SAFETY. This TRANSMITS at NORMAL (calibrated) power on the live network with the
- * owner's SIM — the registration the owner has cleared for Vodafone. Nothing fires
- * without pressing Register and confirming; it is one bounded attempt per press, it
- * shows the uplink frequency to monitor, and it restores the TX-off default after.
+ * owner's SIM. It targets the SIM's own home operator (from the IMSI) on the 900
+ * band (P-GSM or E-GSM) and shows it on screen; nothing fires without pressing
+ * Register and confirming. One bounded attempt per press; it shows the uplink
+ * frequency to monitor and restores the TX-off default after.
  * The receive path (SIM read, DSP boot, scan, sync, read SI) is all safe; only the
  * final reg_lu_run() keys the transmitter.
  *
@@ -22,17 +23,19 @@
 
 screen_t *app_register(void);
 
-#define G900            174u            /* GSM900 arfcn indexes 0..173 */
+/* The 900 band in the corrected index map (os/dsp.h, stock 0x5287): P-GSM at
+ * indexes 0-124 and E-GSM at 499-547. 1800/1900/850 are left out - their RF path
+ * is not selected yet (see docs; the register works on 900, same PA as P-GSM). */
+#define IDX_MAX         548             /* best[] spans indexes 0..547 */
+static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } };
 #define GAIN_START      25u             /* the stock's middle AGC (gsmstatus) */
 #define SWEEPS          2u
-#define CANDIDATES      4               /* strongest 900 channels to try */
+#define CANDIDATES      6               /* strongest 900 channels to try (P-GSM + E-GSM) */
 #define FI_RING_FREE    25              /* l1_fi_free() with the ring empty */
 #define QUEUE_AHEAD     8
 #define SYNC_BUDGET_MS  1500u
 #define READ_BUDGET_MS  2500u
 #define TX_BUDGET_MS    10000u
-#define VODAFONE_MCC    286
-#define VODAFONE_MNC    2
 /* Classmark 1 (TS 24.008 10.5.1.6): phase 2, A5/1 NOT available (we do no
  * ciphering), RF power class 4 (GSM900 handheld). Honest for a real run. */
 #define CLASSMARK1      0x2b
@@ -52,6 +55,7 @@ static volatile struct {
 
 static uint8_t imsi_digits[16];
 static int imsi_n;
+static uint16_t home_mcc, home_mnc;     /* the SIM's own PLMN, from the IMSI */
 static gsm_reg_t reg;
 static l1_cell_t cell;
 static reg_lu_progress_t reg_prog;      /* how far the last/current attempt got */
@@ -130,61 +134,63 @@ static int read_imsi(void)
 
 /* ---- 2. scan GSM900 for the strongest BCCH candidates -------------------- */
 
+static void take_pm(uint16_t *best, l1_pm_t *res, int got)
+{
+    for (int j = 0; j < got; j++)
+        if (res[j].status == 1 && res[j].index < IDX_MAX &&
+            (res[j].level & 0xfffu) > best[res[j].index])
+            best[res[j].index] = res[j].level & 0xfffu;
+}
+
 static int scan_candidates(uint16_t *cand, int max)
 {
-    uint16_t *best = kmalloc(G900 * sizeof(uint16_t));
+    uint16_t *best = kmalloc(IDX_MAX * sizeof(uint16_t));
     l1_pm_t res[8];
     int n = 0;
 
     if (!best)
         return 0;
-    for (uint32_t i = 0; i < G900; i++)
+    for (uint32_t i = 0; i < IDX_MAX; i++)
         best[i] = 0;
-    for (uint32_t sweep = 0; sweep < SWEEPS; sweep++) {
-        for (uint32_t base = 0; base < G900; base += L1_PM_PER_FRAME) {
-            uint16_t idx[L1_PM_PER_FRAME];
-            uint8_t gain[L1_PM_PER_FRAME];
-            int k = 0, got;
+    for (uint32_t sweep = 0; sweep < SWEEPS; sweep++)
+        for (uint32_t b = 0; b < sizeof band900 / sizeof band900[0]; b++)
+            for (uint32_t base = band900[b].lo; base <= band900[b].hi; base += L1_PM_PER_FRAME) {
+                uint16_t idx[L1_PM_PER_FRAME];
+                uint8_t gain[L1_PM_PER_FRAME];
+                int k = 0, got;
 
-            while (k < L1_PM_PER_FRAME && base + (uint32_t)k < G900) {
-                idx[k] = (uint16_t)(base + (uint32_t)k);
-                gain[k] = GAIN_START;
-                k++;
-            }
-            for (int w = 0; queued() >= QUEUE_AHEAD && w < 200; w++) {
+                while (k < L1_PM_PER_FRAME && base + (uint32_t)k <= band900[b].hi) {
+                    idx[k] = (uint16_t)(base + (uint32_t)k);
+                    gain[k] = GAIN_START;
+                    k++;
+                }
+                for (int w = 0; queued() >= QUEUE_AHEAD && w < 200; w++) {
+                    l1_poll();
+                    thread_sleep(1);    /* bounded: never hang if the DSP stalls */
+                }
+                if (l1_pm_post(idx, gain, k) == DSP_OK) {
+                    posted++;
+                    l1_ask_more(3);
+                }
                 l1_poll();
-                thread_sleep(1);        /* bounded: never hang if the DSP stalls */
+                while ((got = l1_pm_read(res, 8)) > 0)
+                    take_pm(best, res, got);
+                feed_idle();
+                thread_sleep(1);
             }
-            if (l1_pm_post(idx, gain, k) == DSP_OK) {
-                posted++;
-                l1_ask_more(3);
-            }
-            l1_poll();
-            while ((got = l1_pm_read(res, 8)) > 0)
-                for (int j = 0; j < got; j++)
-                    if (res[j].status == 1 && res[j].index < G900 &&
-                        (res[j].level & 0xfffu) > best[res[j].index])
-                        best[res[j].index] = res[j].level & 0xfffu;
-            feed_idle();
-            thread_sleep(1);
-        }
-    }
     for (int i = 0; i < 12; i++) {       /* drain the last results */
         int got;
 
         l1_poll();
         while ((got = l1_pm_read(res, 8)) > 0)
-            for (int j = 0; j < got; j++)
-                if (res[j].status == 1 && res[j].index < G900 &&
-                    (res[j].level & 0xfffu) > best[res[j].index])
-                    best[res[j].index] = res[j].level & 0xfffu;
+            take_pm(best, res, got);
         feed_idle();
         thread_sleep(2);
     }
-    for (int k = 0; k < max; k++) {      /* the top `max` by level */
+    for (int k = 0; k < max; k++) {      /* the top `max` by level across both sub-bands */
         uint16_t bi = L1_NO_INDEX, bv = 0;
 
-        for (uint32_t i = 0; i < G900; i++) {
+        for (uint32_t i = 0; i < IDX_MAX; i++) {
             bool taken = false;
 
             for (int j = 0; j < k; j++)
@@ -200,15 +206,14 @@ static int scan_candidates(uint16_t *cand, int max)
     return n;
 }
 
-/* ---- 3. sync a candidate and read its SI; is it Vodafone? ---------------- */
+/* ---- 3. sync a candidate and read its SI; is it the SIM's home network? --- */
 
 static bool try_cell(uint16_t index)
 {
     if (l1_cell_sync(&cell, index, GAIN_START, 0, SYNC_BUDGET_MS) != 1)
         return false;
     l1_cell_read(&cell, 24, L1_SI3 | L1_SI4, READ_BUDGET_MS);
-    return cell.mcc == VODAFONE_MCC && cell.mnc == VODAFONE_MNC &&
-           (cell.si_seen & L1_SI3);
+    return cell.mcc == home_mcc && cell.mnc == home_mnc && (cell.si_seen & L1_SI3);
 }
 
 /* ---- the run ------------------------------------------------------------- */
@@ -219,10 +224,14 @@ static void worker(void *arg)
     int ncand, rc;
 
     reg_ui.phase = P_SIM;
-    if (read_imsi() != 0) {
+    if (read_imsi() != 0 || imsi_n < 5) {
         reg_ui.result = RES_NO_SIM;
         goto done_nosim;
     }
+    /* home PLMN from the IMSI: MCC = digits 0-2, MNC = digits 3-4 (2-digit, as in
+     * Turkey/MCC 286); only the operator code is kept, never the full IMSI. */
+    home_mcc = (uint16_t)(imsi_digits[0] * 100 + imsi_digits[1] * 10 + imsi_digits[2]);
+    home_mnc = (uint16_t)(imsi_digits[3] * 10 + imsi_digits[4]);
 
     reg_ui.phase = P_DSP;
     if (dsp_boot() != DSP_OK) {
@@ -255,7 +264,7 @@ static void worker(void *arg)
     if (reg_ui.result == RES_NO_CELL)
         goto done;
 
-    /* a synced Vodafone cell: build the LU request and run the attempt (min power) */
+    /* a synced home cell (P-GSM or E-GSM): build the LU request and run it */
     reg_init(&reg, imsi_digits, imsi_n, cell.mcc, cell.mnc, cell.mnc_digits == 3,
              cell.lac, CLASSMARK1);
     reg_ui.phase = P_TX;
@@ -305,28 +314,39 @@ static const char *phase_text(void)
     case P_SIM:  return "Reading SIM";
     case P_DSP:  return "Starting radio";
     case P_SCAN: return "Scanning 900";
-    case P_FIND: return "Finding Vodafone";
-    case P_TX:   return "Attempt (min power)";
+    case P_FIND: return "Finding home cell";
+    case P_TX:   return "Attempt (normal power)";
     default:     return "Working";
     }
 }
 
-/* GSM900 arfcn index -> ARFCN and uplink frequency in kHz (integer, no float
- * printf in the freestanding build). idx 0..124 is P-GSM (ARFCN 0..124), idx
- * 125..173 is E-GSM (ARFCN 975..1023); uplink = 890 MHz + 0.2 MHz * n, with n
- * taken as ARFCN-1024 in the extended band. Returns the ARFCN, or -1. */
+/* 900 arfcn index -> ARFCN and uplink kHz (integer; no float printf). Corrected
+ * map: idx 0..124 is P-GSM (ARFCN 0..124), idx 499..547 is E-GSM (ARFCN
+ * 975..1023); uplink = 890 MHz + 0.2 MHz * n, n = ARFCN-1024 in the extended
+ * band. Returns the ARFCN, or -1. */
 static int arfcn_from_index(uint16_t idx, int *ul_khz)
 {
     int arfcn;
 
-    if (idx < 125)
+    if (idx <= 124)
         arfcn = (int)idx;
-    else if (idx < G900)
-        arfcn = 975 + (int)idx - 125;
+    else if (idx >= 499 && idx <= 547)
+        arfcn = 975 + (int)idx - 499;
     else
         return *ul_khz = 0, -1;
     *ul_khz = 890000 + 200 * (arfcn >= 975 ? arfcn - 1024 : arfcn);
     return arfcn;
+}
+
+/* Turkish operators (MCC 286) by name; others fall back to the numeric code. */
+static const char *operator_name(uint16_t mcc, uint16_t mnc)
+{
+    if (mcc == 286) {
+        if (mnc == 1) return "Turkcell";
+        if (mnc == 2) return "Vodafone";
+        if (mnc == 3) return "Turk Telekom";
+    }
+    return 0;
 }
 
 /* The non-rejected outcomes (REJECTED carries a cause number, drawn separately). */
@@ -335,7 +355,7 @@ static void result_line(const char **msg, uint32_t *color)
     switch (reg_ui.result) {
     case RES_ACCEPTED:    *msg = "Registered"; *color = C_OK; return;
     case RES_NO_RESPONSE: *msg = "Not registered"; *color = C_WARN; return;
-    case RES_NO_CELL:     *msg = "No Vodafone cell"; *color = C_WARN; return;
+    case RES_NO_CELL:     *msg = "No home 900 cell"; *color = C_WARN; return;
     case RES_NO_SIM:      *msg = "SIM not ready"; *color = C_BAD; return;
     case RES_RADIO_FAIL:  *msg = "Radio did not start"; *color = C_BAD; return;
     default:              *msg = "Done"; *color = C_TEXT; return;
@@ -370,8 +390,16 @@ static void draw(screen_t *s)
     }
     y += 28;
     if ((reg_ui.runs || reg_ui.busy) && reg_ui.mcc) {
-        snprintf(line, sizeof line, "Vodafone  MCC %u MNC %0*u", reg_ui.mcc,
-                 (int)reg_ui.mnc_digits, reg_ui.mnc);
+        {
+            const char *op = operator_name(reg_ui.mcc, reg_ui.mnc);
+
+            if (op)
+                snprintf(line, sizeof line, "%s  %u-%0*u", op, reg_ui.mcc,
+                         (int)reg_ui.mnc_digits, reg_ui.mnc);
+            else
+                snprintf(line, sizeof line, "MCC %u  MNC %0*u", reg_ui.mcc,
+                         (int)reg_ui.mnc_digits, reg_ui.mnc);
+        }
         gfx_text_centered(y, line, C_TEXT, FONT_SMALL, 1);
         y += 12;
         snprintf(line, sizeof line, "LAC %u", reg_ui.lac);
@@ -412,8 +440,8 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT)
         ui_confirm("Register",
-                   "Transmit a NORMAL-power registration to Vodafone on the live "
-                   "network with this SIM?", confirm_yes);
+                   "Transmit a NORMAL-power registration to this SIM's home "
+                   "network on the live band?", confirm_yes);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
 }
