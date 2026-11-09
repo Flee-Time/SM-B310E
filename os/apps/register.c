@@ -23,6 +23,8 @@
 #include "os/ui.h"
 
 screen_t *app_register(void);
+void reg_trigger(void);
+int reg_is_busy(void);
 
 /* The 900 band in the corrected index map (os/dsp.h, stock 0x5287): P-GSM at
  * indexes 0-124 and E-GSM at 499-547. 1800/1900/850 are left out - their RF path
@@ -437,7 +439,15 @@ static void worker(void *arg)
     posted = 4;                          /* l1_run()'s idle frames */
 
     reg_ui.phase = P_SCAN;
-    ncand = scan_candidates(cand, candrx, CANDIDATES);
+    /* fast path for iterating the SDCCH: with a known home cell, skip the full
+     * 900-band sweep and go straight to it (the find still verifies its CCCH). */
+    if (stored_index != L1_NO_INDEX) {
+        ncand = 1;
+        cand[0] = stored_index;
+        candrx[0] = (uint8_t)(stored_gain ? 2 * stored_gain : 0);
+    } else {
+        ncand = scan_candidates(cand, candrx, CANDIDATES);
+    }
     klog("register: scan ncand=%d, top %u/%u %u/%u %u/%u", ncand,
          ncand > 0 ? cand[0] : 0xffffu, ncand > 0 ? candrx[0] : 0,
          ncand > 1 ? cand[1] : 0xffffu, ncand > 1 ? candrx[1] : 0,
@@ -558,11 +568,13 @@ static void worker(void *arg)
     rc = reg_lu_run(&reg, &cell, 0, SIM_SLOT, (uint8_t)(kernel_ticks() & 0x0f),
                     TX_BUDGET_MS, &reg_prog);
     klog("register: prog rach=%u cch=%u imm=%u rahit=%u refd=%d assign=%u est=%u auth=%u"
-         " sim=%u dl=%u ul=%u", reg_prog.rach_sent, reg_prog.cch_blocks, reg_prog.imm_seen,
-         reg_prog.ra_hits,
-         reg_prog.ref_d, reg_prog.got_assign,
+         " sim=%u dl=%u/%u ul=%u sabm=%u", reg_prog.rach_sent, reg_prog.cch_blocks,
+         reg_prog.imm_seen, reg_prog.ra_hits, reg_prog.ref_d, reg_prog.got_assign,
          reg_prog.established, reg_prog.reached_auth, reg_prog.sim_ok,
-         reg_prog.dl_blocks, reg_prog.ul_bursts);
+         reg_prog.dl_blocks, reg_prog.dl_bad, reg_prog.ul_bursts, reg_prog.sabm_sent);
+    klog("register: chan type=%u subch=%u tn=%u tsc=%u, last dl hdr %02x %02x",
+         reg_prog.ch_type, reg_prog.ch_subch, reg_prog.ch_tn, reg_prog.ch_tsc,
+         reg_prog.dl_addr, reg_prog.dl_ctrl);
     reg_ui.reject_cause = reg.reject_cause;
     reg_ui.result = rc == REG_ACCEPTED ? RES_ACCEPTED :
                     rc == REG_REJECTED ? RES_REJECTED : RES_NO_RESPONSE;
@@ -583,6 +595,12 @@ done_nosim:
     reg_ui.runs++;
     reg_ui.busy = 0;
 }
+
+static void start_worker(void);
+/* Trigger one registration attempt from outside the UI (the net shell "reg"),
+ * for driving the attempt over the link while iterating. Same worker, no dialog. */
+void reg_trigger(void) { start_worker(); }
+int reg_is_busy(void) { return reg_ui.busy; }
 
 static void start_worker(void)
 {

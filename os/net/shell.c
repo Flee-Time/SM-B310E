@@ -521,6 +521,26 @@ stop:
 
 /* NV per-band TX-enable bytes: whether each band's cal is uploaded to the DSP
  * (so whether the DSP can key that band at all). */
+/* Trigger a registration attempt (the Register app worker) over the link, so
+ * the attempt can be driven and iterated without the on-device UI. It TRANSMITS
+ * on the live network, owner-cleared; watch the log for the result. */
+void reg_trigger(void);
+int reg_is_busy(void);
+static void c_reg(sess_t *s, int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    if (reg_is_busy()) {
+        say(s, "reg: already running\n");
+        return;
+    }
+    if (dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING) {
+        say(s, "reg: the DSP is busy\n");
+        return;
+    }
+    reg_trigger();
+    say(s, "reg: started - watch the log (register: prog ...)\n");
+}
+
 static void c_nvband(sess_t *s, int argc, char **argv)
 {
     static const char *bn[4] = { "GSM900", "DCS1800", "PCS1900", "GSM850" };
@@ -1526,6 +1546,7 @@ static const cmd_t cmds[] = {
     { "info", "", "build, uptime, CPU, battery, card, network", c_info },
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
+    { "reg", "", "run a registration attempt (TX, owner-cleared)", c_reg },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
     { "rxcell", "BAND ARFCN [GAIN] [CCH_S] [TRACK]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },

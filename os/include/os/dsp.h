@@ -240,6 +240,9 @@ extern uint8_t l1_access_w7hi;
  * in the next TX frame's word 5. Before a RACH: MS_TXPWR_MAX_CCH, not above the
  * phone's class (PCL 5). The APC tables (l1_tx_power_set) still bound it. */
 void l1_tx_level_set(uint8_t pcl);
+/* The uplink timing advance (0..63) from the grant; apply after the immediate
+ * assignment, before the SDCCH uplink. See l1_tx_ta_set in dsp.c. */
+void l1_tx_ta_set(uint8_t ta);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs
  * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. bsic: the
  * serving cell's, as for l1_access_post (the stock's FUN_00050426 sends it too). */

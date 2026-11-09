@@ -544,24 +544,44 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
     uint32_t t0 = kernel_ticks();
     int dlbase = (subch & 7) * 4;
     int ulbase = (dlbase + 15) % 51;
+    int ul_posted = 0;                  /* uplink bursts of this block sent, 0..4 */
+    bool stop = false;
 
     memset(st, 0, sizeof(*st));
     if (!c->synced)
         return DSP_ECMD;
-    while (kernel_ticks() - t0 < ms) {
+    /* One call sends at most one complete uplink block - 4 bursts, aligned to the
+     * uplink window so the network sees a whole LAPDm frame - and returns as soon
+     * as one downlink block has come, so the caller sees every block and drives
+     * the SABM retransmission on its own timer. Uplink burst N goes only when the
+     * window is at position N, so a late start waits a multiframe rather than
+     * sending a partial frame. */
+    while (!stop && kernel_ticks() - t0 < ms) {
         bool batch = false;
 
-        while (queued() < AHEAD) {
+        /* Keep the ring shallow (not AHEAD): an uplink burst posts its TXBUFQ
+         * entry, and the ring only frees a slot when the DSP transmits a burst,
+         * so posting far ahead fills it at the second burst. At depth 2 the DSP
+         * drains burst N before burst N+2 is posted, and all four go out. */
+        while (queued() < 2) {
             uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
             int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
             int rc;
 
             if (db >= 0) {
                 rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
-            } else if (ub >= 0 && ul) {
-                rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, bsic, ul);
                 if (rc == DSP_OK)
+                    st->dl_bursts++;
+            } else if (ul && ul_posted < 4 && ub == ul_posted) {
+                rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, bsic, ul);
+                if (rc == DSP_OK) {
                     st->ul_bursts++;
+                    ul_posted++;
+                } else if (rc == DSP_EFULL) {
+                    rc = l1_idle_post(1);   /* ring not drained: drop this block,
+                                             * keep the clock fed, retry next window */
+                    ul_posted = 0;
+                }
             } else {
                 rc = l1_idle_post(1);
             }
@@ -576,19 +596,29 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
             l1_rx_t rx;
 
             while (l1_rx_read(&rx) == 1) {
-                if (rx.hdr[0] != RX_BLOCK && rx.hdr[0] != 8)
+                st->dl_seen++;
+                st->dl_hdr0 = (uint8_t)rx.hdr[0];
+                /* a dedicated block comes back tagged with the RxChannelTag we
+                 * asked for (TAG_DCH = 9), not the BCCH 7/8 - accept it, or every
+                 * SDCCH block (incl. the UA) is dropped. */
+                if (rx.hdr[0] != RX_BLOCK && rx.hdr[0] != 8 && rx.hdr[0] != TAG_DCH)
                     continue;
                 if (rx.hdr[1] != 0) {
                     st->dl_bad++;
                     continue;
                 }
                 st->dl_blocks++;
+                st->dl_fn = ((rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16)
+                             + c->fn_offset) % FN_MOD % 51;
                 memcpy(st->last_dl, rx.data, sizeof(st->last_dl));
                 st->has_dl = 1;
             }
         }
+        if (st->has_dl && (!ul || ul_posted >= 4))
+            stop = true;               /* a block is in and the uplink is complete */
         thread_sleep(2);
     }
+    st->ul_done = ul && ul_posted >= 4;
     return DSP_OK;
 }
 

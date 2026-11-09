@@ -171,6 +171,11 @@ typedef struct {
     uint32_t ul_bursts;                 /* uplink bursts sent */
     uint8_t last_dl[23];                /* the last good downlink block */
     int has_dl;
+    int ul_done;                        /* a full uplink block (4 bursts) went out */
+    uint16_t dl_bursts;                 /* downlink rx bursts posted (window hits x4) */
+    uint32_t dl_fn;                     /* cell FN of the last good downlink block */
+    uint16_t dl_seen;                   /* all rx blocks read (any type), for filtering */
+    uint8_t dl_hdr0;                    /* hdr[0] (block type) of the last rx read */
 } l1_dm_t;
 int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 uint32_t ms, const uint8_t *ul, l1_dm_t *st);

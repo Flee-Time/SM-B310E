@@ -16,12 +16,15 @@
 #include "os/dsp.h"                     /* l1_api, l1_cell_t, l1_rx_t */
 #include "os/sim.h"
 #include "os/kernel.h"
+#include "os/fs.h"                     /* klog (SDCCH diagnostics) */
 
 #define LU_RACH_ATTEMPTS 4              /* RACH retransmissions (a real MS retries) */
 #define LU_RACH_WAIT_MS 2000u           /* wait for the grant after each RACH - long
                                          * enough for the RX to settle after the TX
                                          * burst and read the CCCH (a short wait gets 0) */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
+#define LU_T200_MS      600u            /* resend the SABM if no UA by this (T200) */
+#define LU_SABM_MAX     6               /* SABM tries before giving up (N200+1) */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
 #define LU_REF_SLACK    4               /* frames either side of our RACH's: the grant's
                                          * request reference is the frame the BTS heard
@@ -174,7 +177,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t ul[LAPDM_BLOCK];
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
-    int have_ul, sim_pending = 0;
+    int have_ul, sim_pending = 0, sabm_tries = 0;
+    uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
+    uint32_t last_ul = 0;
+    int dm_dbg = 0;
     uint32_t t0;
 
     if (prog)
@@ -214,30 +220,64 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             return REG_ERROR;
     }
     p.got_assign = 1;
+    klog("lu: grant chan t=%u sub=%u tn=%u tsc=%u TA=%u arfcn=%u hop=%u", ch.chan_type,
+         ch.subch, ch.tn, ch.tsc, ch.ta, ch.arfcn, ch.hopping);
+    p.ch_type = ch.chan_type;
+    p.ch_subch = ch.subch;
+    p.ch_tn = ch.tn;
+    p.ch_tsc = ch.tsc;
     if (prog)
         *prog = p;
-    /* 3: establish the dedicated channel (command 3). sel/gain/aux are the
-     * channel/mode selectors; their exact encoding is confirmed on-air. */
-    l1_api.dm_est((uint16_t)(ch.chan_type << 3 | ch.subch), 0, 0);
-    /* 4: SABM carrying LOCATION UPDATING REQUEST */
+    /* The cell is already tracked (the camp before the RACH); the dedicated
+     * channel rides the same carrier, so no second command 3 here. The earlier
+     * dm_est built a malformed command 3 that only disturbed the tracking.
+     * 4: SABM carrying LOCATION UPDATING REQUEST, kept for retransmission. */
+    /* apply the grant's timing advance so the uplink lands in the BTS window */
+    l1_tx_ta_set(ch.ta);
+    klog("lu: TA set to %u", ch.ta);
     if (reg_begin(r, ul) < 0)
         return REG_ERROR;
+    for (int i = 0; i < LAPDM_BLOCK; i++)
+        sabm[i] = ul[i];
     have_ul = 1;
-    /* 5: pump the SDCCH, driving the FSM; AUTHENTICATION runs off-thread so the
-     * frame ring stays fed while the SIM computes SRES */
+    /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
+     * T200 until the UA; without it one lost block ended the attempt. Once the
+     * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
     t0 = kernel_ticks();
+    last_ul = kernel_ticks();
     while (kernel_ticks() - t0 < budget_ms &&
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
 
         l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, bsic, LU_BLOCK_MS,
                         have_ul ? ul : (const uint8_t *)0, &st);
+        if (have_ul && st.ul_done) {
+            last_ul = kernel_ticks();
+            if (!p.established)
+                p.sabm_sent++;
+        }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
+        p.dl_bad = (uint16_t)(p.dl_bad + st.dl_bad);
         p.ul_bursts = (uint16_t)(p.ul_bursts + st.ul_bursts);
+        if (dm_dbg < 8) {
+            klog("lu: dm#%d ul=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
+                 dm_dbg, (unsigned long)st.ul_bursts, st.ul_done,
+                 (unsigned long)st.dl_bursts,
+                 (unsigned long)st.dl_blocks, (unsigned long)st.dl_bad,
+                 (unsigned long)st.dl_fn, st.last_dl[0], st.last_dl[1],
+                 (unsigned long)dsp_info.fi_moves);
+            klog("lu:   dm#%d seen=%lu hdr0=%u", dm_dbg,
+                 (unsigned long)st.dl_seen, st.dl_hdr0);
+            dm_dbg++;
+        }
         if (st.has_dl) {
             uint8_t out[LAPDM_BLOCK];
-            int ov = 0, state = reg_rx(r, st.last_dl, out, &ov);
+            int ov = 0, state;
+
+            p.dl_addr = st.last_dl[0];
+            p.dl_ctrl = st.last_dl[1];
+            state = reg_rx(r, st.last_dl, out, &ov);
 
             if (r->dl.state == LAPDM_ESTABLISHED)
                 p.established = 1;
@@ -257,6 +297,15 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 else
                     break;              /* could not start the SIM thread */
             }
+        }
+        /* SABM retransmission (T200): until the link is up, resend the kept
+         * SABM when no UA has come within LU_T200_MS, up to LU_SABM_MAX times. */
+        if (!p.established && !have_ul && sabm_tries < LU_SABM_MAX &&
+            kernel_ticks() - last_ul >= LU_T200_MS) {
+            for (int i = 0; i < LAPDM_BLOCK; i++)
+                ul[i] = sabm[i];
+            have_ul = 1;
+            sabm_tries++;
         }
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {

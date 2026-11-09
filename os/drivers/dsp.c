@@ -140,6 +140,8 @@
  * writes it at +0x3ec + 2 t, and the next TX frame's word 5 says so with bit 9
  * and t in bits 11:10 (FUN_00062cce, from FUN_0004fe0a). */
 #define TXPWR_PCL       0x3ecu
+#define TXTA_SHARE      0x3e4u          /* dedicated TX timing advance (0..63), same
+                                         * word-5 block as the power level (+0x3ec) */
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
@@ -1270,6 +1272,21 @@ void l1_tx_level_set(uint8_t pcl)
     txpwr_pending = true;
 }
 
+/* The uplink timing advance (TA, 0..63 bit-periods) the grant gives, so the SABM
+ * and later uplink bursts arrive aligned at the BTS. The DSP reads it from share
+ * +0x3e4 in dedicated mode (FUN_00062d92 clamps to 63; same double-buffered block
+ * as the power level). Both slots get the value so the DSP reads it whichever it
+ * picks, and the power-level word-5 flag signals the read. Without it a normal
+ * burst arrives TA bit-periods late - outside the BTS window - and is dropped. */
+void l1_tx_ta_set(uint8_t ta)
+{
+    uint16_t v = ta > 63u ? 63u : ta;
+
+    sm_w16(TXTA_SHARE, v);
+    sm_w16(TXTA_SHARE + 2u, v);
+    txpwr_pending = true;
+}
+
 /* Word 5 for a TX frame: the power-update flag once after l1_tx_level_set. */
 static uint16_t txpwr_w5(void)
 {
@@ -1321,6 +1338,19 @@ int l1_access_post(uint16_t index, int slot, uint8_t bsic, uint8_t ra)
  * through the (gated) registration flow, where its exact block/burst framing is
  * confirmed against real behaviour. The min-power clamp interlock still applies.
  * See docs/l1-osmocom.md. */
+/* Usable free slots in the TXBUFQ (one slot is always kept empty, as tx_desc_post
+ * uses next==out for full). Before the DSP sets TXBUF_OUT the full-check is skipped,
+ * so report the ring empty. Used to pace the uplink so a burst FI is never posted
+ * without its TXBUFQ entry - a type-7 FI with no entry stalls the DSP. */
+static int txbuf_free(void)
+{
+    uint32_t in = sm_r16(TXBUF_IN), out = sm_r16(TXBUF_OUT);
+
+    if (out >= TXBUF_SLOTS)
+        return (int)(TXBUF_SLOTS - 1u);
+    return (int)((out + TXBUF_SLOTS - 1u - in) % TXBUF_SLOTS);
+}
+
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
                    uint8_t bsic, const uint8_t block[23])
 {
@@ -1331,8 +1361,17 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
         return DSP_ENOTRUN;
     if (tx_power_mode == L1_TX_OFF)      /* interlock: no transmit in the OFF mode */
         return DSP_ECMD;
-    /* the 23-byte L2 block -> TXBUFQ (type-3 normal burst) */
-    if ((rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
+    /* Each uplink burst FI (type 7) makes the DSP read one TXBUFQ entry; with no
+     * entry it stalls the frame clock. So per block the stock posts the 23-byte L2
+     * block once (burst 0) plus a 4-byte control word per burst - block + 4 words
+     * = 5 entries - and paces one burst a frame so its 4-slot ring never holds
+     * more than two. We pace the same way (l1_dm_sched keeps the ring shallow and
+     * checks txbuf_free before each burst). Post nothing unless the whole burst
+     * fits - block+word on burst 0, word otherwise, plus one FI slot - so an FI
+     * is never left without its TXBUFQ entry. */
+    if (txbuf_free() < (burst == 0 ? 2 : 1) || l1_fi_free() < 1)
+        return DSP_EFULL;
+    if (burst == 0 && (rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
         return rc;
     /* a type-2 rx frame (as l1_burst_post), then the type-7 rewrite */
     fi_init(fi, ext, FI_BLOCK);
@@ -1348,6 +1387,7 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     fi[3] = (uint16_t)(fi[3] & 0x0fffu);            /* clear word3 bits 15:12 */
     if ((rc = post_fi(fi, ext)) != DSP_OK)
         return rc;
+    /* the per-burst control word: byte 1 the BSIC (cell table +32, as the stock) */
     { const uint8_t ctl[4] = { 0, (uint8_t)(bsic & 0x3f), 0, (uint8_t)(burst & 3) };
       if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
           return rc; }

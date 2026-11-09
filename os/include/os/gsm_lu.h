@@ -23,8 +23,12 @@ typedef struct {
     uint8_t established;      /* LAPDm link up on the SDCCH (UA) */
     uint8_t reached_auth;    /* AUTHENTICATION REQUEST seen */
     uint8_t sim_ok;          /* the SIM returned SRES for it */
-    uint16_t dl_blocks;      /* downlink SDCCH blocks received */
+    uint16_t dl_blocks;      /* downlink SDCCH blocks received (good CRC) */
+    uint16_t dl_bad;         /* downlink SDCCH blocks with a bad CRC */
     uint16_t ul_bursts;      /* uplink bursts sent */
+    uint8_t sabm_sent;       /* complete SABM blocks (4 bursts) sent */
+    uint8_t dl_addr, dl_ctrl; /* the last downlink block's LAPDm address+control */
+    uint8_t ch_type, ch_subch, ch_tn, ch_tsc; /* the assigned dedicated channel */
 } reg_lu_progress_t;
 
 /* Run one location-update (registration) attempt on a synced cell c. r must be
