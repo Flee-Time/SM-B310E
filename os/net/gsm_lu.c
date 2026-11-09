@@ -17,7 +17,8 @@
 #include "os/sim.h"
 #include "os/kernel.h"
 
-#define LU_RACH_MS      2000u           /* wait for IMMEDIATE ASSIGNMENT */
+#define LU_RACH_ATTEMPTS 5              /* RACH retransmissions (a real MS retries) */
+#define LU_RACH_WAIT_MS 600u            /* wait for the grant after each RACH */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
 
 /* CCCH FN mod 51 of the non-combined config (as l1cell.c cch_start). */
@@ -112,14 +113,26 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, uint8_t cal, int sim_s
         *prog = p;
     if (!c->synced)
         return REG_ERROR;
-    /* 1: CHANNEL REQUEST (RACH) */
-    if (l1_api.access_post(c->index, cell_slot, cal, ra) != DSP_OK)
-        return REG_ERROR;
-    /* 2: IMMEDIATE ASSIGNMENT -> the dedicated channel (uplink reached the tower) */
-    if (wait_imm_assign(c, ra, &ch, LU_RACH_MS, &p) != 0) {
-        if (prog)
-            *prog = p;
-        return REG_ERROR;
+    /* 1+2: CHANNEL REQUEST (RACH), retransmitted until a matching IMMEDIATE
+     * ASSIGNMENT comes back or the attempts run out - a real MS retransmits per
+     * the cell's RACH control (one burst is easily lost to collision/weak decode).
+     * The low nibble (random reference) is varied per attempt. */
+    {
+        int granted = 0;
+
+        for (int att = 0; att < LU_RACH_ATTEMPTS && !granted; att++) {
+            uint8_t ra_a = (uint8_t)((ra & 0xf0) | ((ra + att) & 0x0f));
+
+            if (l1_api.access_post(c->index, cell_slot, cal, ra_a) != DSP_OK)
+                return REG_ERROR;
+            if (wait_imm_assign(c, ra_a, &ch, LU_RACH_WAIT_MS, &p) == 0)
+                granted = 1;
+        }
+        if (!granted) {
+            if (prog)
+                *prog = p;
+            return REG_ERROR;
+        }
     }
     p.got_assign = 1;
     if (prog)

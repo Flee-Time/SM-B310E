@@ -66,6 +66,7 @@ static uint16_t home_mcc, home_mnc;     /* the SIM's own PLMN, from the IMSI */
 static gsm_reg_t reg;
 static l1_cell_t cell;
 static reg_lu_progress_t reg_prog;      /* how far the last/current attempt got */
+static int sweep_synced;                /* cells that synced in the find sweep (diag) */
 
 /* ---- frame-ring feeding (the proven gsmstatus pattern) ------------------- */
 
@@ -194,20 +195,20 @@ static int scan_candidates(uint16_t *cand, int max)
         feed_idle();
         thread_sleep(2);
     }
-    for (int k = 0; k < max; k++) {      /* the top `max` by level across both sub-bands */
+    /* the top `max` by level across both sub-bands. O(max*IDX_MAX): zero each
+     * picked entry rather than re-scanning for "already taken" - the O(max^2)
+     * version stalled long enough (130 candidates) to break the DSP frame clock
+     * before the sweep, so nothing synced. */
+    for (int k = 0; k < max; k++) {
         uint16_t bi = L1_NO_INDEX, bv = 0;
 
-        for (uint32_t i = 0; i < IDX_MAX; i++) {
-            bool taken = false;
-
-            for (int j = 0; j < k; j++)
-                taken |= cand[j] == i;
-            if (!taken && best[i] > bv)
+        for (uint32_t i = 0; i < IDX_MAX; i++)
+            if (best[i] > bv)
                 bv = best[i], bi = (uint16_t)i;
-        }
         if (bi == L1_NO_INDEX)
             break;
         cand[n++] = bi;
+        best[bi] = 0;
     }
     kfree(best);
     return n;
@@ -221,6 +222,7 @@ static bool try_cell(uint16_t index)
 
     if (s != 1)
         return false;                   /* not a BCCH (fast fail); not logged - noisy */
+    sweep_synced++;
     l1_cell_read(&cell, 24, L1_SI3 | L1_SI4, READ_BUDGET_MS);
     klog("register: idx %u -> %u-%02u si %08lx", index, cell.mcc, cell.mnc,
          (unsigned long)cell.si_seen);
@@ -261,13 +263,18 @@ static void worker(void *arg)
 
     reg_ui.phase = P_SCAN;
     ncand = scan_candidates(cand, CANDIDATES);
+    klog("register: scan ncand=%d, top %u %u %u", ncand,
+         ncand > 0 ? cand[0] : 0xffffu, ncand > 1 ? cand[1] : 0xffffu,
+         ncand > 2 ? cand[2] : 0xffffu);
 
     reg_ui.phase = P_FIND;
     reg_ui.result = RES_NO_CELL;
+    sweep_synced = 0;
     {
         uint32_t find_t0 = kernel_ticks();
+        int swept = 0;
 
-    for (int i = 0; i < ncand && kernel_ticks() - find_t0 < FIND_BUDGET_MS; i++) {
+    for (int i = 0; i < ncand && kernel_ticks() - find_t0 < FIND_BUDGET_MS; i++, swept++) {
         reg_ui.arfcn_index = cand[i];
         if (try_cell(cand[i])) {
             reg_ui.mcc = cell.mcc;
@@ -278,6 +285,8 @@ static void worker(void *arg)
             break;
         }
     }
+    klog("register: find swept=%d synced=%d in %lums", swept, sweep_synced,
+         (unsigned long)(kernel_ticks() - find_t0));
     }
     if (reg_ui.result == RES_NO_CELL)
         goto done;
