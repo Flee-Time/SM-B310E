@@ -127,6 +127,19 @@ int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
     return n;
 }
 
+/* Early CLASSMARK CHANGE: advertise A5/1 only so the network ciphers with A5/1
+ * (the algorithm our DSP does), before it sends CIPHERING MODE COMMAND. Sent once
+ * the link is up; returns the block length, or 0 if not established yet. */
+int reg_classmark_change(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
+{
+    uint8_t msg[6];
+
+    if (r->dl.state != LAPDM_ESTABLISHED)
+        return 0;
+    r->dl.tx_pending = 0;               /* mandatory early send; don't let a stale ack block it */
+    return lapdm_send(&r->dl, msg, rr_encode_classmark_change(msg, r->classmark1), out);
+}
+
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK])
 {
     uint8_t resp[6];

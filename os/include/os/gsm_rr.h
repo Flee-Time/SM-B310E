@@ -21,6 +21,8 @@
 #define RR_CHAN_RELEASE     0x0d
 #define RR_CIPH_MODE_CMD    0x35
 #define RR_CIPH_MODE_COMPLETE 0x32
+#define RR_CLASSMARK_CHANGE 0x16
+#define RR_CLASSMARK_ENQUIRY 0x13
 #define RR_PAGING_1         0x21
 #define RR_PAGING_2         0x22
 #define RR_PAGING_3         0x24
@@ -54,5 +56,11 @@ int rr_selftest(void);
 
 /* CIPHERING MODE COMPLETE (no IMEISV); 2 bytes. */
 int rr_encode_ciph_mode_complete(uint8_t out[2]);
+
+/* CLASSMARK CHANGE carrying Mobile Station Classmark 2 (early classmark sending),
+ * advertising A5/1 only (no A5/2, A5/3, no Classmark 3) so the network ciphers
+ * with A5/1 - the one algorithm our DSP path does. cm1 = the Classmark 1 octet
+ * (reused as Classmark 2 octet 3). 6 bytes. */
+int rr_encode_classmark_change(uint8_t out[6], uint8_t cm1);
 
 #endif

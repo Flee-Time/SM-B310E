@@ -55,6 +55,17 @@ int rr_encode_ciph_mode_complete(uint8_t out[2])
     return 2;
 }
 
+int rr_encode_classmark_change(uint8_t out[6], uint8_t cm1)
+{
+    out[0] = RR_PD;
+    out[1] = RR_CLASSMARK_CHANGE;
+    out[2] = 3;                 /* Mobile Station Classmark 2 IE: length (LV) */
+    out[3] = cm1;               /* octet 3: rev level, ES IND, A5/1, RF power - as CM1 */
+    out[4] = 0x00;              /* octet 4: no SM/VBS/VGCS/FC */
+    out[5] = 0x00;              /* octet 5: CM3=0, A5/3=0, A5/2=0 -> A5/1 only */
+    return 6;
+}
+
 int rr_parse_imm_assign(const uint8_t block[23], rr_chan_desc_t *d)
 {
     if (rr_msg_type(block) != RR_IMM_ASSIGN)

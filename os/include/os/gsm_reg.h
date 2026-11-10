@@ -53,6 +53,8 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK]);
 /* Build CIPHERING MODE COMPLETE after enabling A5; 0 when not awaiting it. */
 int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
+/* Early CLASSMARK CHANGE advertising A5/1 only (forces the network's cipher to A5/1). */
+int reg_classmark_change(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 
 #define REG_SELFTEST_TOTAL 8
 int reg_selftest(void);

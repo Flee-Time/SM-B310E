@@ -182,7 +182,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t ul[LAPDM_BLOCK];
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
-    int have_ul, sim_pending = 0, sabm_tries = 0;
+    int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0;
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
     uint32_t last_ul = 0, last_track = 0;
     int dm_dbg = 0;
@@ -342,6 +342,19 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                     }
                 }
             }
+        }
+        /* Once the link is up, the first thing we send is the early CLASSMARK
+         * CHANGE (A5/1 only) so the network ciphers with A5/1 at CIPHERING MODE
+         * COMMAND - the stock sends it from NV (support_early_classmark); without
+         * it TT asks for A5/3, which our DSP path does not do. Preempts the SABM
+         * retransmit below, which would otherwise keep have_ul set and starve it. */
+        if (!have_ul && p.established && !cm_sent && reg_classmark_change(r, ul) > 0) {
+            for (int i = 0; i < LAPDM_BLOCK; i++)
+                sabm[i] = ul[i];
+            have_ul = 1;
+            cm_sent = 1;
+            sabm_tries = 0;
+            klog("lu: early CLASSMARK CHANGE (A5/1 only)");
         }
         /* Retransmit the last uplink frame on T200 until the exchange moves on -
          * the SABM before the UA, then the AUTHENTICATION RESPONSE before the
