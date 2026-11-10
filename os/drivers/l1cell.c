@@ -574,20 +574,26 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
     while (!stop && kernel_ticks() - t0 < ms) {
         bool batch = false;
 
-        /* Shallow ring (2) only while posting the uplink block - the TXBUFQ frees
-         * a slot only when the DSP transmits a burst, so far-ahead posting fills
-         * it at the second burst. When only receiving, a deep ring (AHEAD) keeps
-         * the downlink timing steady so it decodes (a shallow ring jitters it). */
-        while (queued() < (ul ? 2 : AHEAD)) {
+        /* Depth is per-frame, not per-call. Downlink reads and idle fills run on a
+         * deep ring (AHEAD) so the DSP has steady look-ahead and the SDCCH decodes
+         * - the 100%-decoding CCCH read posts just as deep. Only an uplink burst
+         * throttles to a shallow ring (2): its TXBUFQ slot frees only when the DSP
+         * transmits, so posting it far ahead overruns the 4-slot queue. (Gating the
+         * whole call shallow whenever any uplink was pending jittered the downlink
+         * and dropped it to ~18% decode while the CCCH read 99% at the same level.) */
+        for (;;) {
             uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
             int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
+            bool want_ul = ul && ul_posted < 4 && ub == ul_posted && db < 0;
             int rc;
 
+            if ((uint32_t)queued() >= (want_ul ? 2u : (uint32_t)AHEAD))
+                break;
             if (db >= 0) {
                 rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
                 if (rc == DSP_OK)
                     st->dl_bursts++;
-            } else if (ul && ul_posted < 4 && ub == ul_posted) {
+            } else if (want_ul) {
                 rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, bsic, ul);
                 if (rc == DSP_OK) {
                     st->ul_bursts++;
