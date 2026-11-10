@@ -130,6 +130,19 @@ mmu_setup:
     orr     r4, r4, #0x31
     str     r4, [r0, #-4]
 
+    /* The NOR window 0x00000000..0x03ffffff read-only: domain 1 (client),
+     * AP=00 with R=1. Nothing writes there but a bug (a NULL pointer's
+     * store lands in the flash's addresses): it faults (arch_data_abort). */
+    ldr     r0, =TTB_ADDR
+    ldr     r3, =0x032
+    mov     r4, #0
+    mov     r2, #64
+4:  orr     r5, r4, r3
+    str     r5, [r0], #4
+    add     r4, r4, #0x100000
+    subs    r2, r2, #1
+    bne     4b
+
     ldr     r0, =TTB_ADDR + 0x40 * 4    /* cache 0x04000000..0x07ffffff */
     ldr     r3, =0xc1e
     ldr     r4, =0x04000000
@@ -265,7 +278,25 @@ dabort_entry:
     ldmfd   sp!, {r0, r1}
     movs    pc, lr
 1:  ldmfd   sp!, {r0, r1}
-    FAULT 2, 8
+/* Else arch_data_abort may send the thread on elsewhere (an app's write
+ * into the NOR window: to its end): it returns the SPSR to go on with
+ * and has set the pc and r0, r1 in the frame; 0: the fault screen. */
+    sub     lr, lr, #8
+    stmfd   sp!, {r0-r12, lr}
+    mov     r0, sp
+    mrs     r1, spsr
+    ldr     r3, =arch_data_abort
+    blx     r3
+    cmp     r0, #0
+    beq     2f
+    msr     spsr_cxsf, r0
+    ldmfd   sp!, {r0-r12, pc}^
+2:  mov     r0, #2
+    mov     r1, sp
+    mrs     r2, spsr
+    ldr     r3, =arch_fault
+    blx     r3
+    b       .
     .type   fiq_entry, %function
 fiq_entry:      FAULT 3, 4
     .ltorg

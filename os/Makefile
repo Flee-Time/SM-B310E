@@ -72,6 +72,17 @@ $(BUILD)/modules/%.elf: $$(wildcard modules/$$*/*.c) sdk/start.c sdk/app.ld sdk/
 $(BUILD)/modules/%.app: $(BUILD)/modules/%.elf sdk/mkapp.py
 	$(PYTHON) sdk/mkapp.py $< $@
 
+# Apps only a test loads (os/tests/<name>.c with an APP()): built when the test
+# asks for $(BUILD)/tests/<name>.app, never put on a card by the build
+.PRECIOUS: $(BUILD)/tests/%.elf
+$(BUILD)/tests/%.elf: tests/%.c sdk/start.c sdk/app.ld sdk/app.h include/os/app.h include/os/ui.h
+	@mkdir -p $(dir $@)
+	$(CC) $(APP_CFLAGS) $(APP_LDFLAGS) -Wl,-Map,$(@:.elf=.map) \
+	    $(filter %.c,$^) -lgcc -o $@
+
+$(BUILD)/tests/%.app: $(BUILD)/tests/%.elf sdk/mkapp.py
+	$(PYTHON) sdk/mkapp.py $< $@
+
 $(BUILD)/build_info.h: FORCE
 	@mkdir -p $(dir $@)
 	@echo '#define BUILD_DATE "'"$$(date '+%Y-%m-%d %H:%M')"'"' > $@.tmp

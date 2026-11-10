@@ -365,7 +365,7 @@ def main():
 
     img = card.read_bytes()
     log = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
-    result['log'] = [l.strip() for l in log.splitlines() if 'doom' in l][:40]
+    result['log'] = [l.strip() for l in log.splitlines() if 'doom' in l]
     result['config'] = bool(card_file(img, f'{DIR}/default.cfg'))
     save = card_file(img, f'{DIR}/doomsav0.dsg') or b''
     result['save'] = [len(save), save[:24].split(b'\0')[0].decode(errors='replace')]

@@ -237,4 +237,5 @@ const os_api_t os_api = {
     .l1 = &l1_api,
     .ui_is_dark = ui_is_dark,
     .ui_depth = ui_depth,
+    .app_on_fault = app_on_fault,
 };

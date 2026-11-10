@@ -87,7 +87,10 @@
  * channel, receive only). */
 /* 2.14 (2026-11-09): ui_is_dark, so a game can stop while the panel is asleep; ui_depth;
  * settings: awake_limit_s, player_idle_s; key_event_t.repeat. */
-#define OS_API_MINOR 15
+/* 2.16 (2026-11-10): app_on_fault, after ui_depth. The NOR window is read-only:
+ * a store there (a NULL pointer's) by an app's thread no longer stops the OS;
+ * the thread goes to the handler it set, or ends. */
+#define OS_API_MINOR 16
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -360,6 +363,11 @@ struct os_api {
     /* 2.14 */
     bool (*ui_is_dark)(void);
     int (*ui_depth)(void);
+
+    /* 2.16: the calling thread, should it store into the flash's addresses
+     * (read-only), goes on in fn (in that thread, with why for the user) instead
+     * of ending; fn must not return (a game's exit). NULL: it just ends. */
+    void (*app_on_fault)(void (*fn)(const char *why));
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */
@@ -392,6 +400,7 @@ void app_volume_choose(int cat);        /* a tag: its next audio_play takes it *
 bool app_peek_icon(const char *path, const app_file_t *h, icon_t *out);
 /* Unload the apps that have no screen on the stack (the UI loop calls it). */
 void app_collect(screen_t *const *stack, int depth);
+void app_on_fault(void (*fn)(const char *why));
 bool app_is_loaded(const app_t *a);
 void app_kill(app_t *a);                /* its threads end now (END held); the UI's */
 bool app_reloading(void);               /* between app_reload and the fresh app */

@@ -372,7 +372,7 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 
 | Part | What there is |
 |---|---|
-| Start-up | identity MMU with cached PSRAM, the high-vector page, I- and D-cache (`arch/sc6530c/cpu.S`) |
+| Start-up | identity MMU with cached PSRAM, the NOR window (0x00000000..0x03ffffff) read-only, the high-vector page, I- and D-cache (`arch/sc6530c/cpu.S`) |
 | Kernel | preemptive threads, 32 priorities, round robin within one, 1 ms tick (tickless while idle), sleep, semaphores, mutexes with priority inheritance, message queues, heap, CPU clock governor (`kernel/`) |
 | Clock | 208, 104 or 26 MHz, chosen by load every 50 ms; 26 MHz only with the panel asleep; Settings → CPU speed: Auto or 208 MHz (`arch/sc6530c/clock.c`, `kernel/cpufreq.c`) |
 | Drivers | LCD (ST7735S, panel sleep), backlight and keypad light, vibrator, torch (GPIO7), keypad matrix and END, text console, SD card (multi-block, IRAM bounce, retries), battery voltage and charger, RTC calendar: date and time, set from the UI (`drivers/rtc.c`), SIM reader: activation, ATR, T=0 APDUs, both slots (`drivers/sim.c`) (`drivers/`) |
@@ -388,7 +388,7 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 | Codec modules | Rockbox's decoders and metadata parsers built unchanged against a shim (`media/rockbox/`) into `.cdc` files with the app layout (`include/os/codec.h`, `media/codecs/`): mpa (MP3/MP2/MP1, libmad), vorbis (Tremor), flac, opus, aac (libfaad, LC and HE), alac, wavpack, wav (libpcm); all fixed point, ARM mode with Rockbox's ARM assembly |
 | Loadable apps | `.app` files from `/b310e-os/apps/` (or a folder of their own there, with their data: `app_dir`), relocated into the heap, given a versioned API table, freed when closed (`loader/`, `sdk/`, `include/os/app.h`); opened from Apps or by name with an argument (`app_launch`, `app_arg`), kept loaded while a thread of theirs runs; apps: Music, Recorder, FM radio, Alarm, Calculator, Notes, Stopwatch (`modules/`), Doom, Heretic, Hexen (`ports/chocolate/`, on the game kit `ports/kit/`). API 2.6: the hardware and every service through wrappers (see below), an icon of their own, notifications, full-screen raw-key screens for games, the app's own folder |
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
-| Faults | undefined instruction and aborts show the registers on screen |
+| Faults | undefined instruction and aborts show the registers on screen; an app's store into the NOR window (a NULL pointer's) stops only that thread: it goes to the handler it set (API 2.16 `app_on_fault`: a kit game ends with the error and Back) or ends, and the OS goes on (`arch_data_abort`, `loader/loader.c`; `os/tests/test-fault.py`) |
 
 On start the console shows the card and a self-test (kernel objects and a
 32 KB card write and read), then the UI starts on the home screen.

@@ -104,6 +104,11 @@ uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
 void watchdog_arm(void);            /* a reset in 8 s */
 void watchdog_stop(void);
 void arch_reboot(void) __attribute__((noreturn));
+/* A thread's store into the NOR window (read-only in the MMU): where the thread
+ * goes on, called as fn(address, pc) in its own mode (loader.c: an app's, to its
+ * end). Called in abort mode, interrupts off; returns the function (bit 0 set
+ * for Thumb), or 0 for the fault screen. */
+extern uintptr_t (*arch_write_fault)(uint32_t addr, uint32_t pc);
 /* Copy image to 0x04000000 and enter it, MMU and caches off (from IRAM). */
 void arch_chain(const void *image, uint32_t len) __attribute__((noreturn));
 bool arch_chain_fits(const void *image, uint32_t len);   /* lies above the copy */

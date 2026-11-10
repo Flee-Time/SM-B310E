@@ -160,6 +160,31 @@ void arch_power_off(void)
         arch_wait_for_irq();
 }
 
+/* A data abort that is not the shell's probe (cpu.S, abort mode, interrupts
+ * off). A store into the NOR window, which mmu_setup maps read-only (a
+ * permission fault there: FSR 0xd, a section's), from a thread (SYS mode)
+ * that arch_write_fault says may go on elsewhere: its pc becomes that
+ * function, with the address in r0 and the store's pc in r1. Returns the
+ * SPSR to go on with, or 0 for the fault screen. */
+uintptr_t (*arch_write_fault)(uint32_t addr, uint32_t pc);
+
+__attribute__((target("arm"))) uint32_t arch_data_abort(uint32_t *regs, uint32_t spsr)
+{
+    uint32_t fsr, far;
+    uintptr_t to;
+
+    __asm__ volatile("mrc p15, 0, %0, c5, c0, 0" : "=r"(fsr));
+    __asm__ volatile("mrc p15, 0, %0, c6, c0, 0" : "=r"(far));
+    if ((spsr & 0x1f) != 0x1f || (fsr & 0xf) != 0xd || far >= PSRAM_BASE || !arch_write_fault)
+        return 0;
+    if (!(to = arch_write_fault(far, regs[13])))
+        return 0;
+    regs[0] = far;
+    regs[1] = regs[13];
+    regs[13] = to & ~1u;
+    return to & 1 ? spsr | 0x20 : spsr & ~0x20u;   /* Thumb or ARM */
+}
+
 /* Undefined instruction, aborts, FIQ: show the registers and stop. */
 void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
 {

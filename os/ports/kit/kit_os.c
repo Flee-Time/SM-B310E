@@ -841,6 +841,16 @@ static void finished(void *arg)
     }
 }
 
+/* The game stored into the flash's addresses (a NULL pointer): the OS sends
+ * its thread here (app_on_fault). It ends as by exit(1), with why shown. */
+void _exit(int code) __attribute__((noreturn));
+
+static void game_fault(const char *why)
+{
+    snprintf(kit.error, sizeof(kit.error), "%s", why);
+    _exit(1);
+}
+
 /* The game's memory is the app's (what an app's thread allocates is the
  * app's): the arena goes when the app is unloaded; the frame it frees. */
 static void game_main(void *arg)
@@ -856,6 +866,7 @@ static void game_main(void *arg)
         kit.arena_size = want;
         klog("%s: %s, %lu KB for the game, %lu KB left", kit_game.log_name, k.dir,
              (unsigned long)(want / 1024), (unsigned long)(heap_free() / 1024));
+        app_on_fault(game_fault);
         code = kit_run(k.argc, k.argv);
     } else {
         snprintf(kit.error, sizeof(kit.error), "Not enough memory (%lu KB free).",

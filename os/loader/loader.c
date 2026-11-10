@@ -28,6 +28,8 @@ struct app {
     int vol_cat;                        /* its volume tag (2.10); 0: none yet */
     int holds;                          /* cpufreq_hold()s not released yet */
     char *reload_arg;
+    void (*on_fault)(const char *why);  /* app_on_fault (2.16), for fault_thread */
+    thread_t *fault_thread;
 };
 
 /* the app to load again once app_collect has unloaded it (app_reload) */
@@ -567,6 +569,52 @@ const char *app_arg(void)
     return a ? a->arg : NULL;
 }
 
+/* ---- a store into the flash's addresses (2.16) ------------------------------
+ * The NOR window is read-only in the MMU: nothing but a bug writes there (a
+ * NULL pointer, a failed malloc not looked at). An app's thread that does is
+ * sent on to app_fault_end instead of the fault screen: the app's own handler
+ * if that thread has one (a game: its exit, its error shown with Back), else
+ * the thread ends. Not a store the OS makes for itself: that is the screen. */
+static void app_fault_end(uint32_t addr, uint32_t pc)  /* the faulting thread */
+{
+    app_t *a = app_self();
+    thread_t *self = thread_self();
+    char why[96];
+
+    klog("app: %s: a store to 0x%08lx, the flash's addresses (pc 0x%08lx, the app's +0x%lx)",
+         a->name, (unsigned long)addr, (unsigned long)pc,
+         (unsigned long)(pc - (uint32_t)(uintptr_t)a->image));
+    if (a->on_fault && a->fault_thread == self) {
+        void (*fn)(const char *) = a->on_fault;
+
+        a->on_fault = NULL;             /* a second one: the thread just ends */
+        snprintf(why, sizeof(why), "It wrote to 0x%08lx, the flash (pc +0x%lx).",
+                 (unsigned long)addr, (unsigned long)(pc - (uint32_t)(uintptr_t)a->image));
+        fn(why);                        /* (does not come back) */
+    }
+    klog("app: %s: its thread %s ends", a->name, self->name);
+    thread_exit();
+}
+
+static uintptr_t app_write_fault(uint32_t addr, uint32_t pc)    /* abort mode */
+{
+    thread_t *t = thread_self();
+
+    (void)addr;
+    (void)pc;
+    return t && t->owner && app_is_loaded(t->owner) ? (uintptr_t)app_fault_end : 0;
+}
+
+void app_on_fault(void (*fn)(const char *why))
+{
+    app_t *a = app_self();
+
+    if (a) {
+        a->on_fault = fn;
+        a->fault_thread = fn ? thread_self() : NULL;
+    }
+}
+
 /* A thread of the app's: the app stays loaded while it runs, even with no
  * screen of its own on the stack (a background job). Below the UI. */
 thread_t *app_thread(const char *name, int prio, size_t stack, void (*fn)(void *), void *arg)
@@ -658,6 +706,7 @@ static const char *open_file(const char *path, const char *arg, bool fresh)
         memcpy(a->arg, arg, strlen(arg) + 1);
     a->next = apps;
     apps = a;
+    arch_write_fault = app_write_fault;
     os_status.apps_loaded = (uint32_t)app_count();
     klog("app: %s loaded, %lu + %lu bytes, %lu relocations, %lu ms",
          a->name, (unsigned long)h.image_size, (unsigned long)h.bss_size,
