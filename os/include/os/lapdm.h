@@ -73,9 +73,14 @@ int lapdm_send(lapdm_dl_t *dl, const uint8_t *l3, int len, uint8_t out[LAPDM_BLO
  * *out_valid. Returns 1 if l3 was delivered, 0 otherwise, -1 on error. */
 int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
                   int *l3len, uint8_t out[LAPDM_BLOCK], int *out_valid);
+/* Build an idle RR keep-alive/ack frame (receiver ready, N(R)=V(R), P=0) to hold
+ * the SDCCH uplink active between L3 messages, the way the stock MS does through
+ * the whole auth/cipher/accept exchange. Returns LAPDM_BLOCK, or 0 if the link is
+ * not established. Touches no sequence state, so it is safe to send any time. */
+int lapdm_fill(lapdm_dl_t *dl, uint8_t out[LAPDM_BLOCK]);
 
 /* Self-test: returns the number of checks passed (LAPDM_SELFTEST_TOTAL on all). */
-#define LAPDM_SELFTEST_TOTAL 12
+#define LAPDM_SELFTEST_TOTAL 13
 int lapdm_selftest(void);
 
 #endif

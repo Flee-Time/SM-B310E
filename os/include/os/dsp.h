@@ -243,6 +243,11 @@ void l1_tx_level_set(uint8_t pcl);
 /* The uplink timing advance (0..63) from the grant; apply after the immediate
  * assignment, before the SDCCH uplink. See l1_tx_ta_set in dsp.c. */
 void l1_tx_ta_set(uint8_t ta);
+/* Arm the uplink SACCH: l1_dm_sched posts this 23-byte block (L1 header + LAPDm
+ * MEASUREMENT REPORT) at the subchannel's SACCH window every 102-multiframe, so
+ * the radio link stays up through the dedicated exchange. The pointer must stay
+ * valid until cleared with NULL. NULL (the default) sends no SACCH. */
+void l1_sacch_set(const uint8_t *block);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs
  * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. bsic: the
  * serving cell's, as for l1_access_post (the stock's FUN_00050426 sends it too). */

@@ -66,6 +66,21 @@ int rr_encode_classmark_change(uint8_t out[6], uint8_t cm1)
     return 6;
 }
 
+int rr_encode_meas_report(uint8_t out[18], int rxlev)
+{
+    uint8_t rl = (uint8_t)(rxlev < 0 ? 0 : rxlev > 63 ? 63 : rxlev);
+
+    out[0] = RR_PD;
+    out[1] = RR_MEAS_REPORT;
+    /* Measurement Results IE value part (16 octets, 10.5.2.20): */
+    out[2] = rl;                /* BA-USED=0 DTX=0 | RXLEV-FULL-SERVING-CELL */
+    out[3] = rl;                /* 3G-BA=0 MEAS-VALID=0(valid) | RXLEV-SUB */
+    out[4] = 0;                 /* RXQUAL-FULL/SUB = 0, NO-NCELL-M high bits = 0 */
+    for (int i = 5; i < 18; i++)
+        out[i] = 0;             /* NO-NCELL-M low bit = 0, no neighbour cells */
+    return 18;
+}
+
 int rr_parse_imm_assign(const uint8_t block[23], rr_chan_desc_t *d)
 {
     if (rr_msg_type(block) != RR_IMM_ASSIGN)

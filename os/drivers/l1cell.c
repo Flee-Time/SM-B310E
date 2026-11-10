@@ -547,6 +547,30 @@ static int sdcch_burst(int base, uint32_t m)
     return b >= 0 && b < 4 ? b : -1;
 }
 
+/* The uplink SACCH block armed by l1_sacch_set (NULL = none). */
+static const uint8_t *dm_sacch;
+
+void l1_sacch_set(const uint8_t *block)
+{
+    dm_sacch = block;
+}
+
+/* SACCH/C8 maps over a 102-multiframe (GSM 05.02 Table 4): subchannels 0-3 report
+ * in the first 51-frame half, 4-7 in the second; the uplink is offset 15 frames
+ * from the downlink like the SDCCH. Returns this subchannel's SACCH uplink burst
+ * 0..3 for frame position m102 (= FN mod 102), or -1 when it is not a SACCH frame. */
+static int sacch_burst(int subch, uint32_t m102)
+{
+    int k = subch & 7;
+    int dl = k < 4 ? 32 + k * 4 : 83 + (k - 4) * 4;
+    int ul = (dl + 15) % 102;
+
+    for (int i = 0; i < 4; i++)
+        if ((uint32_t)((ul + i) % 102) == m102)
+            return i;
+    return -1;
+}
+
 /* One dedicated-channel session of ms: post the subchannel's downlink rx bursts,
  * and when ul is given its uplink normal bursts, and collect the decoded downlink
  * blocks into st. The osmocom DATA_IND/DATA_REQ pump for SDCCH, on the verified rx
@@ -582,12 +606,20 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
          * whole call shallow whenever any uplink was pending jittered the downlink
          * and dropped it to ~18% decode while the CCCH read 99% at the same level.) */
         for (;;) {
-            uint32_t m = (l1_next_fn() + c->fn_offset) % FN_MOD % 51;
+            uint32_t fn = (l1_next_fn() + c->fn_offset) % FN_MOD;
+            uint32_t m = fn % 51;
             int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
+            int sb = dm_sacch ? sacch_burst(subch, fn % 102) : -1;
             bool want_ul = ul && ul_posted < 4 && ub == ul_posted && db < 0;
+            /* SACCH rides on its own window, independent of SDCCH traffic (it goes
+             * out even on receive-only calls), so the link survives between L3
+             * steps. db takes the frame if they ever coincide; SDCCH uplink wins
+             * over SACCH on the rare shared frame. Each of the 4 SACCH frames is
+             * posted once as the ring advances, so no per-block counter is needed. */
+            bool want_sacch = sb >= 0 && db < 0 && !want_ul;
             int rc;
 
-            if ((uint32_t)queued() >= (want_ul ? 2u : (uint32_t)AHEAD))
+            if ((uint32_t)queued() >= (want_ul || want_sacch ? 2u : (uint32_t)AHEAD))
                 break;
             if (db >= 0) {
                 rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
@@ -603,6 +635,12 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                                              * keep the clock fed, retry next window */
                     ul_posted = 0;
                 }
+            } else if (want_sacch) {
+                rc = l1_uplink_post(c->index, TAG_DCH, sb, tn, tsc, c->slot, bsic, dm_sacch);
+                if (rc == DSP_OK)
+                    st->sacch_bursts++;
+                else if (rc == DSP_EFULL)
+                    rc = l1_idle_post(1);   /* TXBUFQ full: skip this SACCH burst */
             } else {
                 rc = l1_idle_post(1);
             }

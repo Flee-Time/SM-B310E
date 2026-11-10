@@ -161,6 +161,22 @@ int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
     return deliver;
 }
 
+/* Idle keep-alive: a receiver-ready (RR) frame carrying our current N(R)=V(R),
+ * as a command with no poll (P=0). The MS puts one on every uplink opportunity it
+ * would otherwise leave empty, so the SDCCH link stays up and our receive state is
+ * continuously acked. A capture of the stock location update shows ~23 back-to-back
+ * uplink blocks; going receive-only between steps lets the link stall before the
+ * auth/cipher/accept ladder finishes. Carries no I-frame, advances nothing. */
+int lapdm_fill(lapdm_dl_t *dl, uint8_t out[LAPDM_BLOCK])
+{
+    uint8_t ctrl;
+
+    if (dl->state != LAPDM_ESTABLISHED)
+        return 0;
+    ctrl = (uint8_t)((dl->vr & 7) << 5 | LAPDM_S_RR);   /* RR, P=0, N(R)=V(R) */
+    return lapdm_encode(out, dl->sapi, 0, ctrl, 0, 0);
+}
+
 /* ---- self-test ------------------------------------------------------------ */
 
 int lapdm_selftest(void)
@@ -209,6 +225,24 @@ int lapdm_selftest(void)
     lapdm_encode(g, 0, 0, LAPDM_U_DISC | LAPDM_PF, 0, 0);
     lapdm_receive(&dl, g, body, &len, f, &cr);
     if (dl.state == LAPDM_IDLE && cr && LAPDM_U_BITS(f[1]) == LAPDM_U_UA) ok++;
+
+    /* 13: lapdm_fill is refused before establishment, then yields an RR command
+     * (P off, N(R)=V(R)) once the link is up - the idle keep-alive */
+    {
+        lapdm_dl_t d2;
+        uint8_t h[LAPDM_BLOCK];
+
+        lapdm_init(&d2, 0);
+        if (lapdm_fill(&d2, h) == 0) {                  /* not established yet */
+            lapdm_establish(&d2, req, (int)sizeof req, h);
+            lapdm_encode(g, 0, 1, LAPDM_U_UA | LAPDM_PF, 0, 0);
+            lapdm_receive(&d2, g, body, &len, h, &cr);  /* -> ESTABLISHED */
+            if (lapdm_fill(&d2, h) == LAPDM_BLOCK && LAPDM_CTRL_IS_S(h[1]) &&
+                ((h[1] >> 2) & 3) == 0 && !(h[1] & LAPDM_PF) &&
+                LAPDM_S_NR(h[1]) == d2.vr && LAPDM_ADDR_CR(h[0]) == 0)
+                ok++;
+        }
+    }
 
     return ok;
 }

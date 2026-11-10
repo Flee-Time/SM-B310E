@@ -23,6 +23,7 @@
 #define RR_CIPH_MODE_COMPLETE 0x32
 #define RR_CLASSMARK_CHANGE 0x16
 #define RR_CLASSMARK_ENQUIRY 0x13
+#define RR_MEAS_REPORT      0x15
 #define RR_PAGING_1         0x21
 #define RR_PAGING_2         0x22
 #define RR_PAGING_3         0x24
@@ -62,5 +63,11 @@ int rr_encode_ciph_mode_complete(uint8_t out[2]);
  * with A5/1 - the one algorithm our DSP path does. cm1 = the Classmark 1 octet
  * (reused as Classmark 2 octet 3). 6 bytes. */
 int rr_encode_classmark_change(uint8_t out[6], uint8_t cm1);
+
+/* MEASUREMENT REPORT (10.5.2.20) for the uplink SACCH: serving-cell RXLEV only,
+ * no neighbours, RXQUAL 0, results valid. rxlev is 0..63 (clamped). 18 bytes -
+ * it fills the SACCH LAPDm payload (N201 = 18) exactly. The MS must send one every
+ * SACCH period or the network's radio-link timeout releases the channel. */
+int rr_encode_meas_report(uint8_t out[18], int rxlev);
 
 #endif

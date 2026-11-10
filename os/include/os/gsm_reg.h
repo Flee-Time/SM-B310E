@@ -55,6 +55,9 @@ int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK]);
 int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 /* Early CLASSMARK CHANGE advertising A5/1 only (forces the network's cipher to A5/1). */
 int reg_classmark_change(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
+/* Idle RR keep-alive to hold the SDCCH uplink active between L3 steps; 0 if the
+ * link is not established. */
+int reg_keepalive(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 
 #define REG_SELFTEST_TOTAL 8
 int reg_selftest(void);

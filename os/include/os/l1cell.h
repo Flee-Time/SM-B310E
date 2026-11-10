@@ -169,6 +169,7 @@ typedef struct {
     uint32_t dl_blocks;                 /* downlink blocks received (DSP-decoded) */
     uint32_t dl_bad;                    /* CRC failures */
     uint32_t ul_bursts;                 /* uplink bursts sent */
+    uint32_t sacch_bursts;              /* uplink SACCH bursts sent (keep-alive) */
     uint8_t last_dl[23];                /* the last good downlink block */
     int has_dl;
     int ul_done;                        /* a full uplink block (4 bursts) went out */

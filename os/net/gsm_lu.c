@@ -28,7 +28,12 @@
                                          * the AFC once, then the synth free-runs and
                                          * the SDCCH CRC drifts (dm#0 after a track
                                          * decoded 3/3, then degraded to 0/1). */
-#define LU_T200_MS      300u            /* resend the SABM if no UA by this */
+#define LU_T200_MS      300u            /* resend the SABM / an unacked I-frame by this */
+#define LU_FILL_MS      150u            /* once the link is up, put an RR keep-alive on
+                                         * every uplink opportunity we would otherwise
+                                         * leave empty - the stock MS holds the SDCCH up
+                                         * with ~23 back-to-back blocks per LU; going
+                                         * receive-only between steps stalls the ladder */
 #define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
 #define LU_REF_SLACK    4               /* frames either side of our RACH's: the grant's
@@ -169,6 +174,27 @@ static void sim_auth_thread(void *arg)
                                     sim_job.kc) == SIM_OK ? 1 : -1;
 }
 
+/* Assemble the 23-byte uplink SACCH block: the 2-byte L1 header (ordered MS power
+ * level, timing advance) then a LAPDm UI frame carrying the RR MEASUREMENT REPORT.
+ * l1_sacch_set arms it and l1_dm_sched posts it every SACCH period, so the radio
+ * link survives the dedicated exchange - without it the network's radio-link
+ * timeout releases the SDCCH part-way through auth/cipher. */
+static void build_sacch(uint8_t blk[LAPDM_BLOCK], uint8_t pwr, uint8_t ta, int rxlev)
+{
+    uint8_t rep[18];
+    int n = rr_encode_meas_report(rep, rxlev);
+
+    blk[0] = (uint8_t)(pwr & 0x1f);             /* L1 header: MS power level */
+    blk[1] = (uint8_t)(ta & 0x3f);              /* L1 header: timing advance */
+    blk[2] = LAPDM_ADDR(0, 0);                  /* SAPI 0, command */
+    blk[3] = LAPDM_U_UI;                        /* unnumbered information (unacked) */
+    blk[4] = (uint8_t)((n & 0x3f) << 2 | 1u);   /* length | M=0 | EL=1 */
+    for (int i = 0; i < n; i++)
+        blk[5 + i] = rep[i];
+    for (int i = 5 + n; i < LAPDM_BLOCK; i++)
+        blk[i] = LAPDM_FILL;
+}
+
 /* Run one location-update attempt on a synced cell. Returns REG_ACCEPTED,
  * REG_REJECTED or REG_ERROR, and fills prog (may be NULL) as it goes. r must be
  * reg_init'd; ra is the CHANNEL REQUEST byte (establishment cause = location
@@ -184,6 +210,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     reg_lu_progress_t p = {0};
     int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0;
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
+    uint8_t sacch[LAPDM_BLOCK];          /* the uplink SACCH keep-alive, armed for the run */
     uint32_t last_ul = 0, last_track = 0;
     int dm_dbg = 0;
     uint32_t t0;
@@ -249,6 +276,13 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     for (int i = 0; i < LAPDM_BLOCK; i++)
         sabm[i] = ul[i];              /* last uplink frame, kept for retransmission */
     have_ul = 1;
+    /* Arm the uplink SACCH for the whole dedicated phase: the scheduler now posts
+     * a MEASUREMENT REPORT at this subchannel's SACCH window every 102-multiframe,
+     * so the network does not time the radio link out mid-exchange. ch.ta is the
+     * grant's timing advance; the stock reports its used power + TA in the L1
+     * header. Disarmed after the loop (sacch is on this stack frame). */
+    build_sacch(sacch, c->ms_txpwr_max_cch, ch.ta, c->rxlev);
+    l1_sacch_set(sacch);
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
      * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
@@ -287,9 +321,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         p.dl_bad = (uint16_t)(p.dl_bad + st.dl_bad);
         p.ul_bursts = (uint16_t)(p.ul_bursts + st.ul_bursts);
         if (dm_dbg < 28) {
-            klog("lu: dm#%d ul=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
-                 dm_dbg, (unsigned long)st.ul_bursts, st.ul_done,
-                 (unsigned long)st.dl_bursts,
+            klog("lu: dm#%d ul=%lu sa=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
+                 dm_dbg, (unsigned long)st.ul_bursts, (unsigned long)st.sacch_bursts,
+                 st.ul_done, (unsigned long)st.dl_bursts,
                  (unsigned long)st.dl_blocks, (unsigned long)st.dl_bad,
                  (unsigned long)st.dl_fn, st.last_dl[0], st.last_dl[1],
                  (unsigned long)dsp_info.fi_moves);
@@ -356,16 +390,33 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             sabm_tries = 0;
             klog("lu: early CLASSMARK CHANGE (A5/1 only)");
         }
-        /* Retransmit the last uplink frame on T200 until the exchange moves on -
-         * the SABM before the UA, then the AUTHENTICATION RESPONSE before the
-         * ACCEPT. Each is marginal on this link, so a lost one must be resent, not
-         * sent once. Most calls stay receive-only (ul == NULL) for clean RX. */
-        if (!have_ul && sabm_tries < LU_SABM_MAX &&
-            kernel_ticks() - last_ul >= LU_T200_MS) {
+        /* Hold the SDCCH link up the way the stock MS does - a capture of its
+         * location update shows ~23 back-to-back uplink blocks, while going
+         * receive-only between steps lets the link stall before auth/cipher/accept
+         * finish (and a dropped CLASSMARK CHANGE never takes effect). In priority:
+         *   (a) before the UA, retransmit the SABM on T200 until establishment;
+         *   (b) once up, retransmit a genuinely unacked I-frame on T200 (a lost
+         *       AUTHENTICATION RESPONSE / CIPHERING MODE COMPLETE must be resent);
+         *   (c) otherwise send an RR keep-alive on every free uplink opportunity,
+         *       which also keeps our N(R) ack flowing so the network advances.
+         * (b) resends sabm[] - the last real frame built - only while it is still
+         * unacked, so an already-acked I-frame is not blindly repeated (which
+         * desynced N(S) before); (c) touches no sequence state. */
+        if (!have_ul && r->dl.state != LAPDM_ESTABLISHED &&
+            sabm_tries < LU_SABM_MAX && kernel_ticks() - last_ul >= LU_T200_MS) {
             for (int i = 0; i < LAPDM_BLOCK; i++)
                 ul[i] = sabm[i];
             have_ul = 1;
             sabm_tries++;
+        } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED && r->dl.tx_pending &&
+                   kernel_ticks() - last_ul >= LU_T200_MS) {
+            for (int i = 0; i < LAPDM_BLOCK; i++)
+                ul[i] = sabm[i];
+            have_ul = 1;
+        } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED &&
+                   kernel_ticks() - last_ul >= LU_FILL_MS &&
+                   reg_keepalive(r, ul) > 0) {
+            have_ul = 1;
         }
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {
@@ -394,6 +445,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         if (prog)
             *prog = p;
     }
+    l1_sacch_set(0);                     /* disarm: sacch[] leaves scope on return */
     /* let the SIM thread finish before its job is reused or the SIM is freed;
      * bounded, since sim_run_gsm_algo self-times-out (SIM_ETIMEOUT) anyway */
     for (int w = 0; sim_pending && !sim_job.done && w < 600; w++)

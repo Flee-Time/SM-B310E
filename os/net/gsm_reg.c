@@ -140,6 +140,15 @@ int reg_classmark_change(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
     return lapdm_send(&r->dl, msg, rr_encode_classmark_change(msg, r->classmark1), out);
 }
 
+/* Idle keep-alive: an RR frame (N(R)=V(R)) that holds the SDCCH uplink active
+ * between L3 steps, the way the stock MS does through the whole exchange. The
+ * caller sends it on every uplink opportunity it would otherwise leave empty.
+ * Returns the block length, or 0 when the link is not established. */
+int reg_keepalive(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
+{
+    return lapdm_fill(&r->dl, out);
+}
+
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK])
 {
     uint8_t resp[6];
