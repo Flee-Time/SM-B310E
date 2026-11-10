@@ -81,6 +81,12 @@ SOURCES = {
         '296795c2cfa084b061a7529997a19e75f4f91e36.zip',
         '891e174949c2c7f85b1ca16d84677f9dbb59878775e4fd530f5cec55635e62c4',
         'fpbuild/NBlood.patch'),
+    # Quake (GPLv2): id Software's release; WinQuake, the software renderer
+    'quake': (
+        'https://github.com/id-Software/Quake/archive/'
+        'bf4ac424ce754894ac8f1dae6a3981954bc9852d.zip',
+        '9b6f6c5ead62e9a64d32d4bcc5ef57fbdc1d1172219fd96454b1fbc159882831',
+        'WinQuake/host.c'),
     # JonoF's audiolib: only its headers are used (GPLv2)
     'jfaudiolib': (
         'https://github.com/jonof/jfaudiolib/archive/'
