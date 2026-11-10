@@ -61,6 +61,27 @@ DSP 0xa9f8..0xa9fb → 0xec4c..0xec4f = share +0x3f0 (the cipher COUNT working r
 `w5 |= (1u << 15) | (1u << 13)` = **0xA000** → bit15 = enable/Kc-load, bits14:13 = 1 = A5/1.
 (General: `(1<<15) | ((alg+1) << 13)`, alg 0 = A5/1.)
 
+### THE COUNT is the likely remaining bug (found 2026-11-10, after cipher was reached on-air)
+The A5 keystream COUNT (the 22-bit GSM frame number) is assembled by the engine at
+dis 0x1645 from DSP 0xec4c/0xec4d/0xec4e: `[r3] = [0xec4c]; [r5] = ([0xec4e]<<8) |
+[0xec4d]`. Those are copied from share +0x3f0/+0x3f2/+0x3f4 whenever FI word-1 bit 8
+is 0 (gsm-plan.md:1024). PROBLEM: our fi_init sets fi[1] = ((frame_number>>16)&0x7f)
+<<9, i.e. **bit 8 = 0 on every FI**, so the DSP reloads the cipher COUNT from share
++0x3f0 EVERY frame - and we never write +0x3f0, and the DSP's own frame counter is
+our LOCAL frame_number (0 at l1_start), not the cell's absolute FN. So the COUNT the
+MS ciphers with does not match the network's, the keystream is wrong, and the ACCEPT
+never comes even when A5/1 is correctly reached+enabled (confirmed on-air: cipher
+enables, result stays 6).
+FIX SHAPE (to implement + verify): write the cell's current absolute FN into share
++0x3f0 in the 0xec4c/4d/4e packing (determine T1/T2/T3 vs raw split from 0x1645/the
+copy code), aligned to the frame the DSP will cipher; and decide the w1-bit-8
+load-once-then-advance vs reload-each-frame semantics (does the DSP advance 0xec4c
+per frame when bit 8 = 1? - trace the +0x3f0 copy and any per-frame increment of
+0xec4c). cell FN = (frame_number + c->fn_offset) mod (26*51*2048). Until this is
+right, A5 cannot complete. Also: TT sometimes requests A5/3 (seen: w5 e000); this DSP
+path only activates A5/1 (mode==1 at 0x8640), so A5/3 attempts cannot complete - rely
+on the A5/1 ones.
+
 ### Implementation (done 2026-11-10)
 `l1_cipher_set(kc, alg)` in os/drivers/dsp.c: writes kc[0..7] to share +0x3f8..+0x406
 (8 words, one byte each) and sets a `cipher_w5` global = (1<<15)|((alg+1)<<13); the FI
