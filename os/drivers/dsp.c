@@ -142,6 +142,10 @@
 #define TXPWR_PCL       0x3ecu
 #define TXTA_SHARE      0x3e4u          /* dedicated TX timing advance (0..63), same
                                          * word-5 block as the power level (+0x3ec) */
+#define CIPHER_KC_SHARE 0x3f8u          /* A5 key: 8 words (one Kc byte each) the DSP
+                                         * copies to key reg 0xec71 when FI word-5 bit
+                                         * 15 is set; just past the cipher COUNT regs at
+                                         * +0x3f0. See docs/a5-cipher-re.md. */
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
@@ -1009,6 +1013,11 @@ static int send_start(void)
 static uint8_t cell_gain[CELL_SLOTS];   /* 0x80 | setting; 0 = unset */
 static uint8_t txpwr_toggle;            /* the power-level buffer in use (0/1) */
 static bool txpwr_pending;              /* flag it in the next TX frame's word 5 */
+/* The FI word-5 cipher bits ORed into every RX and TX frame once ciphering is on:
+ * bit 15 (re)loads Kc from share +0x3f8 into key reg 0xec71, bits 14:13 select the
+ * algorithm (1 = A5/1). 0 = ciphering off. Set by l1_cipher_set; see
+ * docs/a5-cipher-re.md. */
+static uint16_t cipher_w5;
 
 int l1_start(void)
 {
@@ -1020,6 +1029,7 @@ int l1_start(void)
     dsp_info.started = 0;
     dsp_info.param_blocks = 0;
     dsp_info.fi_moves = dsp_info.pm_results = 0;
+    cipher_w5 = 0;                       /* ciphering off until a CIPHER MODE COMMAND */
     /* stock FUN_0002e98e: clear, interrupt on, clear, start marker */
     sm_clear(0, SHARE_CLEAR);
     fe0_init();
@@ -1198,6 +1208,7 @@ int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
     fi[3] = (uint16_t)((tn & 7) << 8);
     fi[4] = (uint16_t)((tsc & 7) << 8);
     fi[6] = (uint16_t)(g << 10 | (index & 0x3ffu));
+    fi[5] = cipher_w5;                   /* decipher the downlink once ciphering is on */
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     return post_fi(fi, ext);
 }
@@ -1380,7 +1391,7 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     fi[4] = (uint16_t)((tsc & 7) << 8);
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);        /* word0: type 7 + flags */
-    fi[5] = txpwr_w5();                             /* a new power level, if set */
+    fi[5] = txpwr_w5() | cipher_w5;                 /* power update + cipher the uplink */
     fi[6] = (uint16_t)(index & 0x3ffu);             /* word6 = ARFCN index */
     fi[7] = (uint16_t)(index & 0x3ffu);             /* word7 = ARFCN index */
     fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
@@ -1401,12 +1412,25 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
  * TXBUFQ entries - the 23-byte block once (burst 0) then a control word per
  * burst - paced to how fast the DSP drains the ring, so five entries pass
  * through four slots without overrunning and without starving the frame clock. */
-/* Enable A5 ciphering on the DSP with the SIM's Kc. STUB: logs only for now;
- * the real DSP cipher command is still to be found. alg: 0 = A5/1, 1 = A5/2... */
+/* Enable A5 ciphering on the DSP with the SIM's Kc. Reverse-engineered from the
+ * stock DSP (dsp-blob-CC874.dis): the ARM writes Kc to share +0x3f8 as 8 words,
+ * one Kc byte per word, and sets FI word-5 bit 15 (-> 0xec70) so the DSP copies
+ * them into its key register 0xec71..0xec78, with word-5 bits 14:13 = alg+1 as the
+ * algorithm (the engine at 0x8640 activates only when that field == 1, i.e. A5/1).
+ * The GSM frame-number COUNT the keystream also needs is the DSP's own (share
+ * +0x3f0 -> 0xec4c, maintained per frame), so we supply only Kc and the mode bits.
+ * alg: 0 = A5/1, 1 = A5/2, 2 = A5/3. alg 0xff disables. */
 void l1_cipher_set(const uint8_t kc[8], uint8_t alg)
 {
-    (void)kc;
-    klog("dsp: cipher A5/%u requested (not yet enabled)", alg + 1);
+    if (alg == 0xff) {
+        cipher_w5 = 0;
+        klog("dsp: cipher off");
+        return;
+    }
+    for (int i = 0; i < 8; i++)
+        sm_w16(CIPHER_KC_SHARE + 2u * (uint32_t)i, kc[i]);
+    cipher_w5 = (uint16_t)(0x8000u | ((uint16_t)((alg + 1) & 3) << 13));
+    klog("dsp: cipher A5/%u enabled (w5 %04x)", alg + 1, cipher_w5);
 }
 
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
@@ -1426,7 +1450,7 @@ int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
     fi[4] = (uint16_t)((tsc & 7) << 8);
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
     fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);
-    fi[5] = txpwr_w5();
+    fi[5] = txpwr_w5() | cipher_w5;
     fi[6] = (uint16_t)(index & 0x3ffu);
     fi[7] = (uint16_t)(index & 0x3ffu);
     fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
