@@ -246,6 +246,11 @@ void l1_tx_ta_set(uint8_t ta);
 /* Uplink normal-burst TX (osmocom DATA_REQ). RE-faithful, not HW-verified - needs
  * a network-assigned dedicated channel (gated). See docs/l1-osmocom.md. bsic: the
  * serving cell's, as for l1_access_post (the stock's FUN_00050426 sends it too). */
+/* Frame-synced uplink (l1_dm_sched): post the burst FI ahead, feed the TXBUFQ
+ * descriptors just-in-time. See dsp.c. */
+int txbuf_free(void);                   /* free TXBUFQ slots (uplink pacing) */
+int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
+int l1_uplink_desc(int tag, int burst, uint8_t bsic, const uint8_t block[23]);
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
                    uint8_t bsic, const uint8_t block[23]);
 /* DM_EST (dedicated-mode establish): the command-3 piece only. Needs the L1

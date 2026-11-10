@@ -241,7 +241,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     if (reg_begin(r, ul) < 0)
         return REG_ERROR;
     for (int i = 0; i < LAPDM_BLOCK; i++)
-        sabm[i] = ul[i];
+        sabm[i] = ul[i];              /* last uplink frame, kept for retransmission */
     have_ul = 1;
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
@@ -256,15 +256,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                         have_ul ? ul : (const uint8_t *)0, &st);
         if (have_ul && st.ul_done) {
             last_ul = kernel_ticks();
-            if (!p.established) {
+            if (!p.established)
                 p.sabm_sent++;
-            } else {
-                /* a post-establishment uplink (the AUTHENTICATION RESPONSE) keyed
-                 * the PA; re-track so the AFC recovers and the LOCATION UPDATING
-                 * ACCEPT that follows is decodable. Only once established, so the
-                 * SABM/UA handshake is not disturbed. */
-                l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-            }
+            /* dedicated mode (command 3 mode 2) keeps the AFC on the SDCCH, so no
+             * per-transmit re-track - re-tracking on every retransmit jitters RX. */
         }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
@@ -293,8 +288,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 p.established = 1;
             if (ov) {
                 for (int i = 0; i < LAPDM_BLOCK; i++)
-                    ul[i] = out[i];
+                    ul[i] = sabm[i] = out[i];
                 have_ul = 1;
+                sabm_tries = 0;
             }
             if (state == REG_NEED_SRES && !sim_pending) {
                 p.reached_auth = 1;
@@ -308,11 +304,11 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                     break;              /* could not start the SIM thread */
             }
         }
-        /* SABM retransmission on T200: resend when no UA has come, but keep most
-         * dm_sched calls receive-only (ul == NULL) so they run a deep ring for
-         * clean RX timing - a shallow ring (needed to pace the uplink) jitters
-         * the downlink and fails its CRC. */
-        if (!p.established && !have_ul && sabm_tries < LU_SABM_MAX &&
+        /* Retransmit the last uplink frame on T200 until the exchange moves on -
+         * the SABM before the UA, then the AUTHENTICATION RESPONSE before the
+         * ACCEPT. Each is marginal on this link, so a lost one must be resent, not
+         * sent once. Most calls stay receive-only (ul == NULL) for clean RX. */
+        if (!have_ul && sabm_tries < LU_SABM_MAX &&
             kernel_ticks() - last_ul >= LU_T200_MS) {
             for (int i = 0; i < LAPDM_BLOCK; i++)
                 ul[i] = sabm[i];
@@ -322,8 +318,12 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {
                 p.sim_ok = 1;
-                if (reg_sres(r, sim_job.sres, ul) > 0)
+                if (reg_sres(r, sim_job.sres, ul) > 0) {
+                    for (int i = 0; i < LAPDM_BLOCK; i++)
+                        sabm[i] = ul[i];
                     have_ul = 1;
+                    sabm_tries = 0;
+                }
                 sim_pending = 0;
             } else {
                 sim_pending = 0;

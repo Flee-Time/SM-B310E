@@ -1342,7 +1342,7 @@ int l1_access_post(uint16_t index, int slot, uint8_t bsic, uint8_t ra)
  * uses next==out for full). Before the DSP sets TXBUF_OUT the full-check is skipped,
  * so report the ring empty. Used to pace the uplink so a burst FI is never posted
  * without its TXBUFQ entry - a type-7 FI with no entry stalls the DSP. */
-static int txbuf_free(void)
+int txbuf_free(void)
 {
     uint32_t in = sm_r16(TXBUF_IN), out = sm_r16(TXBUF_OUT);
 
@@ -1392,6 +1392,55 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
       if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
           return rc; }
     { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
+}
+
+/* The frame-synced uplink, split so the FI ring and the TXBUFQ are fed
+ * independently (l1_dm_sched). l1_uplink_fi posts one burst instruction (type 7)
+ * plus its PA-arm command; the four of a block go out on consecutive frames,
+ * ahead of the DSP like any receive frame. l1_uplink_desc posts that burst's
+ * TXBUFQ entries - the 23-byte block once (burst 0) then a control word per
+ * burst - paced to how fast the DSP drains the ring, so five entries pass
+ * through four slots without overrunning and without starving the frame clock. */
+int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
+{
+    uint16_t fi[11], ext[3];
+    int rc;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    if (tx_power_mode == L1_TX_OFF)
+        return DSP_ECMD;
+    if (l1_fi_free() < 1)
+        return DSP_EFULL;
+    fi_init(fi, ext, FI_BLOCK);
+    fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
+    fi[3] = (uint16_t)((tn & 7) << 8);
+    fi[4] = (uint16_t)((tsc & 7) << 8);
+    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
+    fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);
+    fi[5] = txpwr_w5();
+    fi[6] = (uint16_t)(index & 0x3ffu);
+    fi[7] = (uint16_t)(index & 0x3ffu);
+    fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
+    fi[3] = (uint16_t)(fi[3] & 0x0fffu);
+    if ((rc = post_fi(fi, ext)) != DSP_OK)
+        return rc;
+    { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
+}
+
+/* The TXBUFQ entries for one uplink burst: the 23-byte block (type 3) on burst 0,
+ * then the 4-byte control word (type 0, byte 1 = BSIC). EFULL when the ring has
+ * no room yet - the caller retries once the DSP has drained a slot. */
+int l1_uplink_desc(int tag, int burst, uint8_t bsic, const uint8_t block[23])
+{
+    const uint8_t ctl[4] = { 0, (uint8_t)(bsic & 0x3f), 0, (uint8_t)(burst & 3) };
+    int rc;
+
+    if (txbuf_free() < (burst == 0 ? 2 : 1))
+        return DSP_EFULL;
+    if (burst == 0 && (rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
+        return rc;
+    return tx_desc_post(0, 0, ctl, sizeof ctl);
 }
 
 /* Dedicated-mode establish (osmocom DM_EST): the DSP command-3 that moves the L1
