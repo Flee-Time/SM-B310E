@@ -437,6 +437,8 @@ static void c_txburst(sess_t *s, int argc, char **argv)
     static const char *modename[] = { "off", "minimum", "NORMAL", "MAX" };
     uint32_t band = 0, arfcn = 0, count = 0;
     int mode = L1_TX_MIN, ok = 0, rc, pcl = -1, camp = 0, slot = 0;
+    uint32_t camp_arfcn = 0;             /* camp=<arfcn>: sync a different cell (to set
+                                          * the DSP band), then TX on the main arfcn */
     uint16_t index;
     long ukhz;
 
@@ -462,6 +464,9 @@ static void c_txburst(sess_t *s, int argc, char **argv)
             pcl = (int)v;
         else if (streq(argv[i], "camp"))
             camp = 1;
+        else if (argv[i][0] == 'c' && argv[i][1] == 'a' && argv[i][2] == 'm' &&
+                 argv[i][3] == 'p' && argv[i][4] == '=' && parse_num(argv[i] + 5, &v))
+            camp = 1, camp_arfcn = v;
     }
     if (count > 500)
         count = 500;                    /* hard cap */
@@ -486,11 +491,21 @@ static void c_txburst(sess_t *s, int argc, char **argv)
     }
     if (camp) {                         /* as the stock transmits: synced and tracked */
         static l1_cell_t tc;
-        int rxlev = l1_rxlev_measure(index, 6, 600);
+        /* camp=<arfcn> syncs a DIFFERENT cell (to set the DSP's band register) but
+         * still fires on the main index - to test whether the TX RF/PA band select
+         * follows the synced band (same-band cell) even when transmitting elsewhere. */
+        uint16_t cidx = camp_arfcn ? l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 :
+                        L1_BAND_GSM900, (int)camp_arfcn) : index;
+        int rxlev;
         l1_cch_t st;
 
-        if (l1_cell_sync(&tc, index, l1_gain_for_rxlev(rxlev), 0, 2000) != 1) {
-            say(s, "txburst: camp: no sync on index %u (rxlev %d)\n", index, rxlev);
+        if (cidx == L1_NO_INDEX) {
+            say(s, "txburst: camp: no index for arfcn %lu\n", (unsigned long)camp_arfcn);
+            goto stop;
+        }
+        rxlev = l1_rxlev_measure(cidx, 6, 600);
+        if (l1_cell_sync(&tc, cidx, l1_gain_for_rxlev(rxlev), 0, 2000) != 1) {
+            say(s, "txburst: camp: no sync on index %u (rxlev %d)\n", cidx, rxlev);
             goto stop;
         }
         slot = tc.slot;
@@ -498,7 +513,7 @@ static void c_txburst(sess_t *s, int argc, char **argv)
         memset(&st, 0, sizeof st);
         l1_cch_read(&tc, 1000, &st);    /* the AFC settles on the cell */
         say(s, "txburst: camped on index %u, BSIC %u, rxlev %d, command 3 %d, CCCH %lu/%lu\n",
-            index, tc.bsic, rxlev, rc, (unsigned long)st.blocks, (unsigned long)st.bad);
+            cidx, tc.bsic, rxlev, rc, (unsigned long)st.blocks, (unsigned long)st.bad);
     }
     if (pcl >= 0)
         l1_tx_level_set((uint8_t)pcl);  /* flagged in the first burst's word 5 */
