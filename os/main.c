@@ -35,6 +35,7 @@ static void main_thread(void *arg)
         klog("boot: entered with control register %08lx (MMU %s, D-cache %s)",
              (unsigned long)boot_control, boot_control & 1 ? "on" : "off",
              boot_control & 4 ? "on" : "off");
+        arch_fault_report();            /* a fault before this boot */
         klog("lcd: transfer spacing %lu ms; done flag after %lu us%s",
              (unsigned long)lcd_transfer_ms(), (unsigned long)us,
              us ? "" : " (none)");

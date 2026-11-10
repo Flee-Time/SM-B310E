@@ -11,6 +11,7 @@
 #define LCD_WIDTH     128
 #define LCD_HEIGHT    160
 #define FRAME_ADDR    0x043f2000    /* TTB - 128 * 160 * 2 */
+#define FAULT_BLOCK   0x043f1f00    /* the last fault, kept over a reset */
 #define CACHE_LINE    32
 
 #ifndef __ASSEMBLER__
@@ -109,6 +110,10 @@ void arch_reboot(void) __attribute__((noreturn));
  * end). Called in abort mode, interrupts off; returns the function (bit 0 set
  * for Thumb), or 0 for the fault screen. */
 extern uintptr_t (*arch_write_fault)(uint32_t addr, uint32_t pc);
+/* A fault's pc in words for the record (loader.c: "Blood+0x1234"); NULL: none */
+extern void (*arch_fault_where)(uint32_t pc, char *out, size_t n);
+/* The boot after a fault: the record the fault screen kept, to the log */
+void arch_fault_report(void);
 /* Copy image to 0x04000000 and enter it, MMU and caches off (from IRAM). */
 void arch_chain(const void *image, uint32_t len) __attribute__((noreturn));
 bool arch_chain_fits(const void *image, uint32_t len);   /* lies above the copy */

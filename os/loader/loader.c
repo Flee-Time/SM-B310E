@@ -605,6 +605,16 @@ static uintptr_t app_write_fault(uint32_t addr, uint32_t pc)    /* abort mode */
     return t && t->owner && app_is_loaded(t->owner) ? (uintptr_t)app_fault_end : 0;
 }
 
+/* For the fault record (power.c): the app a pc is in, as "name+offset" */
+static void app_fault_where(uint32_t pc, char *out, size_t n)
+{
+    for (const app_t *a = apps; a; a = a->next)
+        if (pc >= (uint32_t)(uintptr_t)a->image && pc - (uint32_t)(uintptr_t)a->image < a->size) {
+            snprintf(out, n, "%s+0x%lx", a->name, (unsigned long)(pc - (uint32_t)(uintptr_t)a->image));
+            return;
+        }
+}
+
 void app_on_fault(void (*fn)(const char *why))
 {
     app_t *a = app_self();
@@ -707,6 +717,7 @@ static const char *open_file(const char *path, const char *arg, bool fresh)
     a->next = apps;
     apps = a;
     arch_write_fault = app_write_fault;
+    arch_fault_where = app_fault_where;
     os_status.apps_loaded = (uint32_t)app_count();
     klog("app: %s loaded, %lu + %lu bytes, %lu relocations, %lu ms",
          a->name, (unsigned long)h.image_size, (unsigned long)h.bss_size,

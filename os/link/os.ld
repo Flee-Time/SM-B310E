@@ -2,7 +2,8 @@
  * base and jumps to its first word in ARM state.
  *
  *   0x04000000  vectors, code, data, bss (stacks, the vector page table)
- *   __heap_*    kernel heap: everything up to the frame buffer
+ *   __heap_*    kernel heap: everything up to the fault record
+ *   0x043f1f00  the last fault, kept over a reset (FAULT_BLOCK, power.c)
  *   0x043f2000  LCD frame buffer, 128 x 160 x 2 bytes (FRAME_ADDR)
  *   0x043fc000  MMU translation table, 16 KB (TTB_ADDR)
  *
@@ -48,7 +49,7 @@ SECTIONS
     } > PSRAM
 
     __heap_start = ALIGN(32);
-    __heap_end = 0x043f2000;
+    __heap_end = 0x043f1f00;       /* FAULT_BLOCK above it (os/arch.h) */
 
     /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) *(.comment) *(.note*) }
 }

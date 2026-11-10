@@ -8,7 +8,10 @@ os/tests/faultapp.c is the app: its thread sets a handler and stores to
 0x100; the handler stores to 0x200, which ends the thread. Checked: the app's
 fault_stage is 2 (the handler ran, nothing after either store did), the log
 names both stores and the thread's end, the OS's clock goes on, and Close
-still closes the app and unloads it.
+still closes the app and unloads it. Then a fault outside an app's thread (an
+undefined instruction from the app's key handler, in the UI's thread): the
+fault screen restarts the phone by itself (20 s), and the next boot's log has
+the kept registers, the pc as FaultTest+offset.
 
   make PYTHON=python ../build/os/b310e-os.bin ../build/os/tests/faultapp.app  (from os/)
   python os/tests/test-fault.py
@@ -59,7 +62,8 @@ def main():
            '-drive', f'file={card.as_posix()},format=raw,if=none,id=sdcard',
            '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
            '-qtest', f'tcp:127.0.0.1:{qtest_port},server=on,wait=off',
-           '-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0']
+           '-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0',
+           '-global', 'sc6530_adi.watchdog=on']
     env = os.environ.copy()
     if os.name == 'nt':
         env['PATH'] = r'D:\Toolchains\msys64\mingw64\bin;' + env.get('PATH', '')
@@ -103,6 +107,20 @@ def main():
         key('f2', 'Apps', 1.0)          # Close: the app goes (its thread has ended)
         wait_for(qt, base, lambda s: s['apps_loaded'] == 0, 10, 'the app stayed loaded')
         result['unloaded'] = True
+        # A fault outside an app's thread: the fault screen keeps the registers
+        # (FAULT_BLOCK), the watchdog restarts the phone, the next boot logs them
+        key('ret', 'Fault test', 1.0)
+        qmp.hmp('sendkey f1 100')       # (the first may only wake the screen)
+        time.sleep(0.5)
+        if status(qt, base)['ticks'] > 3000:
+            qmp.hmp('sendkey f1 100')
+        t0 = time.time()
+        while time.time() - t0 < 40 and status(qt, base)['ticks'] > 3000:
+            time.sleep(0.5)
+        result['restarted_after_s'] = round(time.time() - t0, 1)
+        qmp.command('screendump', {'filename': str(out / 'fault.png'), 'format': 'png'})
+        wait_for(qt, base, lambda s: s['ui_depth'] == 1, 60, 'no UI after the restart')
+        time.sleep(2)
         qmp.command('screendump', {'filename': str(out / 'last.png'), 'format': 'png'})
     finally:
         if qmp:
@@ -120,6 +138,10 @@ def main():
     assert 'handler: It wrote to 0x00000100' in lines, result
     assert 'a store to 0x00000200' in lines, result
     assert 'its thread faulttest ends' in lines, result
+    kept = [l for l in log.splitlines() if 'the last run stopped on a fault' in l]
+    result['kept'] = kept
+    assert kept and 'undefined instruction' in kept[0] and '(FaultTest+0x' in kept[0], result
+    assert result['restarted_after_s'] < 30, result
     print('test-fault: ok')
 
 

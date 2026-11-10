@@ -10,24 +10,32 @@
  */
 #include "os/arch.h"
 #include "os/drivers.h"
+#include "os/fs.h"
+#include "os/kernel.h"
 #include "os/lib.h"
 
 #define WDG       0x82001480u
 #define WDG_LOCK  (WDG + 0x20)
 #define WDG_KEY   0xe551u
 
-/* A reset in 8 s (at 32768 Hz) unless watchdog_stop() comes first: for tries
- * that may hang the phone. */
-void watchdog_arm(void)
+/* A reset in hi * 2 s (hi << 16 at 32768 Hz) unless watchdog_stop() comes first */
+static void watchdog_arm_hi(uint16_t hi)
 {
     adi_write(0x820010e0, 4);
     adi_write(0x820010e4, 2);
     adi_write(0x82001480 + 0x20, 0xe551);
     adi_write(0x82001480 + 8, adi_read(0x82001480 + 8) | 9);
     adi_write(0x82001480, 0);
-    adi_write(0x82001480 + 4, 4);
+    adi_write(0x82001480 + 4, hi);
     adi_write(0x82001480 + 8, adi_read(0x82001480 + 8) | 2);
     adi_write(0x82001480 + 0x20, (uint16_t)~0xe551u);
+}
+
+/* A reset in 8 s unless watchdog_stop() comes first: for tries that may hang
+ * the phone. */
+void watchdog_arm(void)
+{
+    watchdog_arm_hi(4);
 }
 
 void watchdog_stop(void)
@@ -185,7 +193,86 @@ __attribute__((target("arm"))) uint32_t arch_data_abort(uint32_t *regs, uint32_t
     return to & 1 ? spsr | 0x20 : spsr & ~0x20u;   /* Thumb or ARM */
 }
 
-/* Undefined instruction, aborts, FIQ: show the registers and stop. */
+/* ---- the last fault, kept over the reset ---------------------------------
+ * The fault screen writes it to FAULT_BLOCK (past the heap, link/os.ld), out
+ * of the D-cache, before it draws anything; PSRAM keeps it over the
+ * watchdog's reset, and the next boot logs it (arch_fault_report). */
+#define FAULT_MAGIC 0x544c4146u         /* "FALT" */
+
+struct fault_rec {
+    uint32_t magic, kind, spsr, fsr, far, ticks;
+    uint32_t regs[14];                  /* r0-r12, pc */
+    char thread[16], where[40];
+    uint32_t sum;
+};
+
+void (*arch_fault_where)(uint32_t pc, char *out, size_t n);
+
+static uint32_t fault_sum(const struct fault_rec *r)
+{
+    const uint32_t *w = (const uint32_t *)r;
+    uint32_t s = 0x5a17u;
+
+    for (size_t i = 0; i < offsetof(struct fault_rec, sum) / 4; i++)
+        s = (s << 5 | s >> 27) ^ w[i];
+    return s;
+}
+
+__attribute__((target("arm"), noinline)) static void fault_status(uint32_t *fsr, uint32_t *far)
+{
+    __asm__ volatile("mrc p15, 0, %0, c5, c0, 0" : "=r"(*fsr));
+    __asm__ volatile("mrc p15, 0, %0, c6, c0, 0" : "=r"(*far));
+}
+
+static void fault_keep(int kind, const uint32_t *regs, uint32_t spsr)
+{
+    struct fault_rec *r = (struct fault_rec *)FAULT_BLOCK;
+    thread_t *t = kernel_current;
+
+    memset(r, 0, sizeof(*r));
+    r->kind = (uint32_t)kind;
+    r->spsr = spsr;
+    fault_status(&r->fsr, &r->far);
+    r->ticks = kernel_ticks();
+    memcpy(r->regs, regs, sizeof(r->regs));
+    if (t && t->name)
+        strncpy(r->thread, t->name, sizeof(r->thread) - 1);
+    if (arch_fault_where)
+        arch_fault_where(regs[13], r->where, sizeof(r->where));
+    r->magic = FAULT_MAGIC;
+    r->sum = fault_sum(r);
+    dcache_clean_range(r, sizeof(*r));
+}
+
+void arch_fault_report(void)
+{
+    static const char *const names[] = {
+        "undefined instruction", "prefetch abort", "data abort", "fiq"
+    };
+    struct fault_rec *r = (struct fault_rec *)FAULT_BLOCK;
+    const uint32_t *x = r->regs;
+
+    if (r->magic != FAULT_MAGIC || r->sum != fault_sum(r))
+        return;
+    r->thread[sizeof(r->thread) - 1] = r->where[sizeof(r->where) - 1] = 0;
+    klog("boot: the last run stopped on a fault, %s, at %lu ms: pc %08lx%s%s%s, cpsr %08lx, "
+         "fsr %03lx far %08lx, thread %s", names[r->kind & 3], (unsigned long)r->ticks,
+         (unsigned long)x[13], r->where[0] ? " (" : "", r->where, r->where[0] ? ")" : "",
+         (unsigned long)r->spsr, (unsigned long)(r->fsr & 0xfff), (unsigned long)r->far,
+         r->thread[0] ? r->thread : "?");
+    klog("boot: r0 %08lx r1 %08lx r2 %08lx r3 %08lx r4 %08lx r5 %08lx r6 %08lx",
+         (unsigned long)x[0], (unsigned long)x[1], (unsigned long)x[2], (unsigned long)x[3],
+         (unsigned long)x[4], (unsigned long)x[5], (unsigned long)x[6]);
+    klog("boot: r7 %08lx r8 %08lx r9 %08lx r10 %08lx r11 %08lx r12 %08lx",
+         (unsigned long)x[7], (unsigned long)x[8], (unsigned long)x[9], (unsigned long)x[10],
+         (unsigned long)x[11], (unsigned long)x[12]);
+    r->magic = 0;
+    dcache_clean_range(r, sizeof(*r));
+}
+
+/* Undefined instruction, aborts, FIQ: keep the registers for the next boot's
+ * log, show them, and restart in 20 s (the watchdog: even if this screen
+ * hangs), or at once on END. */
 void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
 {
     static const char *const names[] = {
@@ -199,6 +286,8 @@ void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
         for (;;)
             ;
     in_fault = true;
+    fault_keep(kind, regs, spsr);
+    watchdog_arm_hi(10);
     console_unlocked = true;            /* no kernel locks from here */
     console_set_color(RGB(255, 255, 255), RGB(160, 0, 0));
     console_clear();
@@ -209,7 +298,9 @@ void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
         console_printf("r%-2d %08lx r%-2d %08lx\n", i,
                        (unsigned long)regs[i], i + 1,
                        (unsigned long)(i + 1 < 13 ? regs[i + 1] : 0));
-    console_printf("\nHold END to reboot");
+    if (((const struct fault_rec *)FAULT_BLOCK)->where[0])
+        console_printf("in %s\n", ((const struct fault_rec *)FAULT_BLOCK)->where);
+    console_printf("\nRestarting in 20 s, or hold END.\nThe log keeps this.");
     console_flush();
     for (;;) {
         if ((adi_read(0x82001900) >> 3) & 1)   /* END, EIC channel 3 */
