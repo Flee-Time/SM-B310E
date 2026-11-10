@@ -23,6 +23,11 @@
                                          * enough for the RX to settle after the TX
                                          * burst and read the CCCH (a short wait gets 0) */
 #define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
+#define LU_RETRACK_MS   200u            /* re-assert command 3 at least this often in
+                                         * the dedicated phase: a single track locks
+                                         * the AFC once, then the synth free-runs and
+                                         * the SDCCH CRC drifts (dm#0 after a track
+                                         * decoded 3/3, then degraded to 0/1). */
 #define LU_T200_MS      300u            /* resend the SABM if no UA by this */
 #define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
@@ -178,9 +183,8 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
     int have_ul, sim_pending = 0, sabm_tries = 0;
-    int retracked_auth = 0;
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
-    uint32_t last_ul = 0;
+    uint32_t last_ul = 0, last_track = 0;
     int dm_dbg = 0;
     uint32_t t0;
 
@@ -236,6 +240,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * on the BCCH - it is what gets the exchange past the UA to authentication. */
     l1_track_mode = 2;
     l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
+    last_track = kernel_ticks();
     /* apply the grant's timing advance so the uplink lands in the BTS window */
     l1_tx_ta_set(ch.ta);
     klog("lu: retrack + TA %u", ch.ta);
@@ -253,20 +258,25 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
 
+        /* Keep the AFC locked to the cell through the dedicated phase. A single
+         * command-3 track corrects the synth once; it then free-runs and the
+         * SDCCH CRC drifts within a few blocks (seen as good-then-bad downlink
+         * even with no uplink in between), so re-assert it on a timer. */
+        if (kernel_ticks() - last_track >= LU_RETRACK_MS) {
+            l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
+            last_track = kernel_ticks();
+        }
         l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, bsic, LU_BLOCK_MS,
                         have_ul ? ul : (const uint8_t *)0, &st);
         if (have_ul && st.ul_done) {
             last_ul = kernel_ticks();
             if (!p.established)
                 p.sabm_sent++;
-            /* Dedicated mode (command 3 mode 2) holds the AFC, so no re-track on
-             * every retransmit (that jitters RX). But the AUTHENTICATION RESPONSE
-             * keys the PA hardest and the ACCEPT follows right after, so re-track
-             * once when we first transmit after authentication. */
-            if (p.reached_auth && !retracked_auth) {
-                l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-                retracked_auth = 1;
-            }
+            /* An uplink block keys the PA, which pulls the synth off the cell
+             * hardest, and the network's reply (UA, then AUTHENTICATION REQUEST,
+             * then ACCEPT) lands right after - re-lock the AFC before reading it. */
+            l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
+            last_track = kernel_ticks();
         }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
