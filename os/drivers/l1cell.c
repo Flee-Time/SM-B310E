@@ -335,8 +335,23 @@ int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t 
         if (rc < 0)
             return rc;
         if ((l1_next_fn() + FN_MOD - end_fn) % FN_MOD < FN_MOD / 2 &&
-            (queued() <= AHEAD / 2 || kernel_ticks() - t_post >= fail_ms))
-            break;                      /* the window has gone by, and no SCH */
+            (queued() <= AHEAD / 2 || kernel_ticks() - t_post >= fail_ms)) {
+            /* One FCCH/SCH search window went by with no SCH. The DSP's single
+             * search often misses even a strong BCCH - its 26-frame window can
+             * land on a bad phase - so repost it and keep trying within the
+             * budget instead of giving up. Acquisition was otherwise only ~50%
+             * even at -72 dBm (sync failing at rxlev 38 while succeeding at
+             * rxlev 5 - it was the search, not the signal). The old one-shot
+             * fast-fail kept Register's 130-channel scan quick, but Register now
+             * power-selects a few candidates and syncs only those. */
+            if (kernel_ticks() - t0 >= budget_ms)
+                break;                  /* budget spent: a real non-BCCH */
+            if ((rc = l1_fcch_post(index, gain, WINDOW, slot)) != DSP_OK)
+                return rc;
+            t_post = kernel_ticks();
+            end_fn = (l1_next_fn() + SETTLE) % FN_MOD;
+            continue;
+        }
         thread_sleep(2);
     }
     return 0;
