@@ -394,6 +394,18 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             if (state == REG_NEED_CIPHER) {
                 p.ciphered = 1;
                 klog("lu: CIPHER cmd sc=%u A5/%u", r->ciph_sc, r->ciph_alg + 1);
+                /* This DSP implements A5/1 only (alg 0); A5/2 and A5/3 (KASUMI) are
+                 * absent. If the network commands anything else, do NOT fake a
+                 * CIPHERING MODE COMPLETE: a garbage ciphered COMPLETE the network
+                 * cannot validate both fails the attempt AND reinforces the VLR's
+                 * belief that this IMSI does A5/3 (bidding-down lock), so every retry
+                 * is commanded A5/3 again. Abort cleanly instead - send nothing, let
+                 * the channel release - so the VLR is not fed a bogus A5/3 completion. */
+                if (r->ciph_sc && r->ciph_alg != 0) {
+                    klog("lu: A5/%u unsupported (DSP is A5/1 only) - abort, no COMPLETE",
+                         r->ciph_alg + 1);
+                    break;      /* stop responding; let the channel release */
+                }
                 if (r->ciph_sc)
                     l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
                 {
