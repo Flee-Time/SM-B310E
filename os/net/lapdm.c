@@ -134,6 +134,14 @@ int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
     } else if (LAPDM_CTRL_IS_S(ctrl)) { /* RR/RNR/REJ: N(R) acks our I-frame */
         ack_upto(dl, (uint8_t)LAPDM_S_NR(ctrl));
     } else {                            /* I-frame: L3 data from the network */
+        /* The network only sends I-frames once it considers the link up, so an
+         * I-frame confirms establishment even if our UA was lost to a bad CRC.
+         * Without this a dropped UA left us in ESTABLISHING, where lapdm_send
+         * refuses to send - so the AUTHENTICATION RESPONSE never went out (est=0
+         * with auth seen, ul stuck at SABM + the RR ack) and the network never
+         * moved on to CIPHERING MODE COMMAND / ACCEPT. */
+        if (dl->state == LAPDM_ESTABLISHING)
+            dl->state = LAPDM_ESTABLISHED;
         ack_upto(dl, (uint8_t)LAPDM_I_NR(ctrl));
         if (LAPDM_I_NS(ctrl) == dl->vr) {
             dl->vr = (uint8_t)((dl->vr + 1) & 7);

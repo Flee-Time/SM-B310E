@@ -62,9 +62,11 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 #define SYNC_BUDGET_MS  1500u
 #define READ_BUDGET_MS  2500u
 #define TX_BUDGET_MS    20000u
-/* Classmark 1 (TS 24.008 10.5.1.6): phase 2, A5/1 NOT available (we do no
- * ciphering), RF power class 4 (GSM900 handheld). Honest for a real run. */
-#define CLASSMARK1      0x2b
+/* Classmark 1 (TS 24.008 10.5.1.6): phase 2, A5/1 AVAILABLE (bit 3 = 0 - we now
+ * implement A5/1, l1_cipher_set), RF power class 4 (GSM900 handheld). Advertising
+ * "A5/1 not available" (0x2b) made a ciphering network refuse the location update
+ * (LU REJECT cause 13) instead of challenging auth and ciphering. */
+#define CLASSMARK1      0x23
 #define SIM_SLOT        0
 
 enum { P_IDLE, P_SIM, P_DSP, P_SCAN, P_FIND, P_TX, P_DONE };
