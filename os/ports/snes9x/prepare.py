@@ -4,6 +4,8 @@ os/ports/sources.py snes9x2002), its core and its libretro glue, copied to the b
 with these changes (each checked). Snes9x's licence is not the GPL: nothing of it is
 in the repository, and a built snes9x.app is for the user's own phone.
 
+ 5. The tile caches as big as what is written in them: 64 bytes a tile (8 x 8),
+    not 128 (448 KB, room for 14 more ROM pages).
  4. The screens are as big as a frame (239 lines of 640 bytes), the sub screen
     0x28000 after the main one, not 2 MB (tile16_t.h's offset with it); the depth
     buffers 320 x 256. The core asked for 8 MB, did not look whether it got it and
@@ -68,6 +70,13 @@ CHANGES = {
         ('\tmov\tr8, #0x200000\t', '\tmov\tr8, #0x28000\t', 2),
     ],
     'src/memmap.c': [
+        ('    IPPU.TileCache [TILE_2BIT] = (uint8 *) malloc (MAX_2BIT_TILES * 128);\n'
+         '    IPPU.TileCache [TILE_4BIT] = (uint8 *) malloc (MAX_4BIT_TILES * 128);\n'
+         '    IPPU.TileCache [TILE_8BIT] = (uint8 *) malloc (MAX_8BIT_TILES * 128);\n',
+         '    /* (B310E) 64 bytes a tile: tile16.c writes 8 x 8, tile16.h reads at << 6 */\n'
+         '    IPPU.TileCache [TILE_2BIT] = (uint8 *) malloc (MAX_2BIT_TILES * 64);\n'
+         '    IPPU.TileCache [TILE_4BIT] = (uint8 *) malloc (MAX_4BIT_TILES * 64);\n'
+         '    IPPU.TileCache [TILE_8BIT] = (uint8 *) malloc (MAX_8BIT_TILES * 64);\n'),
         ('      FileSize = READ_STREAM (ptr, MAX_ROM_SIZE + 0x200 - (ptr - Memory.ROM), ROMFile);\n      CLOSE_STREAM (ROMFile);\n',
          '      FileSize = READ_STREAM (ptr, MAX_ROM_SIZE + 0x200 - (ptr - Memory.ROM), ROMFile);\n      CLOSE_STREAM (ROMFile);\n      {  /* (B310E) a ROM in pages: only its start is here; its size is all of it */\n         extern unsigned s9x_rom_paged;\n         if (s9x_rom_paged)\n            FileSize = s9x_rom_paged;\n      }\n'),
         ('   for (i = 0; i < size; i++)\n      sum1 += Memory.ROM [i];\n\n   for (i = 0; i < (int) remainder; i++)\n      sum2 += Memory.ROM [size + i];\n',
