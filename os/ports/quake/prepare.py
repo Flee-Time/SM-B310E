@@ -20,6 +20,11 @@ the software renderer, copied to the build with these changes (each checked):
     surface cache. No underwater warping (it draws to the screen).
  8. Room for 160 models, not 256 (a map's 131 submodels at most, and its precaches);
     1500 spans (the view is half as tall); a 32 KB zone.
+10. A model's skins are kept at half their size (every other texel of every other
+    row; its s and t halved with them), and its file is let go before the model is
+    copied to the cache (id's had file, model and copy at once: e1m3 then ran out
+    loading the player). The renderer's edges and surfaces are for its 160 x 100
+    view: 1200 and 480, not 2400 and 800.
  9. A model's file is read through int pointers, and the ARM926 reads an int at an
     odd address from the word below (the phone: a 1.1 GB Hunk_Alloc; QEMU faults on
     the LDM instead). The stack buffers small files go into are word-aligned, and
@@ -122,6 +127,34 @@ CHANGES = {
         ('model_t\t*loadmodel;\n', 'model_t\t*loadmodel;\nstatic byte\t*mod_fileend;\t// (B310E) the end of a model file (Mod_Align)\n'),
         ('\treturn (void *)((byte *)pinframe + sizeof (dspriteframe_t) + size);\n',
          '\treturn Mod_Align ((byte *)pinframe + sizeof (dspriteframe_t) + size);\t// (B310E)\n'),
+        ('static byte\t*mod_fileend;\t// (B310E) the end of a model file (Mod_Align)\n',
+         'static byte\t*mod_fileend;\t// (B310E) the end of a model file (Mod_Align)\n'
+         'static int\tmod_skin_w, mod_skin_h, mod_skin_w2, mod_skin_h2;\t// (B310E) (see 10)\n'),
+        ('\tpskin = Hunk_AllocName (skinsize * r_pixbytes, loadname);\n',
+         '\tpskin = Hunk_AllocName (mod_skin_w2 * mod_skin_h2 * r_pixbytes, loadname);\t// (B310E) half size (see 10)\n'),
+        ('\t\tQ_memcpy (pskin, pinskin, skinsize);\n',
+         '\t\tint\tx, y;\t// (B310E) every other texel of every other row (see 10)\n'
+         '\n'
+         '\t\tfor (y = 0 ; y < mod_skin_h2 ; y++)\n'
+         '\t\t\tfor (x = 0 ; x < mod_skin_w2 ; x++)\n'
+         '\t\t\t\tpskin[y * mod_skin_w2 + x] = pinskin[2 * y * mod_skin_w + 2 * x];\n'),
+        ('\tskinsize = pmodel->skinheight * pmodel->skinwidth;\n',
+         '\tskinsize = pmodel->skinheight * pmodel->skinwidth;\n'
+         '\tmod_skin_w = pmodel->skinwidth;\t// (B310E) (see 10)\n'
+         '\tmod_skin_h = pmodel->skinheight;\n'
+         '\tmod_skin_w2 = mod_skin_w / 2;\n'
+         '\tmod_skin_h2 = (mod_skin_h + 1) / 2;\n'),
+        ('\t\tpstverts[i].s = LittleLong (pinstverts[i].s) << 16;\n'
+         '\t\tpstverts[i].t = LittleLong (pinstverts[i].t) << 16;\n'
+         '\t}\n',
+         '\t\tpstverts[i].s = LittleLong (pinstverts[i].s) << 15;\t// (B310E) the half skin\'s\n'
+         '\t\tpstverts[i].t = LittleLong (pinstverts[i].t) << 15;\n'
+         '\t}\n'
+         '\tpmodel->skinwidth = mod_skin_w2;\t// (B310E) (see 10)\n'
+         '\tpmodel->skinheight = mod_skin_h2;\n'),
+        ('\tCache_Alloc (&mod->cache, total, loadname);\n',
+         '\tHunk_TempFree (buffer);\t// (B310E) the file is read: away first, if it is the temp hunk (see 10)\n'
+         '\tCache_Alloc (&mod->cache, total, loadname);\n'),
     ],
     'd_init.c': [
         ('\t\td_viewbuffer = (void *)(byte *)vid.buffer;\n',
@@ -147,6 +180,8 @@ CHANGES = {
     ],
     'r_shared.h': [
         ('#define\tMAXSPANS\t\t\t3000\n', '#define\tMAXSPANS\t\t\t1500\t// (B310E) the view is half as tall\n'),
+        ('#define NUMSTACKEDGES\t\t2400\n', '#define NUMSTACKEDGES\t\t1200\t// (B310E) the view is a quarter (see 10)\n'),
+        ('#define NUMSTACKSURFACES\t800\n', '#define NUMSTACKSURFACES\t480\t// (B310E)\n'),
     ],
     'snd_mem.c': [
         ('\tbyte\tstackbuf[1*1024];\t\t// avoid dirtying the cache heap\n',
@@ -154,6 +189,27 @@ CHANGES = {
     ],
     'zone.c': [
         ('#define\tDYNAMIC_SIZE\t0xc000\n', '#define\tDYNAMIC_SIZE\t0x8000\t// (B310E)\n'),
+        ('\tbuf = Hunk_HighAllocName (size, "temp");\n\n\thunk_tempactive = true;\n',
+         '\tbuf = Hunk_HighAllocName (size, "temp");\n\n\thunk_tempactive = true;\n\thunk_tempbuf = buf;\t// (B310E) Hunk_TempFree\n'),
+        ('void *Hunk_TempAlloc (int size)\n',
+         '// (B310E) The temp hunk let go of, if p is still what it holds (a model\'s file,\n'
+         '// read: the model goes to the cache in its place; see prepare.py 10)\n'
+         'static void\t*hunk_tempbuf;\n'
+         '\n'
+         'void Hunk_TempFree (void *p)\n'
+         '{\n'
+         '\tif (hunk_tempactive && p == hunk_tempbuf)\n'
+         '\t{\n'
+         '\t\thunk_tempactive = false;\n'
+         '\t\tHunk_FreeToHighMark (hunk_tempmark);\n'
+         '\t}\n'
+         '}\n'
+         '\n'
+         'void *Hunk_TempAlloc (int size)\n'),
+    ],
+    'zone.h': [
+        ('void *Hunk_TempAlloc (int size);\n',
+         'void *Hunk_TempAlloc (int size);\nvoid Hunk_TempFree (void *p);\t// (B310E)\n'),
     ],
     'quakedef.h': [
         ('#define	MAX_EDICTS		600			// FIXME: ouch! ouch! ouch!',

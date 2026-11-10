@@ -68,6 +68,9 @@ bool kit_key(int *code, bool *down);
  * the kit's above the game (the music the OS plays is paused) ---------------------- */
 int kit_audio_start(unsigned rate, void (*render)(int16_t *lr, unsigned frames));
 void kit_audio_stop(void);
+/* The sound rendered ahead of the speaker, in frames (up to 2048): a game that paces
+ * itself by its sound adds what it holds itself */
+unsigned kit_audio_queued(void);
 
 /* ---- the rest -------------------------------------------------------------------- */
 uint32_t kit_ms(void);                  /* since boot */

@@ -1,8 +1,8 @@
 /* The SNES on B310E OS: a libretro frontend on the game kit (os/ports/kit) for
  * snes9x2002 (its core and libretro.c, unchanged but for prepare.py's). The frame
  * (256 x 224, RGB565) goes to the LCD as the view says, the sound (stereo, 32 kHz)
- * through a ring the kit's sound thread empties, whose fill drives the core's own
- * frameskip; the keypad is the joypad. The cartridge's battery RAM is kept beside the
+ * through a ring the kit's sound thread empties: what is queued for the speaker paces
+ * the game and says which frames are drawn; the keypad is the joypad. The cartridge's battery RAM is kept beside the
  * ROM (.srm).
  *
  * Keys (held sideways, the D-pad turned with the screen):
@@ -214,10 +214,9 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index, unsig
 /* ---- the frame ------------------------------------------------------------------------- */
 static uint32_t frames;
 
-/* Whether the core draws the next frame (prepare.py 7): not when the emulation is behind
- * the SNES's 60 frames a second by more than LATE ms, so that the time goes to the CPU
- * and the sound; at least every MAX_SKIP + 1st frame is drawn all the same */
-#define LATE 8
+/* Whether the core draws the next frame (prepare.py 7): not when the sound queued for
+ * the speaker is below LOW (the emulation is behind: the time goes to the CPU and the
+ * sound); at least every MAX_SKIP + 1st frame is drawn all the same */
 #define MAX_SKIP 4
 int s9x_render = 1;
 static uint32_t skipped, skipped_all;
@@ -232,23 +231,41 @@ static void video_refresh(const void *data, unsigned width, unsigned height, siz
 /* ---- the sound: a ring of stereo frames ------------------------------------------------ */
 #define RATE 32000                      /* (the core's is 32040: near enough) */
 #define RING 4096                       /* frames: 0.13 s */
+#define FRAME (RATE / 60)               /* what a frame makes, about */
+#define TARGET (2048 + FRAME)           /* the kit's 64 ms and a frame of ours */
+#define LOW (2048 - FRAME)              /* the kit's short of a frame */
 
 static int16_t ring[RING * 2];
 static volatile unsigned ring_in, ring_out;
 static volatile uint32_t dry;          /* times the sound thread found nothing (the log) */
+static volatile bool sound_ending;
+static int16_t last_l, last_r;
+
+/* The kit's sound thread, for its next chunk. It keeps up to 64 ms ahead of the speaker
+ * (kit_audio_queued), so a chunk the game has not made yet is worth waiting for (a frame
+ * comes in one go of ~534): silence put in its place was a crack each time. Still
+ * short after WAIT_MS, the rest fades out from the last sample, not a step to 0 */
+#define WAIT_MS 12
 
 static void render(int16_t *lr, unsigned n)
 {
     unsigned out = ring_out;
 
+    for (int ms = 0; ring_in - out < n && ms < WAIT_MS && !sound_ending; ms += 2)
+        kit_sleep(2);
     for (unsigned i = 0; i < n; i++) {
-        if (out == ring_in) {           /* nothing more: silence */
-            memset(lr + 2 * i, 0, (n - i) * 4);
+        if (out == ring_in) {
             dry++;
+            for (; i < n; i++) {
+                last_l = (int16_t)(last_l * 7 / 8);
+                last_r = (int16_t)(last_r * 7 / 8);
+                lr[2 * i] = last_l;
+                lr[2 * i + 1] = last_r;
+            }
             break;
         }
-        lr[2 * i] = ring[2 * (out & (RING - 1))];
-        lr[2 * i + 1] = ring[2 * (out & (RING - 1)) + 1];
+        lr[2 * i] = last_l = ring[2 * (out & (RING - 1))];
+        lr[2 * i + 1] = last_r = ring[2 * (out & (RING - 1)) + 1];
         out++;
     }
     ring_out = out;
@@ -314,7 +331,7 @@ int kit_main(int argc, char **argv)
     char *dot;
     FILE *f;
     long size;
-    uint32_t start, ran = 0, runs = 0;
+    uint32_t runs = 0;
 
     if (argc < 2) {
         kit_log("snes9x: no ROM");
@@ -391,11 +408,17 @@ int kit_main(int argc, char **argv)
     srm(false);
 
     kit_audio_start(RATE, render);
-    start = kit_ms();
+    /* Paced by the sound: a frame whenever what is queued for the speaker (the kit's
+     * and ours) is below TARGET, so the game keeps the speaker's clock and never runs
+     * dry or ahead. Below LOW it is behind: the frame is not drawn */
     while (!kit_quit_asked()) {
-        int32_t late = (int32_t)(kit_ms() - (start + ran * 50 / 3));
+        unsigned queued = kit_audio_queued() + (ring_in - ring_out);
 
-        s9x_render = late < LATE || skipped >= MAX_SKIP;
+        if (queued > TARGET) {
+            kit_sleep(1 + (queued - TARGET) / (RATE / 1000));
+            continue;
+        }
+        s9x_render = queued >= LOW || skipped >= MAX_SKIP;
         skipped = s9x_render ? 0 : skipped + 1;
         skipped_all += !s9x_render;
         retro_run();
@@ -409,17 +432,8 @@ int kit_main(int argc, char **argv)
         }
         if (s9x_rom_paged && ++page_runs % AGE == 0)
             pages_age();
-        /* no faster than the SNES: its 60 frames a second (counted from start:
-         * 1000 / 60 in whole ms would be 62.5) */
-        int32_t early = (int32_t)(start + ++ran * 50 / 3 - kit_ms());
-
-        if (early > 0)
-            kit_sleep((uint32_t)early);
-        else if (early < -100) {        /* behind: from here on */
-            start = kit_ms();
-            ran = 0;
-        }
     }
+    sound_ending = true;
     kit_audio_stop();
     srm(true);
     if (s9x_rom_paged) {

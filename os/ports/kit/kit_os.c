@@ -655,6 +655,11 @@ int kit_audio_start(unsigned rate, void (*render)(int16_t *lr, unsigned frames))
     return 0;
 }
 
+unsigned kit_audio_queued(void)
+{
+    return snd.on ? snd.in - snd.out : 0;
+}
+
 void kit_audio_stop(void)
 {
     if (!snd.on)
