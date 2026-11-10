@@ -312,6 +312,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
     t0 = kernel_ticks();
     last_ul = kernel_ticks();
+    uint16_t prev_l3 = 0;              /* log each decoded L3 message as it arrives */
     while (kernel_ticks() - t0 < budget_ms &&
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
@@ -363,6 +364,13 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             p.dl_addr = st.last_dl[0];
             p.dl_ctrl = st.last_dl[1];
             state = reg_rx(r, st.last_dl, out, &ov);
+            if (r->l3_msgs != prev_l3) {   /* a fresh L3 message - log PD+type so we see
+                                            * the whole downlink sequence (a CLASSMARK
+                                            * ENQUIRY before the CIPHER cmd would explain
+                                            * the A5/3 request) */
+                klog("lu: L3 rx PD=%u type=0x%02x", r->last_pd, r->last_mtype);
+                prev_l3 = r->l3_msgs;
+            }
 
             if (r->dl.state == LAPDM_ESTABLISHED)
                 p.established = 1;

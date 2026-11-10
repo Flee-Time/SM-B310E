@@ -134,6 +134,14 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
             r->ciph_sc = (uint8_t)(l3[2] & 1);
             r->ciph_alg = (uint8_t)((l3[2] >> 1) & 7);
             r->state = REG_NEED_CIPHER;
+        } else if (l3[1] == RR_CLASSMARK_ENQUIRY) {
+            /* The network asked for our classmark rather than honouring the early
+             * one (early classmark sending is cell-controlled via SI3). Answer with
+             * CLASSMARK CHANGE (A5/1 only) so it ciphers with A5/1 - the only
+             * algorithm this DSP does. Without this answer TT never learns we lack
+             * A5/3 and commands A5/3, which we cannot complete. */
+            uint8_t msg[6];
+            send_l3(r, msg, rr_encode_classmark_change(msg, r->classmark1), out, out_valid);
         }
     }
     return r->state;
