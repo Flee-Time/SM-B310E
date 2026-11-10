@@ -4,11 +4,25 @@ os/ports/sources.py snes9x2002), its core and its libretro glue, copied to the b
 with these changes (each checked). Snes9x's licence is not the GPL: nothing of it is
 in the repository, and a built snes9x.app is for the user's own phone.
 
+ 8. The SPC700 is run up to the CPU when the CPU reads or writes its ports and at
+    each of the line's events, not after every CPU instruction (a call each time:
+    17% of the phone's time was that loop).
+ 7. The frontend says which frames are drawn (s9x_render): one is left out when the
+    emulation is behind the SNES's 60 a second, so the sound keeps up (the core's own
+    frameskip leaves one out only once the sound has run dry).
+ 6. Its ARM assembly SPC700 (upstream's ASM_SPC700), and for the assembly CPU
+    (ASM_CPU, SNES_CORES=asm; no platform of upstream's builds it now): its memory
+    accessors (os9x_65c816_global.S) take MAP_PAGED, MAP_LAST is one more, and each
+    call out to C leaves the PC in CPU.PC (S9xPageIn keeps that page); only its copy
+    of the CPU for the assembly SPC700 is linked (each is 390 KB). Not right yet:
+    Super Metroid's decompressed data in bank 7F is never written with it.
  5. The tile caches as big as what is written in them: 64 bytes a tile (8 x 8),
     not 128 (448 KB, room for 14 more ROM pages).
  4. The screens are as big as a frame (239 lines of 640 bytes), the sub screen
-    0x28000 after the main one, not 2 MB (tile16_t.h's offset with it); the depth
-    buffers 320 x 256. The core asked for 8 MB, did not look whether it got it and
+    0x28000 after the main one, not 2 MB (the offset written into the ARM renderer's
+    tiles and mode 7 with it: missed in mode 7, a colour-added mode 7 read its sub
+    screen from 2 MB away, a strip of something else); the depth buffers 320 x 256.
+    The core asked for 8 MB, did not look whether it got it and
     drew through NULL, into the flash's addresses.
  3. A ROM bigger than the memory left is in pages (32 KB, 64 KB for HiROM) read from
     the card as the game reaches them, the least used giving way (snes_kit.c): Map's
@@ -27,6 +41,66 @@ from pathlib import Path
 import sys
 
 CHANGES = {
+    'src/os9x_65c816_common.S': [              # (see 6)
+        ('.equ MAP_LAST,\t12\n', '.equ MAP_LAST,\t13\t@ (B310E) MAP_PAGED is 12\n'),
+        ('.macro\t\tPREPARE_C_CALL\n\tSTMFD\tR13!,{R12,R14}\t\n',
+         '.macro\t\tPREPARE_C_CALL\n\tSTR\trpc,[reg_cpu_var,#PC_ofs]\t@ (B310E) for S9xPageIn\n\tSTMFD\tR13!,{R12,R14}\t\n'),
+        ('.macro\t\tPREPARE_C_CALL_R0\n\tSTMFD\tR13!,{R0,R12,R14}\t\n',
+         '.macro\t\tPREPARE_C_CALL_R0\n\tSTR\trpc,[reg_cpu_var,#PC_ofs]\t@ (B310E)\n\tSTMFD\tR13!,{R0,R12,R14}\t\n'),
+        ('.macro\t\tPREPARE_C_CALL_R0R1\n\tSTMFD\tR13!,{R0,R1,R12,R14}\t\t\n',
+         '.macro\t\tPREPARE_C_CALL_R0R1\n\tSTR\trpc,[reg_cpu_var,#PC_ofs]\t@ (B310E)\n\tSTMFD\tR13!,{R0,R1,R12,R14}\t\t\n'),
+    ],
+    'src/os9x_65c816_global.S': [              # (see 6)
+        ('\t.long\tSPCB_LOROM_SRAM\n\t.long\tSPCB_LOROM_SRAM\n/*\n',
+         '\t.long\tSPCB_LOROM_SRAM\n\t.long\tSPCB_LOROM_SRAM\n\t.long\tSPCB_PAGED\t@ (B310E)\n/*\n'),
+        ('\t.long GBNONE\n\t/*.long GB7ROM\n', '\t.long GBNONE\n\t.long GBPAGED\t@ (B310E)\n\t/*.long GB7ROM\n'),
+        ('\t.long GWNONE\n\t/*.long GW7ROM\n', '\t.long GWNONE\n\t.long GWPAGED\t@ (B310E)\n\t/*.long GW7ROM\n'),
+        ('\t.long SBNONE\n\t/*.long SB7ROM\n', '\t.long SBNONE\n\t.long SBNONE\t@ (B310E) (never paged)\n\t/*.long SB7ROM\n'),
+        ('\t.long SWNONE\n\t/*.long SW7ROM\n', '\t.long SWNONE\n\t.long SWNONE\t@ (B310E) (never paged)\n\t/*.long SW7ROM\n'),
+        ('vMemory:\n\t.word\tMemory\n',
+         'vMemory:\n\t.word\tMemory\n'
+         '\n'
+         '@ (B310E) A ROM page not in yet (MAP_PAGED, snes_kit.c): S9xPageIn reads it in and\n'
+         '@ maps it, then the access is made again. rpc goes to CPU.PC first, so the page\n'
+         '@ the CPU runs in is not the one that gives way.\n'
+         'SPCB_PAGED:\n'
+         '\torr\tr0, r0, r1, lsl #12\t@ the address again\n'
+         '\tstr\trpc, [reg_cpu_var, #PC_ofs]\n'
+         '\tstmfd\tr13!, {r0, r3, r14}\n'
+         '\tbl\tS9xPageIn\n'
+         '\tldmfd\tr13!, {r0, r3, r14}\n'
+         '\tb\tasmS9xSetPCBase\n'
+         'GBPAGED:\n'
+         '\tstr\trpc, [reg_cpu_var, #PC_ofs]\n'
+         '\tstmfd\tr13!, {r0, r12, r14}\n'
+         '\tbl\tS9xPageIn\n'
+         '\tldmfd\tr13!, {r0, r12, r14}\n'
+         '\tb\tasmS9xGetByte\n'
+         'GWPAGED:\n'
+         '\tstr\trpc, [reg_cpu_var, #PC_ofs]\n'
+         '\tstmfd\tr13!, {r0, r12, r14}\n'
+         '\tbl\tS9xPageIn\n'
+         '\tldmfd\tr13!, {r0, r12, r14}\n'
+         '\tb\tasmS9xGetWord\n'),
+    ],
+    'src/ppu_getppu.h': [                      # (see 8)
+        ('   IAPU.WaitCounter++;\n#endif\n   if (Settings.APUEnabled)\n',
+         '   IAPU.WaitCounter++;\n#endif\n   asm_APU_EXECUTE(1);  /* (B310E) the SPC700 to now first (see 8) */\n'
+         '   if (Settings.APUEnabled)\n'),
+    ],
+    'src/ppu_setppu.h': [                      # (see 8)
+        ('   // CPU.Flags |= DEBUG_MODE_FLAG;\n   Memory.FillRAM[Address] = Byte;\n   IAPU.RAM[(Address & 3) + 0xf4] = Byte;\n',
+         '   // CPU.Flags |= DEBUG_MODE_FLAG;\n   asm_APU_EXECUTE(1);  /* (B310E) the SPC700 to now first (see 8) */\n'
+         '   Memory.FillRAM[Address] = Byte;\n   IAPU.RAM[(Address & 3) + 0xf4] = Byte;\n'),
+    ],
+    'src/cpuexec.c': [                         # (see 6)
+        ('   for (;;)\n   {\n      asm_APU_EXECUTE(1);\n      if (CPU.Flags)\n',
+         '   for (;;)\n   {\n      /* (B310E) the SPC700 runs to the CPU at its ports and each event (see 8) */\n      if (CPU.Flags)\n', 2),
+        ('#ifdef CPU_SHUTDOWN\n   CPU.WaitCounter++;\n#endif\n\n   switch (CPU.WhichEvent)\n',
+         '#ifdef CPU_SHUTDOWN\n   CPU.WaitCounter++;\n#endif\n\n   asm_APU_EXECUTE(1);  /* (B310E) (see 8) */\n   switch (CPU.WhichEvent)\n'),
+        ('#ifdef ASM_SPC700\n      if (Settings.asmspc700)\n         asmMainLoop_spcAsm(&CPU);\n      else\n#endif\n         asmMainLoop_spcC(&CPU);\n',
+         '      asmMainLoop_spcAsm(&CPU);  /* (B310E) the assembly SPC700 only: the C one\'s copy of the CPU is 390 KB */\n'),
+    ],
     'src/getset.h': [
         ('#include "sa1.h"\n',
          '#include "sa1.h"\n\nuint8 *S9xPageIn(uint32 Address);   /* (B310E) snes_kit.c: its block\'s Map */\n'),
@@ -55,6 +129,13 @@ CHANGES = {
          '   uint32      WRAM_BITS [1];\n   uint32      SRAM_BITS [1];\n   uint32      IRAM_BITS [1];\n'),
     ],
     'libretro/libretro.c': [                    # (see 4)
+        ('   poll_cb();\n   report_buttons();\n\n   S9xMainLoop();\n',
+         '   {  /* (B310E) the frontend says whether this frame is drawn (snes_kit.c; see 7) */\n'
+         '      extern int s9x_render;\n'
+         '      if (s9x_render >= 0)\n'
+         '         IPPU.RenderThisFrame = s9x_render;\n'
+         '   }\n'
+         '   poll_cb();\n   report_buttons();\n\n   S9xMainLoop();\n'),
         ('   GFX.Screen_buffer = (uint8 *) calloc(1, 2048 * 512 * 2 * 2 + safety);\n',
          '   GFX.Screen_buffer = (uint8 *) calloc(1, 2 * 0x28000 + safety);  /* (B310E) 2 x 239 lines of 640 */\n'),
         ('   GFX.SubScreen = GFX.Screen + 2048 * 512 * 2;\n',
@@ -68,6 +149,12 @@ CHANGES = {
     ],
     'src/tile16_t.h': [                         # (see 4)
         ('\tmov\tr8, #0x200000\t', '\tmov\tr8, #0x28000\t', 2),
+    ],
+    'src/mode7_t.h': [                          # (see 4)
+        ('\tmov\tr3, #0x200000\t', '\tmov\tr3, #0x28000\t', 4),
+    ],
+    'src/mode7prio_t.h': [                      # (see 4)
+        ('\tmov\tr3, #0x200000\t', '\tmov\tr3, #0x28000\t', 4),
     ],
     'src/memmap.c': [
         ('    IPPU.TileCache [TILE_2BIT] = (uint8 *) malloc (MAX_2BIT_TILES * 128);\n'

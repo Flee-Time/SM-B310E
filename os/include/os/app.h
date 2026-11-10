@@ -405,6 +405,8 @@ bool app_is_loaded(const app_t *a);
 void app_kill(app_t *a);                /* its threads end now (END held); the UI's */
 bool app_reloading(void);               /* between app_reload and the fresh app */
 int app_count(void);
+/* The i-th loaded app's name, image and size (for the profiler); false past the last */
+bool app_span(int i, const char **name, uint32_t *base, uint32_t *size);
 
 /* The app whose code is running (the UI sets it around callbacks). */
 extern app_t *app_current;

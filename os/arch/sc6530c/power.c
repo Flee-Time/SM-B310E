@@ -300,7 +300,7 @@ void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
                        (unsigned long)(i + 1 < 13 ? regs[i + 1] : 0));
     if (((const struct fault_rec *)FAULT_BLOCK)->where[0])
         console_printf("in %s\n", ((const struct fault_rec *)FAULT_BLOCK)->where);
-    console_printf("\nRestarting in 20 s, or hold END.\nThe log keeps this.");
+    console_printf("\nFault logged.");
     console_flush();
     for (;;) {
         if ((adi_read(0x82001900) >> 3) & 1)   /* END, EIC channel 3 */

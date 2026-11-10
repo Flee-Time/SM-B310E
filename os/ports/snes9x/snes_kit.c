@@ -26,6 +26,7 @@
 #include "libretro.h"
 #include "snes9x.h"
 #include "memmap.h"
+#include "dsp1.h"
 
 #include "kit.h"
 
@@ -51,17 +52,25 @@ static FILE *rom_file;
 static long rom_skip;                   /* a copier's header */
 static unsigned page_size;
 static int32_t vrom[MEMMAP_NUM_BLOCKS]; /* a paged block's ROM offset, else -1 */
+static int16_t page_of[MEMMAP_NUM_BLOCKS];     /* its page, else -1 */
+/* each page's blocks (a bank's ROM is in several, and mirrored): those of page p are
+ * page_blocks[page_first[p] .. page_first[p + 1]) */
+#define PAGES_MAX (0x600000 / 0x8000)   /* (MAX_ROM_SIZE in 32 KB pages) */
+static uint16_t page_first[PAGES_MAX + 1], page_blocks[MEMMAP_NUM_BLOCKS];
+static int8_t slot_of[PAGES_MAX];       /* the slot a page is in, else -1 */
 static struct slot { uint8 *data; int page; uint32_t used; } slots[96];
 static int nslots;
 static uint32_t page_tick, page_reads, page_runs;
 
 static void slot_map(const struct slot *s, bool in)
 {
-    for (int b = 0; b < MEMMAP_NUM_BLOCKS; b++)
-        if (vrom[b] >= 0 && vrom[b] / (int)page_size == s->page)
-            Memory.Map[b] = in ? s->data + (vrom[b] - s->page * (int)page_size)
-                                     - ((b << MEMMAP_SHIFT) & 0xffff)
-                               : (uint8 *)MAP_PAGED;
+    for (int i = page_first[s->page]; i < page_first[s->page + 1]; i++) {
+        int b = page_blocks[i];
+
+        Memory.Map[b] = in ? s->data + (vrom[b] - s->page * (int)page_size)
+                                 - ((b << MEMMAP_SHIFT) & 0xffff)
+                           : (uint8 *)MAP_PAGED;
+    }
 }
 
 static bool slot_busy(const struct slot *s)
@@ -79,16 +88,15 @@ static bool slot_busy(const struct slot *s)
 uint8 *S9xPageIn(uint32 Address)
 {
     int b = (Address >> MEMMAP_SHIFT) & MEMMAP_MASK;
-    struct slot *s = NULL;
-    int page;
+    int page = page_of[b];
+    struct slot *s;
 
-    if (vrom[b] < 0)                    /* (not a paged block: as it is) */
+    if (page < 0)                       /* (not a paged block: as it is) */
         return Memory.Map[b];
-    page = vrom[b] / (int)page_size;
-    for (int i = 0; i < nslots && !s; i++)
-        if (slots[i].page == page)
-            s = &slots[i];
-    if (!s) {                           /* the least used that nothing reads from */
+    if (slot_of[page] >= 0)
+        s = &slots[slot_of[page]];
+    else {                              /* the least used that nothing reads from */
+        s = NULL;
         for (int i = 0; i < nslots; i++)
             if (!slot_busy(&slots[i]) && (!s || slots[i].used < s->used))
                 s = &slots[i];
@@ -96,11 +104,14 @@ uint8 *S9xPageIn(uint32 Address)
             kit_log("snes9x: every ROM page is in use");
             exit(1);
         }
-        if (s->page >= 0)
+        if (s->page >= 0) {
             slot_map(s, false);
+            slot_of[s->page] = -1;
+        }
         fseek(rom_file, rom_skip + (long)page * (long)page_size, SEEK_SET);
         fread(s->data, 1, page_size, rom_file);
         s->page = page;
+        slot_of[page] = (int8_t)(s - slots);
         page_reads++;
     }
     s->used = ++page_tick;
@@ -110,20 +121,38 @@ uint8 *S9xPageIn(uint32 Address)
 
 static void pages_setup(void)
 {
+    int pages;
+
+    page_size = Memory.HiROM ? 0x10000 : 0x8000;
+    pages = (int)((s9x_rom_paged + page_size - 1) / page_size);
     for (int b = 0; b < MEMMAP_NUM_BLOCKS; b++) {
         uint8 *m = Memory.Map[b];
         int32_t off;
 
         vrom[b] = -1;
+        page_of[b] = -1;
         if (!Memory.BlockIsROM[b] || m < (uint8 *)MAP_LAST)
             continue;
         off = (int32_t)(m - Memory.ROM) + ((b << MEMMAP_SHIFT) & 0xffff);
         if (off < HEAD || off >= (int32_t)s9x_rom_paged)
             continue;
         vrom[b] = off;
+        page_of[b] = (int16_t)(off / (int)page_size);
+        page_first[page_of[b] + 1]++;
         Memory.Map[b] = (uint8 *)MAP_PAGED;
     }
-    page_size = Memory.HiROM ? 0x10000 : 0x8000;
+    for (int p = 0; p < pages; p++) {   /* counts to starts */
+        page_first[p + 1] += page_first[p];
+        slot_of[p] = -1;
+    }
+    {
+        uint16_t at[PAGES_MAX];
+
+        memcpy(at, page_first, sizeof(at));
+        for (int b = 0; b < MEMMAP_NUM_BLOCKS; b++)
+            if (page_of[b] >= 0)
+                page_blocks[at[page_of[b]]++] = (uint16_t)b;
+    }
     while (nslots < (int)(sizeof(slots) / sizeof(slots[0])) &&
            kit_heap_largest() > page_size + KEEP_FREE &&
            (slots[nslots].data = malloc(page_size)) != NULL)
@@ -185,6 +214,14 @@ static int16_t input_state(unsigned port, unsigned device, unsigned index, unsig
 /* ---- the frame ------------------------------------------------------------------------- */
 static uint32_t frames;
 
+/* Whether the core draws the next frame (prepare.py 7): not when the emulation is behind
+ * the SNES's 60 frames a second by more than LATE ms, so that the time goes to the CPU
+ * and the sound; at least every MAX_SKIP + 1st frame is drawn all the same */
+#define LATE 8
+#define MAX_SKIP 4
+int s9x_render = 1;
+static uint32_t skipped, skipped_all;
+
 static void video_refresh(const void *data, unsigned width, unsigned height, size_t pitch)
 {
     if (data)
@@ -198,7 +235,7 @@ static void video_refresh(const void *data, unsigned width, unsigned height, siz
 
 static int16_t ring[RING * 2];
 static volatile unsigned ring_in, ring_out;
-static bool underrun;
+static volatile uint32_t dry;          /* times the sound thread found nothing (the log) */
 
 static void render(int16_t *lr, unsigned n)
 {
@@ -207,7 +244,7 @@ static void render(int16_t *lr, unsigned n)
     for (unsigned i = 0; i < n; i++) {
         if (out == ring_in) {           /* nothing more: silence */
             memset(lr + 2 * i, 0, (n - i) * 4);
-            underrun = true;
+            dry++;
             break;
         }
         lr[2 * i] = ring[2 * (out & (RING - 1))];
@@ -236,29 +273,12 @@ static void audio_sample(int16_t left, int16_t right)
     audio_batch(lr, 1);
 }
 
-static retro_audio_buffer_status_callback_t buffer_status;
-
 /* ---- what the core asks of the frontend ------------------------------------------------ */
 static bool environment(unsigned cmd, void *data)
 {
     switch (cmd) {
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
         return *(const enum retro_pixel_format *)data == RETRO_PIXEL_FORMAT_RGB565;
-    case RETRO_ENVIRONMENT_GET_VARIABLE: {
-        struct retro_variable *var = data;
-
-        if (!strcmp(var->key, "snes9x2002_frameskip")) {
-            var->value = "auto";        /* a frame left out when the sound runs dry */
-            return true;
-        }
-        return false;
-    }
-    case RETRO_ENVIRONMENT_SET_AUDIO_BUFFER_STATUS_CALLBACK: {
-        const struct retro_audio_buffer_status_callback *cb = data;
-
-        buffer_status = cb ? cb->callback : NULL;
-        return true;
-    }
     case RETRO_ENVIRONMENT_GET_OVERSCAN:
         *(bool *)data = false;
         return true;
@@ -294,7 +314,7 @@ int kit_main(int argc, char **argv)
     char *dot;
     FILE *f;
     long size;
-    uint32_t start, ran = 0;
+    uint32_t start, ran = 0, runs = 0;
 
     if (argc < 2) {
         kit_log("snes9x: no ROM");
@@ -347,6 +367,11 @@ int kit_main(int argc, char **argv)
         kit_log("snes9x: the ROM did not load");
         return 1;
     }
+#ifdef ASMCPU
+    /* what the assembly CPU reads in CPU (snes9x.h) and nothing in the core sets */
+    CPU.DSPGet = (void *)S9xGetDSP;
+    CPU.DSPSet = (void *)S9xSetDSP;
+#endif
     if (s9x_rom_paged) {
         char text[112];
 
@@ -368,13 +393,20 @@ int kit_main(int argc, char **argv)
     kit_audio_start(RATE, render);
     start = kit_ms();
     while (!kit_quit_asked()) {
-        if (buffer_status) {
-            unsigned queued = ring_in - ring_out;
+        int32_t late = (int32_t)(kit_ms() - (start + ran * 50 / 3));
 
-            buffer_status(true, queued * 100 / RING, underrun);
-            underrun = false;
-        }
+        s9x_render = late < LATE || skipped >= MAX_SKIP;
+        skipped = s9x_render ? 0 : skipped + 1;
+        skipped_all += !s9x_render;
         retro_run();
+        if (++runs % 600 == 0) {         /* 10 s of the SNES's time: for the log */
+            char text[96];
+
+            snprintf(text, sizeof(text), "snes9x: %u of 600 frames not drawn, the sound ran dry %u times",
+                     (unsigned)skipped_all, (unsigned)dry);
+            kit_log(text);
+            skipped_all = dry = 0;
+        }
         if (s9x_rom_paged && ++page_runs % AGE == 0)
             pages_age();
         /* no faster than the SNES: its 60 frames a second (counted from start:
@@ -400,3 +432,4 @@ int kit_main(int argc, char **argv)
     retro_deinit();
     return 0;
 }
+

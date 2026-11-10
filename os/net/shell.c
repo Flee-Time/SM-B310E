@@ -1333,7 +1333,7 @@ static void c_shot(sess_t *s, int argc, char **argv)
         say(s, "ERR no memory\n");
         return;
     }
-    memcpy(copy, (const void *)FRAME_ADDR, n);
+    memcpy(copy, lcd_source(), n);     /* (a game's own frame when it shows one) */
     send_blob(s, copy, n);
     kfree(copy);
 }
@@ -1554,6 +1554,73 @@ static void c_reboot(sess_t *s, int argc, char **argv)
     on_ui(s, ui_do_reboot, NULL);
 }
 
+/* prof SECONDS [FILE]: where the CPU is at each tick (irq.c) for that long, to FILE
+ * (/prof.bin): "PROF", the samples, the ms, the apps (name[20], image, size: their
+ * pcs are offsets into the .elf), then the samples' pc and lr */
+#define PROF_MAX 16384
+static void c_prof(sess_t *s, int argc, char **argv)
+{
+    uint32_t secs = 0, t0, ms, n, head[4];
+    const char *name;
+    uint32_t base, size;
+    FIL f;
+    UINT w;
+    FRESULT r;
+    uint32_t *buf;
+    int apps = 0;
+
+    if (argc < 2 || !parse_num(argv[1], &secs) || !secs || secs > 60) {
+        say(s, "usage: prof SECONDS [FILE] (1-60)\n");
+        return;
+    }
+    if (!need_card(s) || !resolve(s, argc > 2 ? argv[2] : "/prof.bin", s->path))
+        return;
+    n = secs * 1000 < PROF_MAX ? secs * 1000 : PROF_MAX;
+    if (!(buf = kmalloc(n * 8))) {
+        say(s, "ERR out of memory\n");
+        return;
+    }
+    say(s, "sampling %lu s\n", (unsigned long)secs);
+    flush(s);
+    prof_n = 0;
+    prof_buf = buf;
+    t0 = kernel_ticks();
+    prof_cap = n;
+    while (prof_n < n && kernel_ticks() - t0 < secs * 1000 && !net_stopping)
+        thread_sleep(100);
+    prof_cap = 0;
+    ms = kernel_ticks() - t0;
+    n = prof_n;
+    prof_buf = NULL;
+    while (app_span(apps, &name, &base, &size))
+        apps++;
+    head[0] = 0x464f5250;               /* "PROF" */
+    head[1] = n;
+    head[2] = ms;
+    head[3] = (uint32_t)apps;
+    r = f_open(&f, s->path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (r == FR_OK) {
+        r = f_write(&f, head, sizeof(head), &w);
+        for (int i = 0; r == FR_OK && app_span(i, &name, &base, &size) && i < apps; i++) {
+            char nm[20] = { 0 };
+            uint32_t span[2] = { base, size };
+
+            strncpy(nm, name, sizeof(nm) - 1);
+            if ((r = f_write(&f, nm, sizeof(nm), &w)) == FR_OK)
+                r = f_write(&f, span, sizeof(span), &w);
+        }
+        if (r == FR_OK)
+            r = f_write(&f, buf, n * 8, &w);
+        if (f_close(&f) != FR_OK && r == FR_OK)
+            r = FR_DISK_ERR;
+    }
+    kfree(buf);
+    if (r != FR_OK)
+        say(s, "ERR %s: %s\n", s->path, fr_text(r));
+    else
+        say(s, "%lu samples in %lu ms to %s\n", (unsigned long)n, (unsigned long)ms, s->path);
+}
+
 static void c_echo(sess_t *s, int argc, char **argv)
 {
     for (int i = 1; i < argc; i++)
@@ -1577,6 +1644,7 @@ static const cmd_t cmds[] = {
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
     { "rxcell", "BAND ARFCN [GAIN] [CCH_S] [TRACK]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },
+    { "prof", "SECONDS [FILE]", "sample where the CPU is, to FILE (/prof.bin)", c_prof },
     { "top", "", "ps every second until a key", c_top },
     { "mem", "", "memory map and heap", c_mem },
     { "log", "[N | -f]", "the last N log lines, or follow it", c_log },

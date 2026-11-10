@@ -23,6 +23,7 @@ void lcd_init(void);
 void lcd_update(void);          /* push the whole frame (not while asleep) */
 uint32_t lcd_busy_ms(void);     /* the last push: how long it still takes */
 void lcd_present(const uint16_t *px);  /* a whole frame, sent where it lies; NULL: as it is */
+const uint16_t *lcd_source(void);    /* what it shows: a game's frame, or the OS's */
 void lcd_sleep(void);           /* display off, panel sleep, LCDC clock off */
 void lcd_wake(void);            /* back on, then pushes the frame */
 bool lcd_asleep(void);

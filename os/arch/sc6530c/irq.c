@@ -14,6 +14,20 @@ static void (*handlers[32])(void);
 volatile uint32_t irq_stray_count;
 volatile uint32_t irq_count;            /* handled interrupts (statistics) */
 volatile uint32_t irq_line_count[32];   /* the same per line */
+uint32_t *volatile prof_buf;
+volatile uint32_t prof_n, prof_cap;
+
+/* the thread the tick interrupted: where it was (its frame: cpsr, r0-r14, pc) */
+static void prof_sample(void)
+{
+    const uint32_t *f = kernel_current ? kernel_current->sp : NULL;
+
+    if (f && prof_n < prof_cap && prof_buf) {
+        prof_buf[2 * prof_n] = f[16];
+        prof_buf[2 * prof_n + 1] = f[15];
+        prof_n++;
+    }
+}
 
 void irq_register(unsigned line, void (*handler)(void))
 {
@@ -37,6 +51,8 @@ void irq_dispatch(void)
 {
     uint32_t pending = REG32(INTC_STATUS);
 
+    if (prof_cap && (pending & (1u << IRQ_TIMER2)))
+        prof_sample();
     kernel_irq_entry();                 /* the ticks catch up after a long sleep */
     /* ending a long sleep, the catch-up restarts the tick and so acks the
      * timer's interrupt itself: count it, it was a wake-up all the same */

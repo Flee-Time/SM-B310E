@@ -427,6 +427,14 @@ void lcd_present(const uint16_t *px)
     kicked = true;
 }
 
+/* What the LCD shows: a game's frame, or the OS's (the shell's shot) */
+const uint16_t *lcd_source(void)
+{
+    const uint16_t *px = sent_px;
+
+    return px ? px : (const uint16_t *)FRAME_ADDR;
+}
+
 void lcd_update(void)
 {
     lcdc_t *lc = LCDC;

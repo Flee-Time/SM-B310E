@@ -43,6 +43,10 @@ void irq_dispatch(void);            /* called from the IRQ vector */
 extern volatile uint32_t irq_stray_count;
 extern volatile uint32_t irq_count;
 extern volatile uint32_t irq_line_count[32];
+/* The profiler (shell prof): each timer tick, the interrupted thread's pc and lr
+ * go to prof_buf (pairs) until prof_n reaches prof_cap */
+extern uint32_t *volatile prof_buf;
+extern volatile uint32_t prof_n, prof_cap;
 
 /* ---- CPU (arch/sc6530c/cpu.S) ------------------------------------------ */
 uint32_t arch_irq_save(void);       /* masks IRQ, returns the old CPSR */

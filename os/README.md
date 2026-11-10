@@ -449,9 +449,10 @@ the only one that carries binary transfers. Three sessions at a time.
 | `peek ADDR [N] [b\|h\|w] [-f]`, `poke ADDR VAL [b\|h\|w] [-f]` | read or write memory and registers (below) |
 | `adi ADDR [VAL]` | an analog-die register through the ADI mailbox |
 | `ls`, `cd`, `pwd`, `cat`, `rm`, `mkdir`, `mv`, `df`, `crc` | files on the card (absolute or from the current folder) |
-| `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565 (raw port; the helper does these) |
+| `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565, a game's own frame when it shows one (raw port; the helper does these) |
 | `run APP`, `close` | close the app that is open, load and start APP (a path, or a name or file name in `/b310e-os/apps/` or its folders); close it |
 | `bench SECONDS [dark] [nosleep]` | USB off that long with the cable in, so the phone can reach dark idle (USB holds the clock up); `dark` darkens the screen at once, `nosleep` turns chip sleep off for the run, to compare. This connection ends; USB comes back by itself. The log gets a `bench:` line: time at each clock speed, sleeps, PLL starts, interrupts |
+| `prof SECONDS [FILE]` | where the CPU is at each 1 ms tick, that long (1-60 s; 8 bytes a sample from the OS heap, so a game that leaves little gets a few seconds), to FILE (`/prof.bin`); `get` it, then `python os/tools/prof-report.py prof.bin build/os/ports/GAME.elf` lists the functions (`--callers`, `--lines`) |
 | `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
 | `reboot [soft\|menu\|os\|stock]` | a hard reset; `menu`, `os`, `stock`: with that request to the boot loader; `soft`: `/payloads/b310e-os.bin` again with no reset, which keeps the clock. Plain `reboot` comes back to this OS through the loader |
 | `echo`, `exit` | |

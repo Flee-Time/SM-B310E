@@ -605,6 +605,20 @@ static uintptr_t app_write_fault(uint32_t addr, uint32_t pc)    /* abort mode */
     return t && t->owner && app_is_loaded(t->owner) ? (uintptr_t)app_fault_end : 0;
 }
 
+bool app_span(int i, const char **name, uint32_t *base, uint32_t *size)
+{
+    const app_t *a = apps;
+
+    while (a && i-- > 0)
+        a = a->next;
+    if (!a)
+        return false;
+    *name = a->name;
+    *base = (uint32_t)(uintptr_t)a->image;
+    *size = a->size;
+    return true;
+}
+
 /* For the fault record (power.c): the app a pc is in, as "name+offset" */
 static void app_fault_where(uint32_t pc, char *out, size_t n)
 {
