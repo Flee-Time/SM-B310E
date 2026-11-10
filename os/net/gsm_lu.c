@@ -178,6 +178,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
     int have_ul, sim_pending = 0, sabm_tries = 0;
+    int retracked_auth = 0;
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
     uint32_t last_ul = 0;
     int dm_dbg = 0;
@@ -258,8 +259,14 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             last_ul = kernel_ticks();
             if (!p.established)
                 p.sabm_sent++;
-            /* dedicated mode (command 3 mode 2) keeps the AFC on the SDCCH, so no
-             * per-transmit re-track - re-tracking on every retransmit jitters RX. */
+            /* Dedicated mode (command 3 mode 2) holds the AFC, so no re-track on
+             * every retransmit (that jitters RX). But the AUTHENTICATION RESPONSE
+             * keys the PA hardest and the ACCEPT follows right after, so re-track
+             * once when we first transmit after authentication. */
+            if (p.reached_auth && !retracked_auth) {
+                l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
+                retracked_auth = 1;
+            }
         }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
