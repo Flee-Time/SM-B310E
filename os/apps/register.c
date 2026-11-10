@@ -48,6 +48,10 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 #define CCCH_PROBE_MS   1500u
 #define GOOD_CCCH_PCT   90
 #define MAX_HOMES       3
+#define IMEI_FILE       OS_DIR "/gsm-imei.txt"          /* IMEI override: one 15-digit
+                                                         * IMEI per line, line N for SIM
+                                                         * slot N (a single line = both);
+                                                         * absent -> the phone's NV IMEI */
 #define HOME_CELL_FILE  OS_DIR "/gsm-home-cell.txt"     /* "mcc mnc index": the last home
                                          * cell found, tried first next time (the stock
                                          * keeps its last cell the same way) */
@@ -68,7 +72,8 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
  * do), A5/1 AVAILABLE (bit 4 = 0, we implement A5/1), RF power class 4. 0x2b
  * (A5/1 not available) drew LU REJECT cause 13 from a ciphering network. */
 #define CLASSMARK1      0x33
-#define SIM_SLOT        0
+#define SIM_SLOT        0               /* which SIM reader: 0 = first slot, 1 = second.
+                                         * The SIM is back in the first slot and connecting. */
 
 enum { P_IDLE, P_SIM, P_DSP, P_SCAN, P_FIND, P_TX, P_DONE };
 enum { RES_NONE, RES_NO_SIM, RES_RADIO_FAIL, RES_NO_CELL, RES_ACCEPTED,
@@ -297,6 +302,69 @@ static int parse_uint(const char **p)
         (*p)++;
     }
     return v;
+}
+
+/* The IMEI to present on IDENTITY REQUEST for SIM slot `slot`: an override from
+ * IMEI_FILE (the slot-th 15-digit token, or the first if the slot has none), else
+ * the phone's own IMEI from NV. Writes digit bytes to out, returns the count (0 =
+ * none, then registration falls back to the IMSI). from_file set when it came from
+ * the override file. */
+static int load_imei(int slot, uint8_t out[16], int *from_file)
+{
+    FIL *f = kmalloc(sizeof(FIL));
+    char buf[80], first[16];
+    UINT got = 0;
+    int n = 0, have_first = 0;
+
+    *from_file = 0;
+    if (f && f_open(f, IMEI_FILE, FA_READ) == FR_OK) {
+        if (f_read(f, buf, sizeof buf - 1, &got) == FR_OK) {
+            const char *p = buf;
+            int tok = 0;
+
+            buf[got] = 0;
+            while (*p && !n) {
+                char d[16];
+                int k = 0;
+
+                while (*p && (*p < '0' || *p > '9'))
+                    p++;
+                while (*p >= '0' && *p <= '9' && k < 15)
+                    d[k++] = *p++;
+                while (*p >= '0' && *p <= '9')   /* skip any over-length tail */
+                    p++;
+                if (k != 15)
+                    continue;
+                if (!have_first) {
+                    for (int i = 0; i < 15; i++)
+                        first[i] = d[i];
+                    have_first = 1;
+                }
+                if (tok == slot)
+                    for (int i = 0; i < 15; i++, n = 15)
+                        out[i] = (uint8_t)(d[i] - '0');
+                tok++;
+            }
+            if (!n && have_first)            /* slot not listed: the first applies */
+                for (int i = 0; i < 15; i++, n = 15)
+                    out[i] = (uint8_t)(first[i] - '0');
+        }
+        f_close(f);
+    }
+    if (f)
+        kfree(f);
+    if (n) {
+        *from_file = 1;
+        return n;
+    }
+    {
+        char s[16];
+
+        if (nv_imei(s))
+            for (int i = 0; i < 15; i++, n = 15)
+                out[i] = (uint8_t)(s[i] - '0');
+    }
+    return n;
 }
 
 static void load_home_cell(void)
@@ -569,6 +637,26 @@ static void worker(void *arg)
     /* a synced home cell (P-GSM or E-GSM): build the LU request and run it */
     reg_init(&reg, imsi_digits, imsi_n, cell.mcc, cell.mnc, cell.mnc_digits == 3,
              cell.lac, CLASSMARK1);
+    /* Present an IMEI on IDENTITY REQUEST (an EIR check can gate the LU). Override
+     * from IMEI_FILE per SIM slot, else the phone's own NV IMEI. */
+    {
+        uint8_t imei[16];
+        int from_file = 0;
+        int in = load_imei(SIM_SLOT, imei, &from_file);
+
+        if (in) {
+            char s[16];
+
+            reg_set_imei(&reg, imei, in);
+            for (int i = 0; i < in; i++)
+                s[i] = (char)('0' + imei[i]);
+            s[in] = 0;
+            klog("register: IMEI %s (slot %u, %s)", s, SIM_SLOT,
+                 from_file ? "override file" : "NV");
+        } else {
+            klog("register: no IMEI (slot %u) - will answer IDENTITY with IMSI", SIM_SLOT);
+        }
+    }
     reg_ui.phase = P_TX;
     /* the RACH's power level, the stock's way (share +0x3ec, flagged in word 5):
      * MS_TXPWR_MAX_CCH from SI 3, not above this phone's class (PCL 5 = 33 dBm on

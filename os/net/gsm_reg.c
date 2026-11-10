@@ -22,6 +22,17 @@ void reg_init(gsm_reg_t *r, const uint8_t *imsi, int imsi_len,
     r->state = REG_IDLE;
 }
 
+void reg_set_imei(gsm_reg_t *r, const uint8_t *digits, int n)
+{
+    if (n < 0)
+        n = 0;
+    if (n > (int)sizeof r->imei)
+        n = (int)sizeof r->imei;
+    for (int i = 0; i < n; i++)
+        r->imei[i] = (uint8_t)(digits[i] & 0x0f);
+    r->imei_len = (uint8_t)n;
+}
+
 int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
 {
     uint8_t lu[LAPDM_N201];
@@ -85,9 +96,31 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
             break;
         case MM_IDENTITY_REQUEST: {
             uint8_t resp[LAPDM_N201];
+            int type = l3len > 2 ? (l3[2] & 0x07) : MI_TYPE_IMSI;
 
-            send_l3(r, resp, mm_encode_identity_response(resp, MI_TYPE_IMSI, r->imsi,
-                    r->imsi_len), out, out_valid);
+            /* Answer with the identity the network asked for. Before, we always
+             * sent the IMSI - so an IMEI request (an EIR / equipment check, common
+             * right after the first LU from an IMSI) got the wrong identity and the
+             * exchange stalled. IMEISV = the IMEI's first 14 digits + a 2-digit SVN
+             * (00, we do not track it). Falls back to the IMSI when no IMEI is set. */
+            if ((type == MI_TYPE_IMEI || type == MI_TYPE_IMEISV) && r->imei_len >= 14) {
+                if (type == MI_TYPE_IMEISV) {
+                    uint8_t sv[16];
+
+                    for (int i = 0; i < 14; i++)
+                        sv[i] = r->imei[i];
+                    sv[14] = 0;
+                    sv[15] = 0;                 /* SVN 00 */
+                    send_l3(r, resp, mm_encode_identity_response(resp, MI_TYPE_IMEISV,
+                            sv, 16), out, out_valid);
+                } else {
+                    send_l3(r, resp, mm_encode_identity_response(resp, MI_TYPE_IMEI,
+                            r->imei, r->imei_len), out, out_valid);
+                }
+            } else {
+                send_l3(r, resp, mm_encode_identity_response(resp, MI_TYPE_IMSI, r->imsi,
+                        r->imsi_len), out, out_valid);
+            }
             break;
         }
         default:
@@ -217,6 +250,27 @@ int reg_selftest(void)
     net_iframe(g, 0, 0, reject, (int)sizeof reject);
     reg_rx(&r, g, f, &ov);
     if (r.state == REG_REJECTED && r.reject_cause == 0x0b) ok++;
+
+    /* 9-10: IDENTITY REQUEST is answered by the requested identity type */
+    {
+        static const uint8_t idreq_imei[3] = { 0x05, MM_IDENTITY_REQUEST, MI_TYPE_IMEI };
+        static const uint8_t idreq_imsi[3] = { 0x05, MM_IDENTITY_REQUEST, MI_TYPE_IMSI };
+        static const uint8_t imei[15] = { 3, 5, 6, 9, 3, 8, 0, 3, 5, 6, 4, 3, 8, 0, 9 };
+
+        reg_init(&r, imsi, 15, 1, 1, 0, 0x1234, 0x33);
+        reg_set_imei(&r, imei, 15);
+        reg_begin(&r, f);
+        lapdm_encode(g, 0, 1, LAPDM_U_UA | LAPDM_PF, 0, 0);
+        reg_rx(&r, g, f, &ov);                           /* -> ESTABLISHED */
+        net_iframe(g, 0, 0, idreq_imei, 3);
+        reg_rx(&r, g, f, &ov);
+        if (ov && f[3] == MM_PD && f[4] == MM_IDENTITY_RESPONSE &&
+            (f[6] & 0x07) == MI_TYPE_IMEI && (f[6] >> 4) == 3) ok++;
+        r.dl.tx_pending = 0;                             /* let the next response go */
+        net_iframe(g, 1, 1, idreq_imsi, 3);
+        reg_rx(&r, g, f, &ov);
+        if (ov && f[4] == MM_IDENTITY_RESPONSE && (f[6] & 0x07) == MI_TYPE_IMSI) ok++;
+    }
 
     return ok;
 }

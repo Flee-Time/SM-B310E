@@ -29,6 +29,8 @@ typedef struct {
     uint8_t state;
     uint8_t imsi[16];
     uint8_t imsi_len;
+    uint8_t imei[16];       /* IMEI digits (0..15) for IDENTITY REQUEST; 0 len: none */
+    uint8_t imei_len;
     uint16_t mcc, mnc, lac;
     uint8_t mnc3;
     uint8_t classmark1;
@@ -43,6 +45,10 @@ typedef struct {
 
 void reg_init(gsm_reg_t *r, const uint8_t *imsi, int imsi_len,
               uint16_t mcc, uint16_t mnc, int mnc3, uint16_t lac, uint8_t classmark1);
+/* Set the IMEI (digit bytes, 0-9) that IDENTITY REQUEST answers with when the
+ * network asks for identity type IMEI or IMEISV. n = 0 clears it (then we fall
+ * back to the IMSI, the old behaviour). Call after reg_init. */
+void reg_set_imei(gsm_reg_t *r, const uint8_t *digits, int n);
 /* Build the SABM carrying LOCATION UPDATING REQUEST. Returns a frame length. */
 int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 /* Feed one received SDCCH frame; may write a reply (out, out_valid). Returns the
@@ -59,7 +65,7 @@ int reg_classmark_change(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
  * link is not established. */
 int reg_keepalive(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 
-#define REG_SELFTEST_TOTAL 8
+#define REG_SELFTEST_TOTAL 10
 int reg_selftest(void);
 
 #endif

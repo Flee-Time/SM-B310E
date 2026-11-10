@@ -547,12 +547,18 @@ static int sdcch_burst(int base, uint32_t m)
     return b >= 0 && b < 4 ? b : -1;
 }
 
-/* The uplink SACCH block armed by l1_sacch_set (NULL = none). */
+/* The uplink SACCH block armed by l1_sacch_set (NULL = none). The posting state is
+ * file-static so a 4-burst block begun in one l1_dm_sched call finishes in the next:
+ * a call is far shorter than the 470ms (102-multiframe) SACCH period. */
 static const uint8_t *dm_sacch;
+static int dm_sacch_posted;             /* bursts of the current block posted, 0..4 */
+static uint32_t dm_sacch_mf = (uint32_t)-1;   /* 102-multiframe of that block */
 
 void l1_sacch_set(const uint8_t *block)
 {
     dm_sacch = block;
+    dm_sacch_posted = 0;
+    dm_sacch_mf = (uint32_t)-1;
 }
 
 /* SACCH/C8 maps over a 102-multiframe (GSM 05.02 Table 4): subchannels 0-3 report
@@ -584,6 +590,8 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
     int dlbase = (subch & 7) * 4;
     int ulbase = (dlbase + 15) % 51;
     int ul_posted = 0;                  /* uplink bursts of this block sent, 0..4 */
+    int ssub = subch & 7;               /* this subchannel's SACCH uplink window start */
+    int sul0 = ((ssub < 4 ? 32 + ssub * 4 : 83 + (ssub - 4) * 4) + 15) % 102;
     bool stop = false;
 
     memset(st, 0, sizeof(*st));
@@ -607,16 +615,26 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
          * and dropped it to ~18% decode while the CCCH read 99% at the same level.) */
         for (;;) {
             uint32_t fn = (l1_next_fn() + c->fn_offset) % FN_MOD;
-            uint32_t m = fn % 51;
+            uint32_t m = fn % 51, mf = fn / 102;
             int db = sdcch_burst(dlbase, m), ub = sdcch_burst(ulbase, m);
             int sb = dm_sacch ? sacch_burst(subch, fn % 102) : -1;
             bool want_ul = ul && ul_posted < 4 && ub == ul_posted && db < 0;
-            /* SACCH rides on its own window, independent of SDCCH traffic (it goes
-             * out even on receive-only calls), so the link survives between L3
-             * steps. db takes the frame if they ever coincide; SDCCH uplink wins
-             * over SACCH on the rare shared frame. Each of the 4 SACCH frames is
-             * posted once as the ring advances, so no per-block counter is needed. */
-            bool want_sacch = sb >= 0 && db < 0 && !want_ul;
+            /* SACCH rides on its own window once per 102-multiframe, independent of
+             * SDCCH traffic (it goes out even on receive-only calls), so the link
+             * survives between L3 steps. The posting state is file-static, so a block
+             * started here finishes across the next call - a call is far shorter than
+             * the 470ms SACCH period, and the old per-call counter started at 0 every
+             * call and the stop below bailed on the first downlink block, so the window
+             * was never reached (HW: zero SACCH bursts on air). Reset at burst 0 of a
+             * new multiframe. db takes a shared frame; SDCCH uplink wins over SACCH;
+             * the stop below holds the call open until all four bursts are out (a
+             * 3-burst block does not decode). */
+            if (dm_sacch && sb == 0 && mf != dm_sacch_mf) {
+                dm_sacch_mf = mf;
+                dm_sacch_posted = 0;
+            }
+            bool want_sacch = dm_sacch && mf == dm_sacch_mf && sb == dm_sacch_posted &&
+                              dm_sacch_posted < 4 && db < 0 && !want_ul;
             int rc;
 
             if ((uint32_t)queued() >= (want_ul || want_sacch ? 2u : (uint32_t)AHEAD))
@@ -637,10 +655,27 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 }
             } else if (want_sacch) {
                 rc = l1_uplink_post(c->index, TAG_DCH, sb, tn, tsc, c->slot, bsic, dm_sacch);
-                if (rc == DSP_OK)
+                if (rc == DSP_OK) {
                     st->sacch_bursts++;
+                    dm_sacch_posted++;
+                } else if (rc == DSP_EFULL) {
+                    rc = l1_idle_post(1);   /* TXBUFQ full: drop the block, retry next period */
+                    dm_sacch_posted = 0;
+                    dm_sacch_mf = (uint32_t)-1;
+                }
+            } else if (m == 0 || m == 10 || m == 20 || m == 30 || m == 40) {
+                /* FCCH frame on this carrier (tn0): read it to re-lock the DSP AFC off
+                 * the BCCH frequency-correction tone. The grant is on the BCCH carrier
+                 * (same ARFCN, tn1, no hop), so the SDCCH then decodes on the corrected
+                 * synth. Without this the AFC free-runs on the dedicated timeslot and
+                 * the SDCCH CRC drifts to ~0 within a second (HW: good-then-bad decode).
+                 * window=1 advances frame_number by one like a burst read, so the TDMA
+                 * schedule stays aligned; on EFULL fall back to an idle fill. */
+                rc = l1_fcch_post(c->index, c->gain, 1, c->slot);
+                if (rc == DSP_OK)
+                    st->fcch_reads++;
                 else if (rc == DSP_EFULL)
-                    rc = l1_idle_post(1);   /* TXBUFQ full: skip this SACCH burst */
+                    rc = l1_idle_post(1);
             } else {
                 rc = l1_idle_post(1);
             }
@@ -675,8 +710,18 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 st->has_dl = 1;
             }
         }
-        if (st->has_dl && (!ul || ul_posted >= 4))
-            stop = true;               /* a block is in and the uplink is complete */
+        {
+            uint32_t h = (l1_next_fn() + c->fn_offset) % FN_MOD;
+            uint32_t hwin = ((uint32_t)sul0 + 102 - h % 102) % 102;   /* frames to window */
+            bool sacch_part = dm_sacch_posted > 0 && dm_sacch_posted < 4;
+            bool sacch_soon = dm_sacch && !(dm_sacch_mf == h / 102 && dm_sacch_posted >= 4)
+                              && hwin <= 6;      /* keepalive window within ~6 frames */
+            if (st->has_dl && (!ul || ul_posted >= 4) && !sacch_part && !sacch_soon)
+                stop = true;           /* a block is in and nothing (SDCCH or SACCH) is
+                                        * part-posted or about to post - returning now
+                                        * neither truncates a block (<4 bursts cannot
+                                        * decode) nor skips the keepalive window */
+        }
         thread_sleep(2);
     }
     st->ul_done = ul && ul_posted >= 4;

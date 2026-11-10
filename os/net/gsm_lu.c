@@ -22,18 +22,17 @@
 #define LU_RACH_WAIT_MS 2000u           /* wait for the grant after each RACH - long
                                          * enough for the RX to settle after the TX
                                          * burst and read the CCCH (a short wait gets 0) */
-#define LU_BLOCK_MS     350u            /* ~ one SDCCH block period to pump */
-#define LU_RETRACK_MS   200u            /* re-assert command 3 at least this often in
-                                         * the dedicated phase: a single track locks
-                                         * the AFC once, then the synth free-runs and
-                                         * the SDCCH CRC drifts (dm#0 after a track
-                                         * decoded 3/3, then degraded to 0/1). */
+#define LU_BLOCK_MS     115u            /* ~ one SDCCH block period (235ms/2) so each
+                                         * dm_sched call re-tracks right before the
+                                         * block it reads - the AFC free-runs on the
+                                         * dedicated channel, so a short call keeps the
+                                         * synth from drifting off between blocks. */
+#define LU_RETRACK_MS   0u              /* re-track every call to hold the AFC (decode /
+                                         * est needs it; backing off lost est=1). TX
+                                         * froze independently of this - see the SACCH
+                                         * arming below, disabled to test if its TXBUFQ
+                                         * posts were jamming the queue head (txout=1). */
 #define LU_T200_MS      300u            /* resend the SABM / an unacked I-frame by this */
-#define LU_FILL_MS      150u            /* once the link is up, put an RR keep-alive on
-                                         * every uplink opportunity we would otherwise
-                                         * leave empty - the stock MS holds the SDCCH up
-                                         * with ~23 back-to-back blocks per LU; going
-                                         * receive-only between steps stalls the ladder */
 #define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
 #define LU_REF_SLACK    4               /* frames either side of our RACH's: the grant's
@@ -266,6 +265,15 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * mode (2) makes the DSP decode the SDCCH timeslot instead of half-camping
      * on the BCCH - it is what gets the exchange past the UA to authentication. */
     l1_track_mode = 2;
+    /* ROOT CAUSE of the decode drift (RE 2026-11-10): decode is good for ~1s after
+     * the camp then falls to ~0, in BOTH mode 2 and mode 0 (tested, identical). It is
+     * not the mode - it is that the dedicated scheduler reads ONLY the SDCCH timeslot
+     * (tn1) and never the BCCH FCCH (tn0) again, so the DSP's AFC has no reference and
+     * free-runs. The grant is on the SAME carrier as the BCCH (arfcn 998, tn1, no hop),
+     * so the fix is to interleave FCCH reads on tn0 at the FCCH frames (fn%51 in
+     * {0,10,20,30,40}) during the dedicated phase to re-lock the AFC - what stock's
+     * state machine does internally. l1_fcch_post touches frame_number directly, so
+     * the scheduler interleave must keep the per-frame accounting exact. TODO. */
     l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
     last_track = kernel_ticks();
     /* apply the grant's timing advance so the uplink lands in the BTS window */
@@ -282,7 +290,12 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * grant's timing advance; the stock reports its used power + TA in the L1
      * header. Disarmed after the loop (sacch is on this stack frame). */
     build_sacch(sacch, c->ms_txpwr_max_cch, ch.ta, c->rxlev);
-    l1_sacch_set(sacch);
+    (void)sacch;
+    /* DIAGNOSTIC: SACCH arming disabled. Its block posts ahead of the SABM and the
+     * DSP would not drain it (txout froze at 1), jamming the queue head and killing
+     * all later uplink. Test whether, without it, txout advances and TX sustains to
+     * auth/cipher (as the pre-SACCH build reached this morning). */
+    /* l1_sacch_set(sacch); */
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
      * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
@@ -321,8 +334,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         p.dl_bad = (uint16_t)(p.dl_bad + st.dl_bad);
         p.ul_bursts = (uint16_t)(p.ul_bursts + st.ul_bursts);
         if (dm_dbg < 28) {
-            klog("lu: dm#%d ul=%lu sa=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
+            klog("lu: dm#%d ul=%lu sa=%lu fc=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
                  dm_dbg, (unsigned long)st.ul_bursts, (unsigned long)st.sacch_bursts,
+                 (unsigned long)st.fcch_reads,
                  st.ul_done, (unsigned long)st.dl_bursts,
                  (unsigned long)st.dl_blocks, (unsigned long)st.dl_bad,
                  (unsigned long)st.dl_fn, st.last_dl[0], st.last_dl[1],
@@ -414,9 +428,14 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 ul[i] = sabm[i];
             have_ul = 1;
         } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED &&
-                   kernel_ticks() - last_ul >= LU_FILL_MS &&
                    reg_keepalive(r, ul) > 0) {
-            have_ul = 1;
+            have_ul = 1;        /* every spare multiframe, not every other one:
+                                 * gating this on LU_FILL_MS after last_ul (which
+                                 * updates on each send) made us skip the very next
+                                 * window, so blocks went out at 470 ms - half the
+                                 * SDCCH rate - and the exchange faded. One block per
+                                 * ~235 ms window is the SDCCH maximum; stock's extra
+                                 * density is the SACCH on top. */
         }
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {
