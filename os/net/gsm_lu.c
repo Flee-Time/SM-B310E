@@ -261,8 +261,12 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         /* Keep the AFC locked to the cell through the dedicated phase. A single
          * command-3 track corrects the synth once; it then free-runs and the
          * SDCCH CRC drifts within a few blocks (seen as good-then-bad downlink
-         * even with no uplink in between), so re-assert it on a timer. */
-        if (kernel_ticks() - last_track >= LU_RETRACK_MS) {
+         * even with no uplink in between), so re-assert it on a timer - and
+         * always right before a call that will transmit, so the uplink burst
+         * leaves on the cell's exact frequency (an off-frequency burst is what
+         * the BTS silently drops, leaving a clean LU REQUEST / AUTHENTICATION
+         * RESPONSE that the network never acts on). */
+        if (have_ul || kernel_ticks() - last_track >= LU_RETRACK_MS) {
             l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
             last_track = kernel_ticks();
         }
