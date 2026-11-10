@@ -25,10 +25,13 @@ QUAKE_ARM := d_edge d_polyse d_scan d_sky d_sprite d_surf d_zpoint r_aclip r_ali
 	r_draw r_edge r_light r_main r_surf mathlib snd_mix
 QUAKE_OBJS := $(QUAKE_SRC:%=$(QUAKE_OUT)/%.o) $(QUAKE_OUT)/port/quake_sys.o \
 	$(QUAKE_OUT)/port/quake_os.o $(KIT_OBJS)
-# (1996 C: functions it never declares, pointers it mixes)
+# (1996 C: functions it never declares, pointers it mixes). Its file formats have
+# enums in them (modelgen.h, spritegn.h: a frame's type, a model's synctype), 4 bytes
+# as on a PC: arm-none-eabi's enums are as short as they can be (1 byte there), and
+# every model was read from the wrong place (the phone: a 1.1 GB Hunk_Alloc)
 QUAKE_CFLAGS := $(filter-out -std=gnu11,$(KIT_CFLAGS)) -std=gnu99 -I$(QUAKE_TREE) \
 	-Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types \
-	-Wno-error=int-conversion -Wno-error=implicit-int -fcommon
+	-Wno-error=int-conversion -Wno-error=implicit-int -fcommon -fno-short-enums
 
 ifneq ($(wildcard $(QUAKE_DIR)/host.c),)
 all: $(BUILD)/ports/quake.app

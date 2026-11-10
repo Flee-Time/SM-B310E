@@ -29,15 +29,16 @@ from pathlib import Path
 import sys
 
 
-def changes(tiles, walls=6144, sprites=2048, players=2):
-    """The engine's changes, as {file: [(old, new)]}"""
+def changes(tiles, walls=6144, sprites=2048, players=2, voxels=8):
+    """The engine's changes, as {file: [(old, new)]}. voxels: one more than the game's
+    highest voxel number (voxoff[] is indexed by it, unchecked)"""
     return {
     'build.h': [
         ('#define MAXSECTORS MAXSECTORSV8', '#define MAXSECTORS MAXSECTORSV7'),
         ('#define MAXWALLS MAXWALLSV8', f'#define MAXWALLS {walls}'),
         ('#define MAXSPRITES MAXSPRITESV8', f'#define MAXSPRITES {sprites}'),
         ('#define MAXTILES 9216', f'#define MAXTILES {tiles}'),
-        ('#define MAXVOXELS 4096', '#define MAXVOXELS 8'),
+        ('#define MAXVOXELS 4096', f'#define MAXVOXELS {voxels}'),
         ('#define MAXXDIM 2880', '#define MAXXDIM 320'),
         ('#define MAXYDIM 1800', '#define MAXYDIM 320'),
         ('#define MAXSPRITESONSCREEN 2048', '#define MAXSPRITESONSCREEN 512'),
@@ -69,9 +70,15 @@ def changes(tiles, walls=6144, sprites=2048, players=2):
         ('for(i=1;i<65536;i++) distrecip[i] = divscale20(xdimen,i);', ''),
     ],
     'cache1d.c': [
+        ('\tif (bestval == SIZE_MAX)\n\t\treportandexit("CACHE SPACE ALL LOCKED UP!");\n',
+         '\tif (bestval == SIZE_MAX)\n\t{\n'
+         '\t\t/* (B310E) the game may go on without it (a sound): *newhandle stays as it is */\n'
+         '\t\textern int build_cache_full(unsigned char *lock, size_t bytes) __attribute__((weak));\n'
+         '\t\tif (build_cache_full && build_cache_full(newlockptr, newbytes)) return;\n'
+         '\t\treportandexit("CACHE SPACE ALL LOCKED UP!");\n\t}\n'),
         ('#define MAXCACHEOBJECTS 9216', '#define MAXCACHEOBJECTS 2048'),
         ('static void reportandexit(char *errormessage)\n{\n    int i;\n    size_t j;\n\n    j = 0;\n    for(i=0;i<cacnum;i++)\n    {\n        buildprintf("%d- ",i);\n        if (cac[i].hand) {\n            buildprintf("ptr: 0x%p, ",*cac[i].hand);\n        } else {\n            buildprintf("ptr: NULL, ");\n        }\n        buildprintf("leng: %zu, ",cac[i].leng);\n        if (cac[i].lock) {\n            buildprintf("lock: %d\\n",*cac[i].lock);\n        } else {\n            buildprintf("lock: NULL\\n");\n        }\n        j += cac[i].leng;\n    }\n\tbuildprintf("Cachesize = %zu\\n",cachesize);\n\tbuildprintf("Cacnum = %d\\n",cacnum);\n\tbuildprintf("Cache length sum = %zu\\n",j);\n\tbuildprintf("ERROR: %s\\n",errormessage);\n\texit(0);\n}\n',
-         'static void reportandexit(char *errormessage)\n{\n    int i;\n    size_t j = 0, locked = 0, largest = 0;\n\n    for(i=0;i<cacnum;i++)\n    {\n        j += cac[i].leng;\n        if (cac[i].lock && *cac[i].lock >= 200) locked += cac[i].leng;\n        if (cac[i].leng > largest) largest = cac[i].leng;\n    }\n\tbuildprintf("ERROR: %s (the cache: %u KB, %u KB of it locked, %d objects, the largest %u KB)\\n",\n\t\terrormessage, (unsigned)(cachesize >> 10), (unsigned)(locked >> 10), cacnum, (unsigned)(largest >> 10));\n\texit(1);\n}\n'),
+         'void build_cache_name(char *lock, char *out, int n) __attribute__((weak));  /* (B310E) */\nstatic void reportandexit(char *errormessage)\n{\n    int i;\n    size_t j = 0, locked = 0, largest = 0;\n\n    for(i=0;i<cacnum;i++)\n    {\n        j += cac[i].leng;\n        if (cac[i].lock && *cac[i].lock >= 200) locked += cac[i].leng;\n        if (cac[i].leng > largest) largest = cac[i].leng;\n    }\n\tbuildprintf("ERROR: %s (the cache: %u KB, %u KB of it locked, %d objects, the largest %u KB)\\n",\n\t\terrormessage, (unsigned)(cachesize >> 10), (unsigned)(locked >> 10), cacnum, (unsigned)(largest >> 10));\n\tif (build_cache_name) {  /* (B310E) what is locked: the game names it */\n\t\tchar name[24];\n\t\tfor (i = 0; i < cacnum; i++)\n\t\t\tif (cac[i].lock && *cac[i].lock >= 200 && cac[i].leng >= 1024) {\n\t\t\t\tbuild_cache_name(cac[i].lock, name, sizeof(name));\n\t\t\t\tbuildprintf("locked: %s, %u KB, lock %d\\n", name, (unsigned)(cac[i].leng >> 10), *cac[i].lock);\n\t\t\t}\n\t}\n\texit(1);\n}\n'),
         ('\tbuildprintf("initcache(): Initialised with %zu bytes\\n", cachesize);\n',
          '\tbuildprintf("initcache(): Initialised with %u KB\\n", (unsigned)(cachesize >> 10));\n'),
     ],

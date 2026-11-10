@@ -32,6 +32,45 @@ void operator delete(void *p, size_t) noexcept { free(p); }
 void operator delete[](void *p, size_t) noexcept { free(p); }
 extern "C" void __cxa_pure_virtual(void) { abort(); }
 
+/* For the engine's "cache all locked up" report (engine.py): what a lock byte
+ * belongs to. Tiles lock walock[]; Blood's resources lock CACHENODE.oldLock. */
+extern Resource gSysRes, gSoundRes;
+extern "C" void build_cache_name(char *lock, char *out, int n)
+{
+    Resource *const res[] = { &gSysRes, &gSoundRes };
+
+    if (lock >= (char *)walock && lock < (char *)walock + MAXTILES) {
+        snprintf(out, n, "tile %d", (int)(lock - (char *)walock));
+        return;
+    }
+    for (Resource *r : res)
+        if (r->dict && lock >= (char *)r->dict && lock < (char *)(r->dict + r->count)) {
+            DICTNODE *d = (DICTNODE *)(lock - offsetof(CACHENODE, oldLock));
+
+            snprintf(out, n, "%.8s.%.3s (%s)", d->name, d->type, r == &gSoundRes ? "sounds" : "blood");
+            return;
+        }
+    snprintf(out, n, "? %p", lock);
+}
+
+/* The cache has no room (engine.py): a sound may be left out, nothing else */
+extern "C" int build_cache_full(unsigned char *lock, size_t bytes)
+{
+    char *l = (char *)lock;
+    char name[24];
+
+    if (!gSoundRes.dict || l < (char *)gSoundRes.dict || l >= (char *)(gSoundRes.dict + gSoundRes.count))
+        return 0;
+    static unsigned char *last;         /* (an ambient loop tries every frame: once) */
+
+    if (lock != last) {
+        build_cache_name(l, name, sizeof(name));
+        buildprintf("no room in the cache for %s (%u KB): not played\n", name, (unsigned)(bytes >> 10));
+        last = lock;
+    }
+    return 1;
+}
+
 /* NBlood's audiolib calls (EDuke32's), on the shared one (blood_audio.h) */
 int FX_Init(int numvoices, int numchannels, int mixrate, void *initdata)
 {
