@@ -1,7 +1,7 @@
-/* Duke Nukem 3D on B310E OS: the part of JonoF's audiolib the game uses (fx_man.h, music.h),
- * on the game kit's mixer and MIDI player. The game's own sounds.c, upstream's and
- * unchanged, does the rest: distance, priorities, looping, who owns what, and it
- * keeps its sounds in the tile cache, where they play from, no copy.
+/* A Build engine game on B310E OS: the part of JonoF's audiolib the games use (fx_man.h,
+ * music.h), on the game kit's mixer and MIDI player. The game's own sounds.c, upstream's
+ * and unchanged, does the rest: distance, priorities, looping, who owns what; Duke keeps
+ * its sounds in the tile cache, where they play from, no copy.
  *
  * The audiolib's callback comes from its mixer, when a voice ends. The mixer here
  * only marks the voice; fx_poll (the game's thread, every frame) makes the call.
@@ -14,8 +14,10 @@
 #include "build.h"
 #include "fx_man.h"
 #include "music.h"
+#include "cd.h"
 #include "b310e-mixer.h"
 #include "b310e-music.h"
+#include "build_game.h"
 
 void kit_log(const char *s);            /* (kit_os.c) */
 
@@ -93,6 +95,10 @@ void FX_SetReverseStereo(int setting)
     FX_SetVolume(master);
 }
 
+int FX_GetVolume(void) { return master; }
+int FX_GetReverseStereo(void) { return reversed; }
+const char *FX_GetCurrentDriverName(void) { return "B310E OS"; }
+
 void FX_SetReverb(int reverb) { (void)reverb; }
 void FX_SetReverbDelay(int delay) { (void)delay; }
 
@@ -164,18 +170,82 @@ static int play(char *ptr, unsigned int length, int pitchoffset, int volume, int
     return ch + 1;                      /* a handle is above FX_Ok */
 }
 
+/* Raw 8-bit unsigned samples at their own rate (Blood's): played where they lie */
+static int play_raw(char *ptr, unsigned int length, unsigned rate, int pitchoffset, int volume,
+                    int pan, int priority, unsigned int value, int loop_from)
+{
+    int ch = a_voice(priority);
+
+    if (ch < 0)
+        return FX_Warning;
+    voice[ch].priority = priority;
+    voice[ch].value = value;
+    voice[ch].volume = volume;
+    voice[ch].pan = pan;
+    if (b310e_sample_borrow(ch, (const uint8_t *)ptr, length, rate, volume * master / 255,
+                            reversed ? 255 - pan : pan, pitch_of(pitchoffset)) < 0)
+        return FX_Warning;
+    if (loop_from >= 0)
+        b310e_sample_loop_from(ch, (unsigned)loop_from);
+    voice[ch].live = true;
+    return ch + 1;
+}
+
 int FX_PlayAuto3D(char *ptr, unsigned int length, int pitchoffset, int angle, int distance,
                   int priority, unsigned int callbackval)
 {
     return play(ptr, length, pitchoffset, loudness(distance), pan_of(angle), priority, callbackval, false);
 }
 
-/* (sounds.c gives the distance as the volume, and pan3dsound sets it from then on) */
+/* A volume of 0..255 and its two sides: where it is */
+static int pan_lr(int left, int right)
+{
+    return left + right ? 128 + (right - left) * 127 / (left + right) : 128;
+}
+
+static int volume_of(int vol)
+{
+    return vol < 0 ? 0 : vol > 255 ? 255 : vol;
+}
+
+/* (Duke's sounds.c gives the distance as the volume: build_looped_vol_is_distance) */
 int FX_PlayLoopedAuto(char *ptr, unsigned int length, int loopstart, int loopend, int pitchoffset,
                       int vol, int left, int right, int priority, unsigned int callbackval)
 {
-    (void)loopstart; (void)loopend; (void)left; (void)right;
-    return play(ptr, length, pitchoffset, loudness(vol), 128, priority, callbackval, true);
+    (void)loopstart; (void)loopend;
+    if (build_looped_vol_is_distance)
+        return play(ptr, length, pitchoffset, loudness(vol), 128, priority, callbackval, true);
+    return play(ptr, length, pitchoffset, volume_of(vol), pan_lr(left, right), priority,
+                callbackval, true);
+}
+
+int FX_PlayAuto(char *ptr, unsigned int length, int pitchoffset, int vol, int left, int right,
+                int priority, unsigned int callbackval)
+{
+    return play(ptr, length, pitchoffset, volume_of(vol), pan_lr(left, right), priority,
+                callbackval, false);
+}
+
+int FX_PlayRaw(char *ptr, unsigned int length, unsigned rate, int pitchoffset, int vol, int left,
+               int right, int priority, unsigned int callbackval)
+{
+    return play_raw(ptr, length, rate, pitchoffset, volume_of(vol), pan_lr(left, right), priority,
+                    callbackval, -1);
+}
+
+int FX_PlayLoopedRaw(char *ptr, unsigned int length, char *loopstart, char *loopend, unsigned rate,
+                     int pitchoffset, int vol, int left, int right, int priority,
+                     unsigned int callbackval)
+{
+    (void)loopend;                      /* (its loops run to the end) */
+    return play_raw(ptr, length, rate, pitchoffset, volume_of(vol), pan_lr(left, right), priority,
+                    callbackval, loopstart > ptr ? (int)(loopstart - ptr) : 0);
+}
+
+int FX_PlayVOC(char *ptr, unsigned int length, int pitchoffset, int vol, int left, int right,
+               int priority, unsigned int callbackval)
+{
+    return FX_PlayAuto(ptr, length, pitchoffset, vol, left, right, priority, callbackval);
 }
 
 static int live(int handle)
@@ -208,7 +278,62 @@ int FX_SetVoiceVolume(int handle, int volume)
     return FX_Ok;
 }
 
+int FX_EndLooping(int handle)
+{
+    int ch = live(handle);
+
+    if (ch >= 0)
+        b310e_sample_loop(ch, false);
+    return FX_Ok;
+}
+
+int FX_SetPan(int handle, int vol, int left, int right)
+{
+    int ch = live(handle);
+
+    if (ch >= 0) {
+        voice[ch].volume = volume_of(vol);
+        voice[ch].pan = pan_lr(left, right);
+        apply(ch);
+    }
+    return FX_Ok;
+}
+
 int FX_PauseSound(int handle, int pauseon) { (void)handle; (void)pauseon; return FX_Ok; }
+
+int FX_SetPitch(int handle, int pitchoffset)
+{
+    int ch = live(handle);
+
+    if (ch >= 0)
+        b310e_sample_pitch(ch, pitch_of(pitchoffset));
+    return FX_Ok;
+}
+
+int FX_SetFrequency(int handle, int frequency)
+{
+    int ch = live(handle);
+
+    if (ch >= 0)
+        b310e_sample_rate(ch, (unsigned)frequency);
+    return FX_Ok;
+}
+
+int FX_SoundActive(int handle)
+{
+    int ch = live(handle);
+
+    return ch >= 0 && b310e_sample_active(ch);
+}
+
+int FX_SoundsPlaying(void)
+{
+    int n = 0;
+
+    for (int ch = 0; ch < VOICES; ch++)
+        n += voice[ch].live && b310e_sample_active(ch);
+    return n;
+}
 
 int FX_StopSound(int handle)
 {
@@ -239,6 +364,8 @@ void MUSIC_Continue(void) { b310e_music_pause(false); }
 void MUSIC_Pause(void) { b310e_music_pause(true); }
 int MUSIC_StopSong(void) { b310e_music_stop(); return MUSIC_Ok; }
 void MUSIC_RegisterTimbreBank(unsigned char *timbres) { (void)timbres; }
+int MUSIC_SongPlaying(void) { return b310e_music_playing(); }
+const char *MUSIC_GetCurrentDriverName(void) { return "B310E OS"; }
 
 int MUSIC_PlaySong(void *song, unsigned int length, int loopflag)
 {
@@ -247,3 +374,16 @@ int MUSIC_PlaySong(void *song, unsigned int length, int loopflag)
     kit_log("a song the player did not take");
     return MUSIC_Error;
 }
+
+/* ---- a CD's music (Shadow Warrior's): there is no CD; the game plays its MIDI instead -- */
+int CD_GetError(void) { return CD_Error; }
+const char *CD_ErrorString(int code) { (void)code; return "no CD"; }
+int CD_Init(int SoundCard) { (void)SoundCard; return CD_Error; }
+int CD_GetCurrentDriver(void) { return -1; }
+const char *CD_GetCurrentDriverName(void) { return "none"; }
+void CD_Shutdown(void) {}
+int CD_Play(int track, int loop) { (void)track; (void)loop; return CD_Error; }
+void CD_Stop(void) {}
+void CD_Pause(int pauseon) { (void)pauseon; }
+int CD_IsPlaying(void) { return 0; }
+void CD_SetVolume(int volume) { (void)volume; }

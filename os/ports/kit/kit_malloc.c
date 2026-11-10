@@ -45,8 +45,12 @@ static blk_t *free_list;
 #define BLOCK(p)  ((blk_t *)((uint8_t *)(p) - HDR))
 #define FOOT(b)   (((uint32_t *)NEXT(b))[-1])
 
+/* free bytes now, and the fewest there have been (the log's: what a game really needs) */
+static size_t free_now, free_low = ~(size_t)0;
+
 static void unlink_free(blk_t *b)
 {
+    free_now -= SIZE(b);
     if (b->prev)
         b->prev->next = b->next;
     else
@@ -58,6 +62,7 @@ static void unlink_free(blk_t *b)
 static void link_free(blk_t *b)
 {
     b->size &= ~USED;
+    free_now += SIZE(b);
     FOOT(b) = SIZE(b);
     NEXT(b)->size |= PREV_FREE;         /* the next one (or the end marker) */
     b->prev = NULL;
@@ -103,6 +108,12 @@ static size_t need(size_t n)
 }
 
 /* take s bytes of the free block b (in use from then on), the rest freed */
+static void note_low(void)
+{
+    if (free_now < free_low)
+        free_low = free_now;
+}
+
 static void *take(blk_t *b, size_t s)
 {
     unlink_free(b);
@@ -153,8 +164,12 @@ void *malloc(size_t n)
                 if (SIZE(b) == s)
                     break;
             }
-        if (best)
-            return take(best, s);
+        if (best) {
+            void *p = take(best, s);
+
+            note_low();                 /* (whole again: a block's split is done) */
+            return p;
+        }
     }
     no_memory(n);
     errno = ENOMEM;
@@ -211,6 +226,7 @@ void *realloc(void *p, size_t n)
             b->size = (uint32_t)s | USED | (b->size & PREV_FREE);
             link_free(rest);
         }
+        note_low();
         return p;
     }
     if (!(q = malloc(n)))
@@ -294,3 +310,7 @@ void *_calloc_r(struct _reent *r, size_t n, size_t s) { (void)r; return calloc(n
 void *_memalign_r(struct _reent *r, size_t a, size_t n) { (void)r; return memalign(a, n); }
 
 struct mallinfo mallinfo(void) { return info(); }
+
+/* free in the game's heap, all told, and the least it has been (kit_os.c's log) */
+size_t kit_heap_free(void) { return free_now; }
+size_t kit_heap_low(void) { return free_low == ~(size_t)0 ? free_now : free_low; }

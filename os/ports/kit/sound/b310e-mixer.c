@@ -9,7 +9,7 @@
 #define MEMORY_LIMIT (256u*1024)
 static struct voice {
     uint8_t *data;
-    unsigned size, position, fraction, step;
+    unsigned size, position, fraction, step, rate, loop_start;
     int left, right;
     bool active, borrowed, loop;        /* borrowed: data is the caller's */
 } voices[VOICES];
@@ -26,7 +26,7 @@ static void voice_render(struct voice *v, int *left, int *right, unsigned n) {
     for (unsigned i=0; i<n; i++) {
         if (position >= size) {
             if (!v->loop) { v->active=false; break; }
-            position=0;
+            position=v->loop_start;
         }
         /* Gains are Q8: no software division in the sample loop. */
         int value = (int)data[position]-128;
@@ -69,9 +69,32 @@ void b310e_mixer_hook(void (*fn)(int16_t *, unsigned)) {
 void b310e_sample_loop(int channel, bool loop) {
     if ((unsigned)channel < VOICES) voices[channel].loop=loop;
 }
+/* Loops from a byte of its own, not its start (the start, when past its end) */
+void b310e_sample_loop_from(int channel, unsigned start) {
+    if ((unsigned)channel >= VOICES) return;
+    voices[channel].loop_start = start < voices[channel].size ? start : 0;
+    voices[channel].loop = true;
+}
 void b310e_sample_stop(int channel) {
     if ((unsigned)channel >= VOICES) return;
     int old = b310e_irq_save(); voices[channel].active=false; b310e_irq_restore(old);
+}
+/* A playing voice's pitch, 128 its own */
+void b310e_sample_pitch(int channel, int pitch) {
+    if ((unsigned)channel >= VOICES) return;
+    struct voice *v = &voices[channel];
+    int old = b310e_irq_save();
+    v->step = (unsigned)((uint64_t)v->rate*65536*MAX(1,pitch)/ (RATE*128u));
+    b310e_irq_restore(old);
+}
+/* A new rate for it (its own pitch: Blood's Doppler) */
+void b310e_sample_rate(int channel, unsigned rate) {
+    if ((unsigned)channel >= VOICES || !rate || rate > 96000) return;
+    struct voice *v = &voices[channel];
+    int old = b310e_irq_save();
+    v->rate = rate;
+    v->step = (unsigned)((uint64_t)rate*65536/RATE);
+    b310e_irq_restore(old);
 }
 bool b310e_sample_active(int channel) {
     return (unsigned)channel < VOICES && voices[channel].active;
@@ -104,8 +127,8 @@ int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,
     int old = b310e_irq_save();
     uint8_t *previous = v->data;
     allocated = allocated-v->size+bytes;
-    v->active=false; v->loop=false; v->data=copy; v->size=bytes; v->position=v->fraction=0;
-    v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
+    v->active=false; v->loop=false; v->loop_start=0; v->data=copy; v->size=bytes; v->position=v->fraction=0;
+    v->rate = rate; v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
     b310e_sample_volume(channel,volume,separation); v->active=true;
     b310e_irq_restore(old); free(previous); return channel;
 }
@@ -118,9 +141,9 @@ int b310e_sample_borrow(int channel, const uint8_t *data, unsigned bytes,
     int old = b310e_irq_save();
     uint8_t *previous = v->borrowed ? NULL : v->data;
     if (previous) allocated -= v->size;
-    v->active=false; v->borrowed=true; v->loop=false; v->data=(uint8_t *)data; v->size=bytes;
+    v->active=false; v->borrowed=true; v->loop=false; v->loop_start=0; v->data=(uint8_t *)data; v->size=bytes;
     v->position=v->fraction=0;
-    v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
+    v->rate = rate; v->step = (unsigned)((uint64_t)rate*65536*MAX(1,pitch)/ (RATE*128u));
     b310e_sample_volume(channel,volume,separation); v->active=true;
     b310e_irq_restore(old); free(previous); return channel;
 }

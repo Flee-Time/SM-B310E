@@ -60,6 +60,27 @@ SOURCES = {
         '41cd46bc00633e7457d07d88c8add9f99a7d9d41.zip',
         'edde47b058d0c37bc4dbdff078dc55cf0dd2c5d76d8b2526dc759c4ead44b1af',
         'src/game.c'),
+    # Shadow Warrior (GPLv2), the 2023 release: the engine, MACT and audiolib it was
+    # made with are those of jfduke3d's (same commits)
+    'jfsw': (
+        'https://github.com/jonof/jfsw/archive/'
+        '41b1ce1b7e01f8158fe89b20b79d9f0b23f84e4c.zip',
+        'c1c935f03730e9b82c9e7c758f4c99d6049e05dafe13b74e09766576c6eede54',
+        'src/game.c'),
+    # NBlood (GPLv2): Blood. The commit fpdoom's adaptation to jfbuild is made for
+    # (below); only its game code is used, on jfbuild (os/ports/blood)
+    'nblood': (
+        'https://github.com/nukeykt/NBlood/archive/'
+        '5917ab82214a9f0fa8a9d408f9e40143ad72171b.zip',
+        'c886ef4cf2b7b451052517127e0662b90d89a48082ef9fab20704a4b56fd5510',
+        'source/blood/src/blood.cpp'),
+    # fpdoom (public domain): its NBlood on jfbuild (fpbuild/NBlood.patch, eduke32/),
+    # applied by os/ports/blood/prepare.py
+    'fpdoom': (
+        'https://github.com/ilyakurdyukov/fpdoom/archive/'
+        '296795c2cfa084b061a7529997a19e75f4f91e36.zip',
+        '891e174949c2c7f85b1ca16d84677f9dbb59878775e4fd530f5cec55635e62c4',
+        'fpbuild/NBlood.patch'),
     # JonoF's audiolib: only its headers are used (GPLv2)
     'jfaudiolib': (
         'https://github.com/jonof/jfaudiolib/archive/'

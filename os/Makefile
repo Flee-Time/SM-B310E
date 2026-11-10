@@ -56,6 +56,8 @@ include ports/gnuboy/gnuboy.mk
 include ports/infones/infones.mk
 include ports/wolf4sdl/wolf4sdl.mk
 include ports/duke/duke.mk
+include ports/sw/sw.mk
+include ports/blood/blood.mk
 
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf

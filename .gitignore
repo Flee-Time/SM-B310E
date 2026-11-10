@@ -2,6 +2,8 @@
 # NOTE: gitignore does NOT support inline comments - every comment must
 # be on its own line (a trailing '#' becomes part of the pattern).
 build/
+# the Build engine games' shared code is source, not a build
+!os/ports/build/
 
 # -- Compiled / derived objects --------------------------------------
 *.o

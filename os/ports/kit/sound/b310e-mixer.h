@@ -9,6 +9,7 @@ void b310e_mixer_init(void);
 void b310e_mixer_hook(void (*render)(int16_t *, unsigned));
 int b310e_sample_file_borrow(int channel, const uint8_t *data, unsigned bytes, int volume, int separation, int pitch);
 void b310e_sample_loop(int channel, bool loop);
+void b310e_sample_loop_from(int channel, unsigned start);
 int b310e_sample_borrow(int channel, const uint8_t *data, unsigned bytes,
                         unsigned rate, int volume, int separation, int pitch);
 int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,
@@ -16,6 +17,8 @@ int b310e_sample_play(int channel, const uint8_t *data, unsigned bytes,
 int b310e_sample_file(int channel, const uint8_t *data, unsigned bytes, int volume, int separation);
 void b310e_sample_stop(int channel);
 bool b310e_sample_active(int channel);
+void b310e_sample_rate(int channel, unsigned rate);
+void b310e_sample_pitch(int channel, int pitch);   /* 128: its own */
 void b310e_sample_volume(int channel, int volume, int separation);
 #ifdef __cplusplus
 }

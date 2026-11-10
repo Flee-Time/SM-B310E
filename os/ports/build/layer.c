@@ -1,22 +1,7 @@
-/* Duke Nukem 3D on B310E OS: the Build engine's platform layer (what its
- * sdlayer2.c is for SDL) on the game kit: a 320 x 200 8-bit frame, the keys as
- * the scancodes its MACT library knows, the timer, and what the desktop has
+/* A Build engine game on B310E OS: the engine's platform layer (what its sdlayer2.c is
+ * for SDL) on the game kit: a 320 x 200 8-bit frame, the keys as the scancodes its MACT
+ * library knows (the game's table: build_game.h), the timer, and what the desktop has
  * that a phone does not.
- *
- * Keys (held sideways, the D-pad turned with the screen):
- *   D-pad       move and turn; the menus
- *   Center      fire; select
- *   LSoft       open, use; yes
- *   RSoft       the menu; back
- *   Dial        run on / off
- *   5, 8        jump, crouch
- *   1, 3        strafe left, right
- *   4, 6        weapon before, after
- *   7, 9        item before, after
- *   0           use the item
- *   *           quick kick
- *   #           the map
- *   END         quit (asks; LSoft: yes)
  *
  * This file, the game kit it runs on and what they link with: see
  * os/ports/duke/README.md for the licences.
@@ -29,16 +14,15 @@
 #include <string.h>
 #include <sys/stat.h>
 
-#include "duke3d.h"
+#include "build.h"
+#include "baselayer.h"
 #include "baselayer_priv.h"
-#include "keyboard.h"
 #include "kit.h"
+#include "build_game.h"
 
 void setvlinebpl(int dabpl);         /* (a.h, the engine's own) */
-void fx_poll(void);                     /* (duke_sound.c) */
 unsigned kit_io_ms(void);               /* (kit_sys.c) */
-void keep_effects(void);                /* (premap.c, from prepare.py) */
-void gameexit(const char *t);           /* (game.c) */
+int app_main(int argc, char const * const argv[]);     /* (the game's) */
 
 #define WIDTH 320
 #define HEIGHT 200
@@ -97,15 +81,13 @@ int startwin_idle(void *p) { (void)p; return 0; }
 int startwin_run(struct startwin_settings *s) { (void)s; return STARTWIN_RUN; }
 
 /* The engine's tile cache takes 60% of this (loadpics). As much of the arena as
- * can be: what the game mallocs after it (the music, the frame) needs about 360 KB;
- * its sounds are in the cache. compat.c's asks the host. */
-#define OUTSIDE_CACHE (360 * 1024)
-
+ * can be, less what the game mallocs after it (build_outside_cache). compat.c's asks
+ * the host. */
 size_t __wrap_Bgetsysmemsize(void)
 {
     size_t have = kit_heap_largest();
 
-    return have > 2 * OUTSIDE_CACHE ? (have - OUTSIDE_CACHE) / 60 * 100 : have;
+    return have > 2 * build_outside_cache ? (have - build_outside_cache) / 60 * 100 : have;
 }
 
 /* The game keeps to its folder: the kit opens everything from there */
@@ -119,7 +101,7 @@ char *getcwd(char *buf, size_t size)
     return buf;
 }
 
-/* (duke_compat.h: a directory's entries are looked at from the game's folder) */
+/* (compat.h: a directory's entries are looked at from the game's folder) */
 int fstatat(int fd, const char *name, struct stat *st, int flags)
 {
     (void)fd; (void)flags;
@@ -229,7 +211,7 @@ void showframe(void)
     last = now;
     if (now - kept >= 1000) {
         kept = now;
-        keep_effects();
+        build_each_second();
     }
     if (frame)
         kit_present8(frame, WIDTH, HEIGHT, WIDTH);
@@ -291,30 +273,6 @@ unsigned int getusecticks(void) { return kit_ms() * 1000u; }
 int gettimerfreq(void) { return 1000; }
 
 /* ---- the keys ------------------------------------------------------------------------ */
-/* A key's scancode in the game, and in the menus if another */
-static const struct { uint8_t game, menu, menu2; } keys[128] = {
-    [KIT_UP] = { sc_UpArrow, 0, 0 },
-    [KIT_DOWN] = { sc_DownArrow, 0, 0 },
-    [KIT_LEFT] = { sc_LeftArrow, 0, 0 },
-    [KIT_RIGHT] = { sc_RightArrow, 0, 0 },
-    [KIT_CENTER] = { sc_LeftControl, sc_Return, 0 },
-    [KIT_LSOFT] = { sc_Space, sc_Return, sc_Y },
-    [KIT_RSOFT] = { sc_Escape, sc_Escape, sc_N },
-    [KIT_DIAL] = { sc_CapsLock, 0, 0 },
-    [KIT_END] = { sc_F10, sc_F10, 0 },
-    [KIT_0 + 1] = { sc_Comma, 0, 0 },
-    [KIT_0 + 3] = { sc_Period, 0, 0 },
-    [KIT_0 + 4] = { sc_SemiColon, 0, 0 },
-    [KIT_0 + 6] = { sc_Quote, 0, 0 },
-    [KIT_0 + 5] = { sc_A, 0, 0 },
-    [KIT_0 + 8] = { sc_Z, 0, 0 },
-    [KIT_0 + 7] = { sc_OpenBracket, 0, 0 },
-    [KIT_0 + 9] = { sc_CloseBracket, 0, 0 },
-    [KIT_0] = { sc_Return, 0, 0 },
-    [KIT_STAR] = { sc_Tilde, 0, 0 },
-    [KIT_HASH] = { sc_Tab, 0, 0 },
-};
-
 int initinput(void)
 {
     inputdevices = 1;                   /* the keyboard */
@@ -353,10 +311,11 @@ int handleevents(void)
         if ((unsigned)code >= 128)
             continue;
         if (down) {
-            bool menu = (ps[myconnectindex].gm & MODE_MENU) != 0;
+            bool menu = build_in_menu();
 
-            held[code][0] = menu && keys[code].menu ? keys[code].menu : keys[code].game;
-            held[code][1] = menu ? keys[code].menu2 : 0;
+            held[code][0] = menu && build_keys[code].menu ? build_keys[code].menu
+                                                          : build_keys[code].game;
+            held[code][1] = menu ? build_keys[code].menu2 : 0;
         }
         scan(held[code][0], down);
         scan(held[code][1], down);
@@ -368,7 +327,7 @@ int handleevents(void)
 
         if (!leaving) {
             leaving = true;
-            gameexit("");
+            build_quit();
         }
     }
     return 0;

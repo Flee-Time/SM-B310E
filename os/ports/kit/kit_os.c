@@ -875,6 +875,8 @@ static void game_main(void *arg)
 
         while (unused < k.thread->stack_size / 4 && low[unused] == 0x57a57a57)
             unused++;
+        klog("%s: its heap never below %lu KB free", kit_game.log_name,
+             (unsigned long)(kit_heap_low() / 1024));
         klog("%s: stack %lu of %lu KB, OS heap never below %lu KB", kit_game.log_name,
              (unsigned long)((k.thread->stack_size - unused * 4) / 1024),
              (unsigned long)(k.thread->stack_size / 1024), (unsigned long)(heap_low / 1024));

@@ -19,8 +19,14 @@ struct dirent {
 
 typedef struct kit_dir DIR;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
 DIR *opendir(const char *path);
 struct dirent *readdir(DIR *d);
 int closedir(DIR *d);
+#ifdef __cplusplus
+}
+#endif
 
 #endif

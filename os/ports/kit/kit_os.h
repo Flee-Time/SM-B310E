@@ -38,6 +38,8 @@ void *kos_arena(size_t *size);          /* the game's block */
 void kos_error(const char *text);       /* why the game stopped: shown */
 
 int kit_run(int argc, char **argv);     /* kit_main(), exit() back here */
+size_t kit_heap_free(void);             /* free in the game's heap (kit_malloc.c) */
+size_t kit_heap_low(void);              /* the least it has been */
 unsigned kit_io_kb(void);               /* read from the card so far */
 unsigned kit_io_ms(void);               /* and how long that took */
 void kit_close_files(void);             /* the game was ended: what it had open */
