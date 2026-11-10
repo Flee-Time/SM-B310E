@@ -281,6 +281,17 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     klog("lu: retrack + TA %u", ch.ta);
     if (reg_begin(r, ul) < 0)
         return REG_ERROR;
+    /* Log the LU REQUEST's old-LAI + classmark we send (non-SIM fields only - no IMSI).
+     * A wrong PLMN here (esp. mnc3 digit-count: TT 286-03 is a 2-digit MNC) makes the
+     * network read us as a disallowed roamer -> LU REJECT cause 13. */
+    klog("lu: LU-REQ oldLAI mcc=%u mnc=%u mnc3=%u lac=%u cm1=%02x imsilen=%u",
+         r->mcc, r->mnc, r->mnc3, r->lac, r->classmark1, r->imsi_len);
+    /* IMSI PLMN prefix only (MCC+MNC = first 5 digits) - loggable (it is the PLMN id,
+     * not the subscriber MSIN) and tells us the SIM read a real TT IMSI (28603...). A
+     * wrong prefix = bad SIM read -> network sees a foreign/invalid subscriber. */
+    if (r->imsi_len >= 5)
+        klog("lu: LU-REQ imsi-plmn %u%u%u%u%u", r->imsi[0], r->imsi[1], r->imsi[2],
+             r->imsi[3], r->imsi[4]);
     for (int i = 0; i < LAPDM_BLOCK; i++)
         sabm[i] = ul[i];              /* last uplink frame, kept for retransmission */
     have_ul = 1;
