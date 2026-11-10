@@ -111,21 +111,34 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
 int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
 {
     uint8_t resp[2];
+    int n;
 
     if (r->state != REG_NEED_CIPHER)
         return 0;
-    r->state = REG_RUNNING;
-    return lapdm_send(&r->dl, resp, rr_encode_ciph_mode_complete(resp), out);
+    /* The CIPHERING MODE COMMAND we are answering acknowledges our AUTHENTICATION
+     * RESPONSE at L3, so clear any stale L2 tx-pending - on this lossy link the N(R)
+     * ack can be lost or the sequence desynced (seen: va ahead of vs), and the
+     * COMPLETE is a mandatory response that must go out. Advance the state only once
+     * the send succeeds, so a window-blocked attempt retries instead of vanishing. */
+    r->dl.tx_pending = 0;
+    n = lapdm_send(&r->dl, resp, rr_encode_ciph_mode_complete(resp), out);
+    if (n > 0)
+        r->state = REG_RUNNING;
+    return n;
 }
 
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK])
 {
     uint8_t resp[6];
+    int n;
 
     if (r->state != REG_NEED_SRES)
         return -1;
-    r->state = REG_RUNNING;
-    return lapdm_send(&r->dl, resp, mm_encode_auth_response(resp, sres), out);
+    r->dl.tx_pending = 0;               /* mandatory response; see reg_cipher_complete */
+    n = lapdm_send(&r->dl, resp, mm_encode_auth_response(resp, sres), out);
+    if (n > 0)
+        r->state = REG_RUNNING;
+    return n;
 }
 
 /* ---- self-test: a scripted location-update exchange ---------------------- */

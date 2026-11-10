@@ -286,7 +286,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
         p.dl_bad = (uint16_t)(p.dl_bad + st.dl_bad);
         p.ul_bursts = (uint16_t)(p.ul_bursts + st.ul_bursts);
-        if (dm_dbg < 8) {
+        if (dm_dbg < 28) {
             klog("lu: dm#%d ul=%lu done=%d dlw=%lu dl=%lu/%lu fn%%51=%lu hdr=%02x%02x fimov=%lu",
                  dm_dbg, (unsigned long)st.ul_bursts, st.ul_done,
                  (unsigned long)st.dl_bursts,
@@ -328,12 +328,18 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 p.ciphered = 1;
                 klog("lu: CIPHER cmd sc=%u A5/%u", r->ciph_sc, r->ciph_alg + 1);
                 if (r->ciph_sc)
-                    l1_cipher_set(r->kc, r->ciph_alg);  /* enable A5 before COMPLETE */
-                if (reg_cipher_complete(r, ul) > 0) {
-                    for (int i = 0; i < LAPDM_BLOCK; i++)
-                        sabm[i] = ul[i];
-                    have_ul = 1;
-                    sabm_tries = 0;
+                    l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
+                {
+                    int cc = reg_cipher_complete(r, ul);
+
+                    klog("lu: CIPHER COMPLETE build=%d (tx_pend=%u vs=%u va=%u)", cc,
+                         r->dl.tx_pending, r->dl.vs, r->dl.va);
+                    if (cc > 0) {
+                        for (int i = 0; i < LAPDM_BLOCK; i++)
+                            sabm[i] = ul[i];
+                        have_ul = 1;
+                        sabm_tries = 0;
+                    }
                 }
             }
         }
@@ -353,11 +359,18 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 p.sim_ok = 1;
                 for (int i = 0; i < 8; i++)
                     r->kc[i] = sim_job.kc[i];       /* for A5 if ciphering starts */
-                if (reg_sres(r, sim_job.sres, ul) > 0) {
-                    for (int i = 0; i < LAPDM_BLOCK; i++)
-                        sabm[i] = ul[i];
-                    have_ul = 1;
-                    sabm_tries = 0;
+                {
+                    int ar = reg_sres(r, sim_job.sres, ul);
+
+                    klog("lu: AUTH RESPONSE build=%d (est=%u tx_pend=%u vs=%u va=%u)", ar,
+                         r->dl.state == LAPDM_ESTABLISHED, r->dl.tx_pending, r->dl.vs,
+                         r->dl.va);
+                    if (ar > 0) {
+                        for (int i = 0; i < LAPDM_BLOCK; i++)
+                            sabm[i] = ul[i];
+                        have_ul = 1;
+                        sabm_tries = 0;
+                    }
                 }
                 sim_pending = 0;
             } else {

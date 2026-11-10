@@ -146,6 +146,11 @@
                                          * copies to key reg 0xec71 when FI word-5 bit
                                          * 15 is set; just past the cipher COUNT regs at
                                          * +0x3f0. See docs/a5-cipher-re.md. */
+#define CIPHER_CNT_SHARE 0x3f0u         /* A5 COUNT (GSM frame number): the DSP copies
+                                         * it into 0xec4c/4d/4e when FI word-1 bit 8 is
+                                         * 0, then advances per frame when bit 8 is 1.
+                                         * Packing (engine 0x1645): FN = 0xec4c<<16 |
+                                         * 0xec4e<<8 | 0xec4d. */
 #define RX_BASE         0x40cu          /* received blocks: 6 x 72 bytes */
 #define RX_SLOTS        6u
 #define RX_SIZE         72u
@@ -1018,6 +1023,12 @@ static bool txpwr_pending;              /* flag it in the next TX frame's word 5
  * algorithm (1 = A5/1). 0 = ciphering off. Set by l1_cipher_set; see
  * docs/a5-cipher-re.md. */
 static uint16_t cipher_w5;
+static bool cipher_count_load;          /* next FI loads the A5 COUNT from share +0x3f0
+                                         * (word-1 bit 8 = 0); after that the FIs set bit
+                                         * 8 = 1 so the DSP advances the count itself */
+static uint32_t cipher_fn_offset;       /* cell FN = (frame_number + this) % FN_MOD - the
+                                         * cell's absolute frame number the A5 COUNT needs
+                                         * (frame_number is our local count, 0 at start) */
 
 int l1_start(void)
 {
@@ -1030,6 +1041,7 @@ int l1_start(void)
     dsp_info.param_blocks = 0;
     dsp_info.fi_moves = dsp_info.pm_results = 0;
     cipher_w5 = 0;                       /* ciphering off until a CIPHER MODE COMMAND */
+    cipher_count_load = false;
     /* stock FUN_0002e98e: clear, interrupt on, clear, start marker */
     sm_clear(0, SHARE_CLEAR);
     fe0_init();
@@ -1139,6 +1151,25 @@ static void fi_init(uint16_t fi[11], uint16_t ext[3], unsigned type)
     fi[0] = (uint16_t)(type & 0x1f);
     fi[1] = (uint16_t)(((frame_number >> 16) & 0x7f) << 9);
     fi[2] = (uint16_t)frame_number;
+    /* A5 COUNT. The DSP copies share +0x3f0 into its cipher frame-number register
+     * when word-1 bit 8 is 0, and advances it per frame when bit 8 is 1. So, once
+     * ciphering is on, seed the register with the cell's absolute FN on the first
+     * frame (bit 8 = 0, share written) and from then on let the DSP run it (bit 8 =
+     * 1) - otherwise it reloads an unset +0x3f0 every frame and the keystream frame
+     * number never matches the network's. Not touched before ciphering. */
+    if (cipher_w5) {
+        if (cipher_count_load) {
+            uint32_t cfn = (frame_number + cipher_fn_offset) % FN_MOD;
+
+            sm_w16(CIPHER_CNT_SHARE,      (uint16_t)((cfn >> 16) & 0xffu));
+            sm_w16(CIPHER_CNT_SHARE + 2u, (uint16_t)(cfn & 0xffu));
+            sm_w16(CIPHER_CNT_SHARE + 4u, (uint16_t)((cfn >> 8) & 0xffu));
+            sm_w16(CIPHER_CNT_SHARE + 6u, 0);
+            cipher_count_load = false;  /* leave bit 8 = 0 this frame: the DSP loads it */
+        } else {
+            fi[1] |= 0x100u;            /* bit 8 = 1: keep the DSP's advancing count */
+        }
+    }
 }
 
 /* FUN_0005096e (the search before camping) for types 9 and 10: word 1 bits 7:4
@@ -1420,17 +1451,21 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
  * The GSM frame-number COUNT the keystream also needs is the DSP's own (share
  * +0x3f0 -> 0xec4c, maintained per frame), so we supply only Kc and the mode bits.
  * alg: 0 = A5/1, 1 = A5/2, 2 = A5/3. alg 0xff disables. */
-void l1_cipher_set(const uint8_t kc[8], uint8_t alg)
+void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
 {
     if (alg == 0xff) {
         cipher_w5 = 0;
+        cipher_count_load = false;
         klog("dsp: cipher off");
         return;
     }
     for (int i = 0; i < 8; i++)
         sm_w16(CIPHER_KC_SHARE + 2u * (uint32_t)i, kc[i]);
+    cipher_fn_offset = fn_offset % FN_MOD;
+    cipher_count_load = true;            /* seed the COUNT on the first ciphered frame */
     cipher_w5 = (uint16_t)(0x8000u | ((uint16_t)((alg + 1) & 3) << 13));
-    klog("dsp: cipher A5/%u enabled (w5 %04x)", alg + 1, cipher_w5);
+    klog("dsp: cipher A5/%u enabled (w5 %04x, fn_off %lu)", alg + 1, cipher_w5,
+         (unsigned long)cipher_fn_offset);
 }
 
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
