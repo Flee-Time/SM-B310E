@@ -542,7 +542,10 @@ static void worker(void *arg)
      * (untracked, the transmitter sits at the crystal's, which a BTS's RACH
      * detector does not forgive). The tracked CCCH read lets the AFC settle. */
     {
-        int trc = l1_cell_track(cell.slot, (uint8_t)(2 * cell.gain));
+        int trc;
+
+        l1_track_mode = 0;      /* idle mode for the pre-RACH camp on the BCCH */
+        trc = l1_cell_track(cell.slot, (uint8_t)(2 * cell.gain));
 
         klog("register: camped (command 3: %d), CCCH %d%% decoded tracked", trc,
              cch_quality(&cell));
@@ -575,6 +578,8 @@ static void worker(void *arg)
     klog("register: chan type=%u subch=%u tn=%u tsc=%u, last dl hdr %02x %02x",
          reg_prog.ch_type, reg_prog.ch_subch, reg_prog.ch_tn, reg_prog.ch_tsc,
          reg_prog.dl_addr, reg_prog.dl_ctrl);
+    klog("register: L3 msgs=%u last PD=%u type=0x%02x (state %u)", reg.l3_msgs,
+         reg.last_pd, reg.last_mtype, reg.state);
     reg_ui.reject_cause = reg.reject_cause;
     reg_ui.result = rc == REG_ACCEPTED ? RES_ACCEPTED :
                     rc == REG_REJECTED ? RES_REJECTED : RES_NO_RESPONSE;

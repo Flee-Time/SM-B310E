@@ -60,6 +60,10 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
     if (deliver != 1)
         return r->state;
 
+    r->last_pd = (uint8_t)(l3[0] & 0x0f);
+    r->last_mtype = l3len > 1 ? l3[1] : 0;
+    r->l3_msgs++;
+
     if ((l3[0] & 0x0f) == MM_PD) {
         switch (mm_msg_type(l3, l3len)) {
         case MM_LU_ACCEPT:

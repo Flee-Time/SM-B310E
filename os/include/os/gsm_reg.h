@@ -34,6 +34,8 @@ typedef struct {
     lapdm_dl_t dl;
     uint8_t rand[16];       /* from AUTHENTICATION REQUEST, for the SIM */
     uint8_t reject_cause;
+    uint8_t last_pd, last_mtype;    /* last delivered L3 message (diag) */
+    uint16_t l3_msgs;               /* delivered L3 messages count (diag) */
 } gsm_reg_t;
 
 void reg_init(gsm_reg_t *r, const uint8_t *imsi, int imsi_len,

@@ -230,7 +230,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         *prog = p;
     /* Re-assert cell tracking (command 3) for the dedicated phase: the RACH keyed
      * the PA, which disturbs the AFC, and a drifting AFC fails the SDCCH CRC. The
-     * camp before the RACH is not enough once we have transmitted. */
+     * camp before the RACH is not enough once we have transmitted. Dedicated
+     * mode (2) makes the DSP decode the SDCCH timeslot instead of half-camping
+     * on the BCCH - it is what gets the exchange past the UA to authentication. */
+    l1_track_mode = 2;
     l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
     /* apply the grant's timing advance so the uplink lands in the BTS window */
     l1_tx_ta_set(ch.ta);
@@ -253,8 +256,15 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                         have_ul ? ul : (const uint8_t *)0, &st);
         if (have_ul && st.ul_done) {
             last_ul = kernel_ticks();
-            if (!p.established)
+            if (!p.established) {
                 p.sabm_sent++;
+            } else {
+                /* a post-establishment uplink (the AUTHENTICATION RESPONSE) keyed
+                 * the PA; re-track so the AFC recovers and the LOCATION UPDATING
+                 * ACCEPT that follows is decodable. Only once established, so the
+                 * SABM/UA handshake is not disturbed. */
+                l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
+            }
         }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);
