@@ -368,8 +368,21 @@ static bool is_foreign(uint16_t idx)
  * the operator, and a foreign cell's SI 1 / SI 2 lists rule out its siblings. */
 static bool try_cell(uint16_t index, int rxlev)
 {
-    uint8_t gain = l1_gain_for_rxlev(rxlev);
+    uint8_t gain;
     bool home;
+    int m;
+
+    /* Prime the synthesiser on this ARFCN and let the RF settle before the sync,
+     * exactly as l1_cell_select and the rxcell probe do. After the band scan the
+     * synth is parked on another channel, and l1_cell_sync's own SETTLE (10
+     * frames, ~46 ms) is too short for the frequency jump, so its FCCH search
+     * fast-fails on a cell that in fact syncs cleanly - the live symptom was the
+     * find reporting synced=0 while rxcell on the same ARFCN synced in 60 ms. A
+     * fresh measure also refreshes the gain (the scan's value can be stale). */
+    m = l1_rxlev_measure(index, 8, 400);
+    if (m > 0)
+        rxlev = m;
+    gain = l1_gain_for_rxlev(rxlev);
 
     if (l1_cell_sync(&cell, index, gain, 0, SYNC_BUDGET_MS) != 1)
         return false;                   /* not a BCCH (fast fail) */
