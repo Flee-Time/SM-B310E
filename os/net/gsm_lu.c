@@ -303,6 +303,18 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 else
                     break;              /* could not start the SIM thread */
             }
+            if (state == REG_NEED_CIPHER) {
+                p.ciphered = 1;
+                klog("lu: CIPHER cmd sc=%u A5/%u", r->ciph_sc, r->ciph_alg + 1);
+                if (r->ciph_sc)
+                    l1_cipher_set(r->kc, r->ciph_alg);  /* enable A5 before COMPLETE */
+                if (reg_cipher_complete(r, ul) > 0) {
+                    for (int i = 0; i < LAPDM_BLOCK; i++)
+                        sabm[i] = ul[i];
+                    have_ul = 1;
+                    sabm_tries = 0;
+                }
+            }
         }
         /* Retransmit the last uplink frame on T200 until the exchange moves on -
          * the SABM before the UA, then the AUTHENTICATION RESPONSE before the
@@ -318,6 +330,8 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {
                 p.sim_ok = 1;
+                for (int i = 0; i < 8; i++)
+                    r->kc[i] = sim_job.kc[i];       /* for A5 if ciphering starts */
                 if (reg_sres(r, sim_job.sres, ul) > 0) {
                     for (int i = 0; i < LAPDM_BLOCK; i++)
                         sabm[i] = ul[i];

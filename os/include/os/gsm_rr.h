@@ -20,6 +20,7 @@
 #define RR_IMM_ASSIGN_REJ   0x3a
 #define RR_CHAN_RELEASE     0x0d
 #define RR_CIPH_MODE_CMD    0x35
+#define RR_CIPH_MODE_COMPLETE 0x32
 #define RR_PAGING_1         0x21
 #define RR_PAGING_2         0x22
 #define RR_PAGING_3         0x24
@@ -50,5 +51,8 @@ int rr_parse_imm_assign(const uint8_t block[23], rr_chan_desc_t *d);
 
 #define RR_SELFTEST_TOTAL 9
 int rr_selftest(void);
+
+/* CIPHERING MODE COMPLETE (no IMEISV); 2 bytes. */
+int rr_encode_ciph_mode_complete(uint8_t out[2]);
 
 #endif

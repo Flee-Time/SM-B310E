@@ -93,8 +93,29 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
         default:
             break;
         }
+    } else if ((l3[0] & 0x0f) == RR_PD) {
+        /* CIPHERING MODE COMMAND: record the algorithm and start flag; the caller
+         * enables A5 on the DSP (with Kc) and answers with CIPHERING MODE COMPLETE
+         * (reg_cipher_complete), which must go out already enciphered. */
+        if (l3[1] == RR_CIPH_MODE_CMD && l3len >= 3) {
+            r->ciph_sc = (uint8_t)(l3[2] & 1);
+            r->ciph_alg = (uint8_t)((l3[2] >> 1) & 7);
+            r->state = REG_NEED_CIPHER;
+        }
     }
     return r->state;
+}
+
+/* After the caller has enabled ciphering on the DSP, build CIPHERING MODE
+ * COMPLETE as an I-frame on the SDCCH. 0 when not awaiting it. */
+int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
+{
+    uint8_t resp[2];
+
+    if (r->state != REG_NEED_CIPHER)
+        return 0;
+    r->state = REG_RUNNING;
+    return lapdm_send(&r->dl, resp, rr_encode_ciph_mode_complete(resp), out);
 }
 
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK])

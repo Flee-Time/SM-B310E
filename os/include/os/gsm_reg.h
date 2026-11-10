@@ -22,6 +22,7 @@ enum {
     REG_ACCEPTED,           /* LOCATION UPDATING ACCEPT */
     REG_REJECTED,           /* LOCATION UPDATING REJECT (see reject_cause) */
     REG_ERROR,
+    REG_NEED_CIPHER,       /* CIPHERING MODE COMMAND seen; enable A5 + send COMPLETE */
 };
 
 typedef struct {
@@ -33,6 +34,8 @@ typedef struct {
     uint8_t classmark1;
     lapdm_dl_t dl;
     uint8_t rand[16];       /* from AUTHENTICATION REQUEST, for the SIM */
+    uint8_t kc[8];          /* ciphering key from the SIM, for A5 */
+    uint8_t ciph_sc, ciph_alg;  /* CIPHERING MODE COMMAND: start flag, algorithm */
     uint8_t reject_cause;
     uint8_t last_pd, last_mtype;    /* last delivered L3 message (diag) */
     uint16_t l3_msgs;               /* delivered L3 messages count (diag) */
@@ -48,6 +51,8 @@ int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK], int *out_valid);
 /* Provide SRES after a REG_NEED_SRES; builds the AUTHENTICATION RESPONSE frame. */
 int reg_sres(gsm_reg_t *r, const uint8_t sres[4], uint8_t out[LAPDM_BLOCK]);
+/* Build CIPHERING MODE COMPLETE after enabling A5; 0 when not awaiting it. */
+int reg_cipher_complete(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 
 #define REG_SELFTEST_TOTAL 8
 int reg_selftest(void);

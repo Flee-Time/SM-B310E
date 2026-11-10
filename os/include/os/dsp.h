@@ -249,6 +249,7 @@ void l1_tx_ta_set(uint8_t ta);
 /* Frame-synced uplink (l1_dm_sched): post the burst FI ahead, feed the TXBUFQ
  * descriptors just-in-time. See dsp.c. */
 int txbuf_free(void);                   /* free TXBUFQ slots (uplink pacing) */
+void l1_cipher_set(const uint8_t kc[8], uint8_t alg);  /* enable A5 (Kc) */
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
 int l1_uplink_desc(int tag, int burst, uint8_t bsic, const uint8_t block[23]);
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,

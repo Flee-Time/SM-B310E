@@ -23,6 +23,7 @@ typedef struct {
     uint8_t established;      /* LAPDm link up on the SDCCH (UA) */
     uint8_t reached_auth;    /* AUTHENTICATION REQUEST seen */
     uint8_t sim_ok;          /* the SIM returned SRES for it */
+    uint8_t ciphered;        /* CIPHERING MODE COMMAND seen and answered */
     uint16_t dl_blocks;      /* downlink SDCCH blocks received (good CRC) */
     uint16_t dl_bad;         /* downlink SDCCH blocks with a bad CRC */
     uint16_t ul_bursts;      /* uplink bursts sent */

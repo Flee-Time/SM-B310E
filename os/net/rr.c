@@ -48,6 +48,13 @@ int rr_parse_chan_desc(const uint8_t cd[3], rr_chan_desc_t *d)
     return 0;
 }
 
+int rr_encode_ciph_mode_complete(uint8_t out[2])
+{
+    out[0] = RR_PD;
+    out[1] = RR_CIPH_MODE_COMPLETE;
+    return 2;
+}
+
 int rr_parse_imm_assign(const uint8_t block[23], rr_chan_desc_t *d)
 {
     if (rr_msg_type(block) != RR_IMM_ASSIGN)

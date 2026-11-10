@@ -1401,6 +1401,14 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
  * TXBUFQ entries - the 23-byte block once (burst 0) then a control word per
  * burst - paced to how fast the DSP drains the ring, so five entries pass
  * through four slots without overrunning and without starving the frame clock. */
+/* Enable A5 ciphering on the DSP with the SIM's Kc. STUB: logs only for now;
+ * the real DSP cipher command is still to be found. alg: 0 = A5/1, 1 = A5/2... */
+void l1_cipher_set(const uint8_t kc[8], uint8_t alg)
+{
+    (void)kc;
+    klog("dsp: cipher A5/%u requested (not yet enabled)", alg + 1);
+}
+
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
 {
     uint16_t fi[11], ext[3];
