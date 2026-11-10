@@ -59,6 +59,7 @@ include ports/duke/duke.mk
 include ports/sw/sw.mk
 include ports/blood/blood.mk
 include ports/quake/quake.mk
+include ports/snes9x/snes9x.mk
 
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf

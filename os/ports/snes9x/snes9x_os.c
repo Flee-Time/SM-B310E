@@ -1,0 +1,46 @@
+/* The SNES on B310E OS (snes9x2002): the app's OS side. The game kit's front end lists
+ * the ROMs (.sfc, .smc) beside the app (/b310e-os/apps/SNES/) and in /games/snes; the
+ * battery RAM (.srm) goes beside the ROM.
+ *
+ * SPDX-License-Identifier: GPL-2.0-or-later
+ */
+#include "app.h"
+#include "kit_app.h"
+
+static const char *const exts[] = { ".sfc", ".smc", NULL };
+static const char *const dirs[] = { "/games/snes", NULL };
+
+static void rom_args(const char *rom, const uint8_t *values)
+{
+    (void)values;
+    kit_arg(rom);
+}
+
+/* a pad (Game Boy's icon, for now) */
+static const icon_t icon = { {
+    0x00, 0xff, 0xff, 0xff, 0xff, 0x00,
+    0x00, 0xf0, 0x00, 0x00, 0x0f, 0x00,
+    0x00, 0xf0, 0xaa, 0xaa, 0x0f, 0x00,
+    0x00, 0xf0, 0xaa, 0xaa, 0x0f, 0x00,
+    0x00, 0xf0, 0xaa, 0xaa, 0x0f, 0x00,
+    0x00, 0xf0, 0x00, 0x00, 0x0f, 0x00,
+    0x00, 0xf0, 0x00, 0x00, 0x0f, 0x00,
+    0x00, 0xf0, 0xf0, 0x00, 0xff, 0x00,
+    0x00, 0xff, 0xff, 0x0f, 0x0f, 0x00,
+    0x00, 0xf0, 0xf0, 0x00, 0x0f, 0x00,
+    0x00, 0xf0, 0x00, 0x00, 0x0f, 0x00,
+    0x00, 0xff, 0xff, 0xff, 0xff, 0x00,
+} };
+
+const kit_game_t kit_game = {
+    .log_name = "snes9x",
+    .stack = 32 * 1024,
+    .arena_reserve = 128 * 1024,
+    .arena_min = 512 * 1024,
+    .view = { KIT_ROT_90, KIT_FILL, 1, KIT_KEYS_TURNED },
+    .rom_exts = exts,
+    .rom_dirs = dirs,
+    .rom_args = rom_args,
+};
+
+KIT_APP("SNES", &icon);

@@ -87,6 +87,14 @@ SOURCES = {
         'bf4ac424ce754894ac8f1dae6a3981954bc9852d.zip',
         '9b6f6c5ead62e9a64d32d4bcc5ef57fbdc1d1172219fd96454b1fbc159882831',
         'WinQuake/host.c'),
+    # snes9x2002 (Snes9x's licence: free, NOT for commercial use, and NOT GPL; libretro's
+    # core from PocketSNES, with ARM assembly): the SNES. Its code stays out of the
+    # repository; a built snes9x.app is for the user's own phone only
+    'snes9x2002': (
+        'https://github.com/libretro/snes9x2002/archive/'
+        '6ffbf9ef4f0063e1f1b78a40d10c50fc52f2524c.zip',
+        '42f79edc8bd3428c575ca770440cc620da3c338cfec6d153c70e3b0f991161f2',
+        'src/cpuexec.c'),
     # JonoF's audiolib: only its headers are used (GPLv2)
     'jfaudiolib': (
         'https://github.com/jonof/jfaudiolib/archive/'
