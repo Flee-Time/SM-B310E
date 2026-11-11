@@ -23,6 +23,14 @@ copied to the build with these changes, each checked. Used by each game's prepar
     loops that draw most of the screen are in ARM code (os/ports/build/draw4.S, checked
     pixel for pixel against the C); a compiler keeps a third more on the stack.
 
+ 9. krecip, a reciprocal through a float's exponent and mantissa, makes the float's
+    bits with integers (CLZ and the conversion's rounding): an int to a float is a
+    library call without an FPU (in Shadow Warrior's sloped floors, 10% of the time).
+
+10. Sloped floors and ceilings (slopevlin) take 1/z every 8 pixels and step u and v
+    straight between, as Ken's assembly did (BITSOFPRECISION 3); the C took it for
+    each pixel.
+
 SPDX-License-Identifier: GPL-2.0-or-later
 """
 from pathlib import Path
@@ -52,6 +60,31 @@ def changes(tiles, walls=6144, sprites=2048, players=2, voxels=8):
         ('#define MAXWALLSB 4096', '#define MAXWALLSB 2048'),
     ],
     'engine.c': [
+        ('\tfloat f = (float)i; i = *(int *)&f;\n',
+         '\t// (B310E) the float\'s bits made with integers (see 9): an int to a float is a\n'
+         '\t// library call on this FPU-less CPU (krecip was 10% of SW\'s time with it)\n'
+         '\tunsigned a = i < 0 ? -(unsigned)i : (unsigned)i, bits = 0;\n'
+         '\n'
+         '\tif (a) {\n'
+         '\t\tint e = 31 - __builtin_clz(a);\n'
+         '\t\tunsigned m;\n'
+         '\n'
+         '\t\tif (e <= 23)\n'
+         '\t\t\tm = a << (23 - e);\n'
+         '\t\telse {\t// rounded to nearest, ties to even, as the conversion does\n'
+         '\t\t\tint sh = e - 23;\n'
+         '\t\t\tunsigned rem = a & ((1u << sh) - 1), half = 1u << (sh - 1);\n'
+         '\n'
+         '\t\t\tm = a >> sh;\n'
+         '\t\t\tif (rem > half || (rem == half && (m & 1)))\n'
+         '\t\t\t\tif (++m >> 24) {\n'
+         '\t\t\t\t\tm >>= 1;\n'
+         '\t\t\t\t\te++;\n'
+         '\t\t\t\t}\n'
+         '\t\t}\n'
+         '\t\tbits = (i < 0 ? 0x80000000u : 0) | (unsigned)(e + 127) << 23 | (m & 0x7fffff);\n'
+         '\t}\n'
+         '\ti = (int)bits;\n'),
         ('''	setupmvlineasm(globalshiftval);
 
 #ifndef USING_A_C
@@ -95,6 +128,36 @@ void vlineasm4(int cnt, void *p);'''),
 void mvlineasm4(int cnt, void *p);'''),
     ],
     'a-c.c': [
+        ('\tfor(;cnt>0;cnt--)\n\t{\n\t\ti = krecip(bz>>6); bz += bzinc;\n'
+         '\t\tu = bx+globalx3*i;\n\t\tv = by+globaly3*i;\n'
+         '\t\t*pp = *(unsigned char *)(slopalptr[0]+gbuf[((u>>(32-glogx))<<glogy)+(v>>(32-glogy))]);\n'
+         '\t\tslopalptr--;\n\t\tpp += gpinc;\n\t}\n',
+         '\t// (B310E) 1/z every 8 pixels and u, v straight between, as Ken\'s own assembly\n'
+         '\t// (BITSOFPRECISION) did: a reciprocal for each pixel was this loop\'s most (see 10)\n'
+         '\tfor(;cnt>0;)\n'
+         '\t{\n'
+         '\t\tint n = cnt < 8 ? cnt : 8, k, du, dv;\n'
+         '\t\tunsigned int u1, v1;\n'
+         '\n'
+         '\t\ti = krecip(bz>>6);\n'
+         '\t\tu = bx+globalx3*i;\n'
+         '\t\tv = by+globaly3*i;\n'
+         '\t\tbz += bzinc*n;\n'
+         '\t\ti = krecip(bz>>6);\n'
+         '\t\tu1 = bx+globalx3*i;\n'
+         '\t\tv1 = by+globaly3*i;\n'
+         '\t\tdu = n == 8 ? (int)(u1-u)>>3 : (int)(u1-u)/n;\n'
+         '\t\tdv = n == 8 ? (int)(v1-v)>>3 : (int)(v1-v)/n;\n'
+         '\t\tfor(k=n;k>0;k--)\n'
+         '\t\t{\n'
+         '\t\t\t*pp = *(unsigned char *)(slopalptr[0]+gbuf[((u>>(32-glogx))<<glogy)+(v>>(32-glogy))]);\n'
+         '\t\t\tslopalptr--;\n'
+         '\t\t\tpp += gpinc;\n'
+         '\t\t\tu += du;\n'
+         '\t\t\tv += dv;\n'
+         '\t\t}\n'
+         '\t\tcnt -= n;\n'
+         '\t}\n'),
         ('''void hlineasm4(int cnt, int skiploadincs,''', '''/* (ports/duke/draw4.S; its offsets) */
 struct wall4 { unsigned int v[4]; int inc[4]; const void *buf[4]; int shift, step; };
 struct floor4 { unsigned int bx, by; int bxinc, byinc; const void *buf, *pal; int xshift, yup, yshift; };
