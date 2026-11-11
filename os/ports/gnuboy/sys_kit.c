@@ -27,6 +27,8 @@
 #include "pcm.h"
 #include "rc.h"
 #include "sys.h"
+#include "rtc.h"
+#include <time.h>
 
 #include "kit.h"
 
@@ -48,6 +50,42 @@ int __wrap_loader_init(char *s)
         exit(1);
     }
     return r;
+}
+
+/* The cartridge clock (.rtc) caught up with the time it was off in one step: gnuboy's
+ * own rtc_load_internal ticked it once per 1/60 s of it, in an int (a save from 2015,
+ * when the phone's clock was not set: eleven years of ticks, the app at 99% on
+ * "Loading..." for ever). The link wraps rtc_load_internal (gnuboy.mk). */
+void __wrap_rtc_load_internal(FILE *f)
+{
+    long saved = 0;
+    int64_t ticks;
+
+    if (fscanf(f, "%d %d %d %d %d %d %d\n%ld\n", &rtc.carry, &rtc.stop, &rtc.d, &rtc.h, &rtc.m,
+               &rtc.s, &rtc.t, &saved) < 7)
+        return;
+    rtc.t %= 60;
+    rtc.s %= 60;
+    rtc.m %= 60;
+    rtc.h %= 24;
+    rtc.d %= 365;
+    rtc.stop &= 1;
+    rtc.carry &= 1;
+    if (!saved || rtc.stop || time(0) <= saved)
+        return;
+    ticks = rtc.t + 60 * (rtc.s + 60 * (rtc.m + 60 * (rtc.h + 24 * (int64_t)rtc.d))) +
+            ((int64_t)time(0) - saved) * 60;
+    rtc.t = (int)(ticks % 60);
+    ticks /= 60;
+    rtc.s = (int)(ticks % 60);
+    ticks /= 60;
+    rtc.m = (int)(ticks % 60);
+    ticks /= 60;
+    rtc.h = (int)(ticks % 24);
+    ticks /= 24;
+    if (ticks >= 365)                   /* the day counter ran over, as rtc_tick has it */
+        rtc.carry = 1;
+    rtc.d = (int)(ticks % 365);
 }
 
 int kit_main(int argc, char **argv)

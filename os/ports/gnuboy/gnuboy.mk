@@ -50,7 +50,7 @@ $(GNUBOY_OUT)/port/gnuboy_os.o: $(GNUBOY_PORT)/gnuboy_os.c $(KIT_DIR)/kit_app.h 
 	$(CC) $(KIT_OS_CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/ports/gnuboy.elf: $(GNUBOY_OBJS) sdk/app.ld
-	$(CC) $(KIT_LDFLAGS) -Wl,--wrap=loader_init -Wl,-Map,$(@:.elf=.map) $(GNUBOY_OBJS) $(KIT_LIBS) -o $@
+	$(CC) $(KIT_LDFLAGS) -Wl,--wrap=loader_init -Wl,--wrap=rtc_load_internal -Wl,-Map,$(@:.elf=.map) $(GNUBOY_OBJS) $(KIT_LIBS) -o $@
 
 $(BUILD)/ports/gnuboy.app: $(BUILD)/ports/gnuboy.elf sdk/mkapp.py
 	$(PYTHON) sdk/mkapp.py $< $@
