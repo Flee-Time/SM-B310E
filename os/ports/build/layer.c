@@ -24,8 +24,15 @@ void setvlinebpl(int dabpl);         /* (a.h, the engine's own) */
 unsigned kit_io_ms(void);               /* (kit_sys.c) */
 int app_main(int argc, char const * const argv[]);     /* (the game's) */
 
+/* The frame the engine draws: 320 x 200 (its own size), or the game's BUILD_WIDTH x
+ * BUILD_HEIGHT (blood.mk: the LCD's 160 x 100, drawn 1:1, a quarter of the pixels) */
+#ifdef BUILD_WIDTH
+#define WIDTH BUILD_WIDTH
+#define HEIGHT BUILD_HEIGHT
+#else
 #define WIDTH 320
 #define HEIGHT 200
+#endif
 
 /* ---- the game ------------------------------------------------------------------------ */
 int kit_main(int argc, char **argv)

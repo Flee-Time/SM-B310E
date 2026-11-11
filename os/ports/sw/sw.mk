@@ -19,4 +19,6 @@ sw_PORT := ports/sw
 sw_C := sw_game
 sw_APP := sw
 
+# the LCD's 160 x 100, drawn 1:1 (layer.c)
+sw_DEFS := -DBUILD_WIDTH=160 -DBUILD_HEIGHT=100
 $(eval $(call build_game,sw))

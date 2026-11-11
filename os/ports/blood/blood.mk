@@ -24,7 +24,7 @@ blood_CPP := blood_game
 blood_APP := blood
 # fpdoom's switches for its adaptation (fpbuild/Makefile): no network, no float, the
 # Amiga port's lighter ways, no movies. Upstream's char is unsigned (NBlood, fpdoom)
-blood_DEFS := -include ports/blood/blood_int.h -Iports/blood -funsigned-char -DGAME_BLOOD -DEMBEDDED=1 -DNO_SOUND=0 -DNO_MOUSE=1 -DNO_NET=1 \
+blood_DEFS := -DBUILD_WIDTH=160 -DBUILD_HEIGHT=100 -include ports/blood/blood_int.h -Iports/blood -funsigned-char -DGAME_BLOOD -DEMBEDDED=1 -DNO_SOUND=0 -DNO_MOUSE=1 -DNO_NET=1 \
 	-DNO_FLOAT=1 -DNETCODE_DISABLE -DSMACKER_DISABLE -D__AMIGA__ -DCXX_SUPPORT
 blood_CXXDEFS := -Wno-char-subscripts -Wno-missing-braces
 

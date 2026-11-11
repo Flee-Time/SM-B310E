@@ -15,4 +15,6 @@ duke_PORT := ports/duke
 duke_C := duke_game
 duke_APP := duke3d
 
+# the LCD's 160 x 100, drawn 1:1 (layer.c)
+duke_DEFS := -DBUILD_WIDTH=160 -DBUILD_HEIGHT=100
 $(eval $(call build_game,duke))
