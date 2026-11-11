@@ -217,26 +217,32 @@ static const signed char pad_of[128] = {
     [KIT_0] = RETRO_DEVICE_ID_JOYPAD_SELECT + 1,
 };
 static uint8_t held[16];                /* how many keys hold each button */
+static uint16_t tapped;                 /* buttons pressed since the last poll */
 
+/* A key down and up again between two polls (a slow frame takes 150 ms) still
+ * presses its button for this frame: else the two cancel and the tap is lost */
 static void input_poll(void)
 {
     int code;
     bool down;
 
+    tapped = 0;
     while (kit_key(&code, &down))
         if ((unsigned)code < 128 && pad_of[code]) {
             uint8_t *n = &held[pad_of[code] - 1];
 
-            if (down)
+            if (down) {
                 (*n)++;
-            else if (*n)
+                tapped |= 1u << (pad_of[code] - 1);
+            } else if (*n)
                 (*n)--;
         }
 }
 
 static int16_t input_state(unsigned port, unsigned device, unsigned index, unsigned id)
 {
-    return port == 0 && device == RETRO_DEVICE_JOYPAD && id < 16 && held[id];
+    return port == 0 && device == RETRO_DEVICE_JOYPAD && id < 16 &&
+           (held[id] || (tapped >> id & 1));
 }
 
 /* ---- the frame ------------------------------------------------------------------------- */
