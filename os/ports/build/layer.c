@@ -24,8 +24,10 @@ void setvlinebpl(int dabpl);         /* (a.h, the engine's own) */
 unsigned kit_io_ms(void);               /* (kit_sys.c) */
 int app_main(int argc, char const * const argv[]);     /* (the game's) */
 
-/* The frame the engine draws: 320 x 200 (its own size), or the game's BUILD_WIDTH x
- * BUILD_HEIGHT (blood.mk: the LCD's 160 x 100, drawn 1:1, a quarter of the pixels) */
+/* The frame the engine draws: 320 x 200 (its own size), or a game's BUILD_WIDTH x
+ * BUILD_HEIGHT (-D in its .mk). 160 x 100, the LCD's, drawn 1:1, is a quarter of the
+ * pixels (on the phone 2026-11-11: Blood 38.7 -> 61.6 fps): the user keeps 320 x 200
+ * unless a game cannot run without it (a lower resolution "you can feel too much") */
 #ifdef BUILD_WIDTH
 #define WIDTH BUILD_WIDTH
 #define HEIGHT BUILD_HEIGHT
