@@ -264,19 +264,36 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * camp before the RACH is not enough once we have transmitted. Dedicated
      * mode (2) makes the DSP decode the SDCCH timeslot instead of half-camping
      * on the BCCH - it is what gets the exchange past the UA to authentication. */
+    /* Fresh SCH sync right before entering dedicated mode. The DSP's dedicated RX
+     * window reuses the cell timing from the LAST SCH SYNC, which is now stale: since
+     * cell-find synced, we camped, RACHed and waited for the grant (seconds). A stale
+     * / drifted sync makes the dedicated burst window sample wrong - the cause of the
+     * bimodal 73%/10% SDCCH decode (RE 2026-11-11: a sync-freshness / AFC-lock race at
+     * establish, NOT a missing RX TA). Re-sync (prime the AGC first, as cell-select
+     * does) so the window locks fresh. The grant's SDCCH subchannel is a fixed
+     * 51-multiframe position, so the refreshed fn_offset keeps the schedule aligned. */
+    /* NO fresh SCH re-sync here: HW-tested 2026-11-12, a re-sync before establish made
+     * the decode WORSE (24/24 good-signal runs stuck at dl~5/81, est=0) - l1_cell_sync
+     * retunes the DSP to tn0 for FCCH/SCH, which disturbs the tn1 dedicated lock, the
+     * same failure as the deleted FCCH-interleave but one-shot. Enter dedicated mode
+     * straight from the camp's established tracking. */
     l1_track_mode = 2;
-    /* ROOT CAUSE of the decode drift (RE 2026-11-10): decode is good for ~1s after
-     * the camp then falls to ~0, in BOTH mode 2 and mode 0 (tested, identical). It is
-     * not the mode - it is that the dedicated scheduler reads ONLY the SDCCH timeslot
-     * (tn1) and never the BCCH FCCH (tn0) again, so the DSP's AFC has no reference and
-     * free-runs. The grant is on the SAME carrier as the BCCH (arfcn 998, tn1, no hop),
-     * so the fix is to interleave FCCH reads on tn0 at the FCCH frames (fn%51 in
-     * {0,10,20,30,40}) during the dedicated phase to re-lock the AFC - what stock's
-     * state machine does internally. l1_fcch_post touches frame_number directly, so
-     * the scheduler interleave must keep the per-frame accounting exact. TODO. */
+    /* Enter dedicated tracked mode ONCE (command 3, mode 2). CORRECTED model (RE
+     * 2026-11-11, ARM-DSP session, supersedes the 2026-11-10 "AFC free-runs, add
+     * FCCH-interleave" note): command 3 puts the DSP in the tracked state (flag DSP
+     * 0xff72 bit 3), after which EVERY received dedicated burst steers the synth
+     * internally - the DSP auto-tracks AFC off the SDCCH/SACCH bursts with NO FCCH
+     * tone and NO per-frame re-command. The old FCCH-interleave (retuning tn0<->tn1)
+     * was THE bug: it pulled the DSP off the tracked tn1 (HW: deleting it jumped the
+     * decode 10%->73%). But the loop still needs re-positioning through the phase (it
+     * coasts ~5 blocks then loses lock on the sparse SDCCH + our TX), so command 3 is
+     * re-posted in the loop below - which is SAFE (RE 2026-11-12: command 3 does not
+     * reset the tracked flag; it only re-selects cell/channel/gain). */
     l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
     last_track = kernel_ticks();
-    /* apply the grant's timing advance so the uplink lands in the BTS window */
+    /* Apply the grant's timing advance. NOTE: this sets the TX TA (TXTA_SHARE); the
+     * RX burst window TA (stock pushes it via the RF shadow at command 3) may also be
+     * needed if per-burst equalizer failures persist after removing the re-track. */
     l1_tx_ta_set(ch.ta);
     klog("lu: retrack + TA %u", ch.ta);
     if (reg_begin(r, ul) < 0)
@@ -302,10 +319,12 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * header. Disarmed after the loop (sacch is on this stack frame). */
     build_sacch(sacch, c->ms_txpwr_max_cch, ch.ta, c->rxlev);
     (void)sacch;
-    /* DIAGNOSTIC: SACCH arming disabled. Its block posts ahead of the SABM and the
-     * DSP would not drain it (txout froze at 1), jamming the queue head and killing
-     * all later uplink. Test whether, without it, txout advances and TX sustains to
-     * auth/cipher (as the pre-SACCH build reached this morning). */
+    /* SACCH left DISARMED. HW-tested 2026-11-11: arming continuous SACCH made the
+     * dedicated exchange denser (sa=4, no queue jam - the l1cell.c scheduler rework
+     * fixed the old ahead-of-SABM freeze) BUT the extra PA keying worsened our AFC
+     * drift and the downlink decode collapsed (dl ~8/81, stalled before auth) - our
+     * radio cannot sustain stock's density without stock's continuous AFC/equaliser.
+     * Re-arm only once the downlink decode is robust under the added uplink. */
     /* l1_sacch_set(sacch); */
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
@@ -317,14 +336,14 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
 
-        /* Keep the AFC locked to the cell through the dedicated phase. A single
-         * command-3 track corrects the synth once; it then free-runs and the
-         * SDCCH CRC drifts within a few blocks (seen as good-then-bad downlink
-         * even with no uplink in between), so re-assert it on a timer - and
-         * always right before a call that will transmit, so the uplink burst
-         * leaves on the cell's exact frequency (an off-frequency burst is what
-         * the BTS silently drops, leaving a clean LU REQUEST / AUTHENTICATION
-         * RESPONSE that the network never acts on). */
+        /* Re-track (re-post command 3) through the dedicated phase to re-position the
+         * synth. CORRECTED (RE 2026-11-12, ARM-DSP session, verified in DSP 0x9ab4):
+         * command 3 only re-selects cell/channel/gain - it does NOT reset the tracked
+         * flag (0xff72 bit 3) or the timing - so re-tracking is SAFE and NEEDED. The
+         * DSP's AFC loop coasts ~5 blocks on the camp lock then loses lock, because the
+         * SDCCH gives only 4 bursts/235ms AND our SABM TX keys the PA (pulls the synth);
+         * bad post-TX bursts can't re-measure frequency -> collapse. Re-tracking re-pre-
+         * positions the synth so the next RX bursts decode and the loop re-measures. */
         if (have_ul || kernel_ticks() - last_track >= LU_RETRACK_MS) {
             l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
             last_track = kernel_ticks();
@@ -335,9 +354,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             last_ul = kernel_ticks();
             if (!p.established)
                 p.sabm_sent++;
-            /* An uplink block keys the PA, which pulls the synth off the cell
-             * hardest, and the network's reply (UA, then AUTHENTICATION REQUEST,
-             * then ACCEPT) lands right after - re-lock the AFC before reading it. */
+            /* Re-track right after the uplink block: the PA keying pulled the synth and
+             * the network's reply (UA / AUTH REQUEST / ACCEPT) lands right after - re-
+             * position the synth so those RX bursts decode and the AFC loop re-measures.
+             * (RE 2026-11-12: command 3 does not reset tracking, so this is correct.) */
             l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
             last_track = kernel_ticks();
         }
@@ -402,35 +422,42 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                  * is commanded A5/3 again. Abort cleanly instead - send nothing, let
                  * the channel release - so the VLR is not fed a bogus A5/3 completion. */
                 if (r->ciph_sc && r->ciph_alg != 0) {
-                    klog("lu: A5/%u unsupported (DSP is A5/1 only) - abort, no COMPLETE",
+                    /* We cannot do A5/2/3 (DSP is A5/1 only). Do NOT complete it, but
+                     * do NOT abort either: keep the link up and keep listening, to test
+                     * whether TT, on our non-response, downgrades and re-commands A5/1
+                     * (which we would then complete). If it only ever re-sends A5/3 or
+                     * releases, the "dropped/retry" idea is dead. State back to RUNNING
+                     * so a subsequent CIPHER MODE COMMAND is processed afresh. */
+                    klog("lu: A5/%u commanded (DSP A5/1 only) - not completing, listening for A5/1",
                          r->ciph_alg + 1);
-                    break;      /* stop responding; let the channel release */
-                }
-                if (r->ciph_sc)
-                    l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
-                {
-                    int cc = reg_cipher_complete(r, ul);
+                    r->state = REG_RUNNING;
+                } else {
+                    if (r->ciph_sc)
+                        l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
+                    {
+                        int cc = reg_cipher_complete(r, ul);
 
-                    klog("lu: CIPHER COMPLETE build=%d (tx_pend=%u vs=%u va=%u)", cc,
-                         r->dl.tx_pending, r->dl.vs, r->dl.va);
-                    if (cc > 0) {
-                        for (int i = 0; i < LAPDM_BLOCK; i++)
-                            sabm[i] = ul[i];
-                        have_ul = 1;
-                        sabm_tries = 0;
+                        klog("lu: CIPHER COMPLETE build=%d (tx_pend=%u vs=%u va=%u)", cc,
+                             r->dl.tx_pending, r->dl.vs, r->dl.va);
+                        if (cc > 0) {
+                            for (int i = 0; i < LAPDM_BLOCK; i++)
+                                sabm[i] = ul[i];
+                            have_ul = 1;
+                            sabm_tries = 0;
+                        }
                     }
                 }
             }
         }
-        /* Do NOT send an early CLASSMARK CHANGE. A gr-gsm sniff of TT's downlink
-         * (929.8 MHz) during a stock registration showed the network picks the cipher
-         * purely from the Classmark 1 REVISION LEVEL in the LU REQUEST (rev 2/R99+ ->
-         * A5/3, rev 1/phase-2 -> A5/1), and that NO phone (stock included) sends a
-         * CLASSMARK CHANGE on this cell. We are rev level 1 (classmark1 0x33), which
-         * should get A5/1 like the phase-2 phones; sending a CLASSMARK CHANGE is the
-         * one thing no normal MS does and is what flipped us to A5/3. So match stock:
-         * send nothing extra, let the rev-1 LU REQUEST decide. (The CLASSMARK ENQUIRY
-         * handler in gsm_reg.c still answers if the network ever asks.) */
+        /* No early CLASSMARK CHANGE: a gr-gsm capture of this cell showed NO phone
+         * (stock included) sends one, and HW-testing an A5/1-only early CLASSMARK
+         * CHANGE (2026-11-11) did not move TT off A5/3 - it is sent well before the
+         * CIPHER MODE COMMAND, with no CLASSMARK ENQUIRY from TT, and TT still commands
+         * A5/3. So advertisement is not the lever; the difference from stock is the
+         * density/reliability of our dedicated-channel exchange (stock sends many more
+         * bursts incl. continuous SACCH; ours is sparse with decode gaps). Match stock:
+         * send nothing extra here; the CLASSMARK ENQUIRY handler in gsm_reg.c still
+         * answers if TT ever asks. */
         (void)cm_sent;
         /* Hold the SDCCH link up the way the stock MS does - a capture of its
          * location update shows ~23 back-to-back uplink blocks, while going

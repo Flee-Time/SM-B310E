@@ -33,6 +33,12 @@ void reg_set_imei(gsm_reg_t *r, const uint8_t *digits, int n)
     r->imei_len = (uint8_t)n;
 }
 
+void reg_set_tmsi(gsm_reg_t *r, uint32_t tmsi)
+{
+    r->tmsi = tmsi;
+    r->use_tmsi = 1;
+}
+
 int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
 {
     uint8_t lu[LAPDM_N201];
@@ -40,8 +46,12 @@ int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
 
     if (r->state != REG_IDLE)
         return -1;
-    n = mm_encode_lu_request(lu, MM_LU_TYPE_NORMAL, 7, r->mcc, r->mnc, r->mnc3,
-                             r->lac, r->classmark1, r->imsi, r->imsi_len);
+    if (r->use_tmsi)
+        n = mm_encode_lu_request_tmsi(lu, MM_LU_TYPE_NORMAL, 7, r->mcc, r->mnc,
+                                      r->mnc3, r->lac, r->classmark1, r->tmsi);
+    else
+        n = mm_encode_lu_request(lu, MM_LU_TYPE_NORMAL, 7, r->mcc, r->mnc, r->mnc3,
+                                 r->lac, r->classmark1, r->imsi, r->imsi_len);
     if (n < 0 || n > LAPDM_N201)
         return -1;
     lapdm_init(&r->dl, 0);

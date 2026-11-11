@@ -34,6 +34,8 @@ typedef struct {
     uint16_t mcc, mnc, lac;
     uint8_t mnc3;
     uint8_t classmark1;
+    uint32_t tmsi;          /* stored TMSI (EF_LOCI); presented when use_tmsi */
+    uint8_t use_tmsi;       /* 1 = identify the LU REQUEST by TMSI, not IMSI */
     lapdm_dl_t dl;
     uint8_t rand[16];       /* from AUTHENTICATION REQUEST, for the SIM */
     uint8_t kc[8];          /* ciphering key from the SIM, for A5 */
@@ -49,6 +51,10 @@ void reg_init(gsm_reg_t *r, const uint8_t *imsi, int imsi_len,
  * network asks for identity type IMEI or IMEISV. n = 0 clears it (then we fall
  * back to the IMSI, the old behaviour). Call after reg_init. */
 void reg_set_imei(gsm_reg_t *r, const uint8_t *digits, int n);
+/* Identify the LU REQUEST by a stored TMSI (from EF_LOCI) instead of the IMSI, so
+ * the network sees a known subscriber (stock's path). Call after reg_init, only
+ * when the stored TMSI is valid and its LAI matches the serving cell. */
+void reg_set_tmsi(gsm_reg_t *r, uint32_t tmsi);
 /* Build the SABM carrying LOCATION UPDATING REQUEST. Returns a frame length. */
 int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK]);
 /* Feed one received SDCCH frame; may write a reply (out, out_valid). Returns the

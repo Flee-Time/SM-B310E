@@ -173,6 +173,56 @@ static int read_imsi(void)
     return imsi_n >= 6 ? 0 : -1;
 }
 
+/* The stored TMSI + its LAI, from EF_LOCI. A TMSI is a temporary identifier (not
+ * SIM-secret like the IMSI/Ki), so it is safe to log. loci_valid is set only when
+ * the stored location-update status is "updated" and the TMSI is not all-ones. */
+static uint32_t loci_tmsi;
+static uint16_t loci_mcc, loci_mnc, loci_lac;
+static int loci_mnc3, loci_valid;
+
+/* Read EF_LOCI (TS 51.011 10.3.19, 11 octets: TMSI[4] | LAI[5] | TMSI-time | LU
+ * status). Presenting this TMSI in the LU REQUEST makes us a known subscriber (as
+ * stock does after it has registered) rather than a cold IMSI attach. Call after
+ * read_imsi() (slot already active). Returns 0 on a clean read (check loci_valid). */
+static int read_loci(void)
+{
+    static const uint8_t sel[5] = { 0xa0, 0xa4, 0x00, 0x00, 0x02 };
+    static const uint8_t mf[2] = { 0x3f, 0x00 }, df_gsm[2] = { 0x7f, 0x20 },
+        ef_loci[2] = { 0x6f, 0x7e };
+    static const uint8_t read11[5] = { 0xa0, 0xb0, 0x00, 0x00, 0x0b };
+    uint8_t ef[11];
+    int sw;
+
+    loci_valid = 0;
+    sw = sim_apdu(SIM_SLOT, sel, mf, NULL, NULL);
+    if (sw > 0)
+        sw = sim_apdu(SIM_SLOT, sel, df_gsm, NULL, NULL);
+    if (sw > 0)
+        sw = sim_apdu(SIM_SLOT, sel, ef_loci, NULL, NULL);
+    if (sw > 0)
+        sw = sim_apdu(SIM_SLOT, read11, NULL, ef, NULL);
+    if (sw != 0x9000)
+        return -1;
+    loci_tmsi = (uint32_t)ef[0] << 24 | (uint32_t)ef[1] << 16 |
+                (uint32_t)ef[2] << 8 | ef[3];
+    {   /* LAI: MCC/MNC packed (10.5.1.3) + LAC */
+        int mcc1 = ef[4] & 0xf, mcc2 = ef[4] >> 4, mcc3 = ef[5] & 0xf;
+        int mnc3d = ef[5] >> 4, mnc1 = ef[6] & 0xf, mnc2 = ef[6] >> 4;
+
+        loci_mcc = (uint16_t)(mcc1 * 100 + mcc2 * 10 + mcc3);
+        if (mnc3d == 0xf) {
+            loci_mnc = (uint16_t)(mnc1 * 10 + mnc2);
+            loci_mnc3 = 0;
+        } else {
+            loci_mnc = (uint16_t)(mnc1 * 100 + mnc2 * 10 + mnc3d);
+            loci_mnc3 = 1;
+        }
+        loci_lac = (uint16_t)(ef[7] << 8 | ef[8]);
+    }
+    loci_valid = (ef[10] & 0x07) == 0 && loci_tmsi != 0xffffffffu;  /* status "updated" */
+    return 0;
+}
+
 /* ---- 2. scan GSM900 for the strongest BCCH candidates -------------------- */
 
 typedef struct {
@@ -502,6 +552,9 @@ static void worker(void *arg)
      * Turkey/MCC 286); only the operator code is kept, never the full IMSI. */
     home_mcc = (uint16_t)(imsi_digits[0] * 100 + imsi_digits[1] * 10 + imsi_digits[2]);
     home_mnc = (uint16_t)(imsi_digits[3] * 10 + imsi_digits[4]);
+    /* Read the stored TMSI (EF_LOCI) while the slot is active - used below to attach
+     * as a known subscriber rather than a cold IMSI (see reg_set_tmsi). */
+    read_loci();
     reg_ui.home_mcc = home_mcc;
     reg_ui.home_mnc = home_mnc;
     load_home_cell();                    /* before the DSP: no card I/O while it runs */
@@ -637,6 +690,23 @@ static void worker(void *arg)
     /* a synced home cell (P-GSM or E-GSM): build the LU request and run it */
     reg_init(&reg, imsi_digits, imsi_n, cell.mcc, cell.mnc, cell.mnc_digits == 3,
              cell.lac, CLASSMARK1);
+    /* Identify by the stored TMSI when it is valid AND was assigned in this LAI (so
+     * the network's VLR has our context here): a known subscriber, which is how
+     * stock presents - the network then does not challenge identity and reuses the
+     * cached capability (A5/1), instead of the cold-IMSI path that draws A5/3. The
+     * LU LAI is the serving cell's, which equals the stored LAI in the match case.
+     * TMSI is a temporary id - safe to log; the IMSI is not. */
+    if (loci_valid && loci_mcc == cell.mcc && loci_mnc == cell.mnc &&
+        loci_lac == cell.lac) {
+        reg_set_tmsi(&reg, loci_tmsi);
+        klog("register: TMSI %08lx (LAI %u-%u/%u matches) - attaching as known sub",
+             (unsigned long)loci_tmsi, loci_mcc, loci_mnc, loci_lac);
+    } else if (loci_valid) {
+        klog("register: stored TMSI LAI %u-%u/%u != cell %u-%u/%u - IMSI attach",
+             loci_mcc, loci_mnc, loci_lac, cell.mcc, cell.mnc, cell.lac);
+    } else {
+        klog("register: no valid stored TMSI - IMSI attach");
+    }
     /* Present an IMEI on IDENTITY REQUEST (an EIR check can gate the LU). Override
      * from IMEI_FILE per SIM slot, else the phone's own NV IMEI. */
     {

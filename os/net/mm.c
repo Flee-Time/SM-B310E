@@ -69,6 +69,24 @@ int mm_encode_lu_request(uint8_t *out, int lu_type, int cksn,
     return o;
 }
 
+int mm_encode_lu_request_tmsi(uint8_t *out, int lu_type, int cksn,
+                              uint16_t mcc, uint16_t mnc, int mnc3, uint16_t lac,
+                              uint8_t classmark1, uint32_t tmsi)
+{
+    int o = 0;
+
+    out[o++] = MM_PD;
+    out[o++] = MM_LU_REQUEST;
+    out[o++] = (uint8_t)((cksn & 7) << 4 | (lu_type & 0x0f));
+    mm_encode_lai(out + o, mcc, mnc, mnc3, lac);
+    o += 5;
+    out[o++] = classmark1;
+    out[o++] = 5;                               /* mobile identity: length (TMSI = 5 octets) */
+    mm_encode_mi_tmsi(out + o, tmsi);           /* 0xf4 + 4 TMSI bytes */
+    o += 5;
+    return o;
+}
+
 int mm_msg_type(const uint8_t *l3, int len)
 {
     if (len < 2 || (l3[0] & 0x0f) != MM_PD)

@@ -663,20 +663,15 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                     dm_sacch_posted = 0;
                     dm_sacch_mf = (uint32_t)-1;
                 }
-            } else if (m == 0 || m == 10 || m == 20 || m == 30 || m == 40) {
-                /* FCCH frame on this carrier (tn0): read it to re-lock the DSP AFC off
-                 * the BCCH frequency-correction tone. The grant is on the BCCH carrier
-                 * (same ARFCN, tn1, no hop), so the SDCCH then decodes on the corrected
-                 * synth. Without this the AFC free-runs on the dedicated timeslot and
-                 * the SDCCH CRC drifts to ~0 within a second (HW: good-then-bad decode).
-                 * window=1 advances frame_number by one like a burst read, so the TDMA
-                 * schedule stays aligned; on EFULL fall back to an idle fill. */
-                rc = l1_fcch_post(c->index, c->gain, 1, c->slot);
-                if (rc == DSP_OK)
-                    st->fcch_reads++;
-                else if (rc == DSP_EFULL)
-                    rc = l1_idle_post(1);
             } else {
+                /* TEST 2026-11-11: FCCH-interleave DISABLED. The tn0 CCCH decodes 100%
+                 * (303/0) at this signal, so the carrier AFC is ALREADY locked - the
+                 * FCCH re-reads (l1_fcch_post on tn0) were not fixing an AFC drift, and
+                 * the tn0<->tn1 retune they force every few frames is the suspected
+                 * cause of the tn1 SDCCH CRC failures (bad blocks tagged hdr0=9 with
+                 * uplink idle). Idle-fill every non-SDCCH frame instead and keep the DSP
+                 * parked on the dedicated tn1 timeslot. If the SDCCH decode jumps, the
+                 * interleave was the bug; if it collapses, the AFC theory was right. */
                 rc = l1_idle_post(1);
             }
             if (rc != DSP_OK)

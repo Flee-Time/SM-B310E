@@ -52,6 +52,13 @@ void mm_encode_lai(uint8_t out[5], uint16_t mcc, uint16_t mnc, int mnc3, uint16_
 int mm_encode_lu_request(uint8_t *out, int lu_type, int cksn,
                          uint16_t mcc, uint16_t mnc, int mnc3, uint16_t lac,
                          uint8_t classmark1, const uint8_t *imsi_digits, int n);
+/* LOCATION UPDATING REQUEST identified by a 32-bit TMSI (what a known subscriber
+ * sends: the network has our context, so it does not challenge identity and uses
+ * the cached capability). mcc/mnc/lac is the OLD LAI where the TMSI is valid (from
+ * EF_LOCI). Returns length. */
+int mm_encode_lu_request_tmsi(uint8_t *out, int lu_type, int cksn,
+                              uint16_t mcc, uint16_t mnc, int mnc3, uint16_t lac,
+                              uint8_t classmark1, uint32_t tmsi);
 
 /* ---- parsing ---- */
 /* MM message type of an L3 message (its PD must be MM), or -1. */
