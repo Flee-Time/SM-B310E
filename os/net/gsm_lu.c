@@ -422,19 +422,16 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 }
             }
         }
-        /* Once the link is up, the first thing we send is the early CLASSMARK
-         * CHANGE (A5/1 only) so the network ciphers with A5/1 at CIPHERING MODE
-         * COMMAND - the stock sends it from NV (support_early_classmark); without
-         * it TT asks for A5/3, which our DSP path does not do. Preempts the SABM
-         * retransmit below, which would otherwise keep have_ul set and starve it. */
-        if (!have_ul && p.established && !cm_sent && reg_classmark_change(r, ul) > 0) {
-            for (int i = 0; i < LAPDM_BLOCK; i++)
-                sabm[i] = ul[i];
-            have_ul = 1;
-            cm_sent = 1;
-            sabm_tries = 0;
-            klog("lu: early CLASSMARK CHANGE (A5/1 only)");
-        }
+        /* Do NOT send an early CLASSMARK CHANGE. A gr-gsm sniff of TT's downlink
+         * (929.8 MHz) during a stock registration showed the network picks the cipher
+         * purely from the Classmark 1 REVISION LEVEL in the LU REQUEST (rev 2/R99+ ->
+         * A5/3, rev 1/phase-2 -> A5/1), and that NO phone (stock included) sends a
+         * CLASSMARK CHANGE on this cell. We are rev level 1 (classmark1 0x33), which
+         * should get A5/1 like the phase-2 phones; sending a CLASSMARK CHANGE is the
+         * one thing no normal MS does and is what flipped us to A5/3. So match stock:
+         * send nothing extra, let the rev-1 LU REQUEST decide. (The CLASSMARK ENQUIRY
+         * handler in gsm_reg.c still answers if the network ever asks.) */
+        (void)cm_sent;
         /* Hold the SDCCH link up the way the stock MS does - a capture of its
          * location update shows ~23 back-to-back uplink blocks, while going
          * receive-only between steps lets the link stall before auth/cipher/accept
