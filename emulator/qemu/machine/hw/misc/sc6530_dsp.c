@@ -529,6 +529,50 @@ static void sc6530_dsp_apb_write(void *opaque, hwaddr offset,
         }
         if (value & SC6530_DSP_IRQ_MCU_SET) {
             sc6530_dsp_emit(s, SC6530_DSP_EV_IRQ_ARM, value);
+            /* L1-command sniff (B310E RE): the ARM just rang the command-ring
+             * doorbell. Log every newly-posted command (ring at sharemem +0x33c,
+             * in-index +0x38c, out-index +0x38e, 8 slots x 10 bytes) and then
+             * advance CMD_OUT = CMD_IN so the stock L1 keeps streaming instead of
+             * blocking on the first one. Gated on SC6530_DSP_SNIFF=1 so normal
+             * runs are unchanged. */
+            if (s->sharemem_ptr && getenv("SC6530_DSP_SNIFF")) {
+                uint8_t *smp = s->sharemem_ptr;
+                uint16_t in  = lduw_le_p(smp + 0x38c);
+                uint16_t out = lduw_le_p(smp + 0x38e);
+                uint32_t pc = sc6530_dsp_guest_pc();
+                int guard = 0, posted = 0;
+                while (out != in && in < 8 && out < 8 && guard++ < 8) {
+                    const uint8_t *slot;
+                    uint16_t rin, rnext;
+                    out = (out + 1) & 7;
+                    slot = smp + 0x33c + out * 10;
+                    qemu_log("sc6530_dsp: L1CMD slot=%u id=%u "
+                             "{%04x %04x %04x %04x %04x} pc=0x%08x\n",
+                             out, lduw_le_p(slot),
+                             lduw_le_p(slot + 0), lduw_le_p(slot + 2),
+                             lduw_le_p(slot + 4), lduw_le_p(slot + 6),
+                             lduw_le_p(slot + 8), pc);
+                    /* ack the command on the response ring (+0x390, in +0x3e0,
+                     * out +0x3e2, 8x10): a record-ack word0=0x000f so the stock's
+                     * SharedMemProc event fires and it sends the next record. */
+                    rin = lduw_le_p(smp + 0x3e0);
+                    rnext = (rin + 1) & 7;
+                    stw_le_p(smp + 0x390 + rnext * 10 + 0, 0x000f); /* RESP_RECORD_ACK */
+                    stw_le_p(smp + 0x390 + rnext * 10 + 2, lduw_le_p(slot)); /* echo id */
+                    stw_le_p(smp + 0x390 + rnext * 10 + 4, 0);
+                    stw_le_p(smp + 0x390 + rnext * 10 + 6, 0);
+                    stw_le_p(smp + 0x390 + rnext * 10 + 8, 0);
+                    stw_le_p(smp + 0x3e0, rnext);
+                    posted++;
+                }
+                if (in < 8) {
+                    stw_le_p(smp + 0x38e, in); /* consume so the stock proceeds */
+                }
+                if (posted) {               /* raise DSP_IRQ so the ARM ISR drains it */
+                    s->dsp_irq_pending = true;
+                    qemu_set_irq(s->irq, 1);
+                }
+            }
         }
         break;
     case SC6530_DSP_REG_RST0_SET:

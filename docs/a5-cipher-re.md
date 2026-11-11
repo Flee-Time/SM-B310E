@@ -99,3 +99,22 @@ byte order / packing of Kc in share.
   block after enabling must already carry the cipher mode bits.
 - Risk: a wrong key/mode/count corrupts every ciphered burst — verify on-air at the
   cleared TT registration, watching for the ACCEPT after CIPHER COMPLETE.
+
+## DEFINITIVE: no A5/3 (KASUMI) engine exists — only A5/1 (2026-11-11)
+Searched for a KASUMI/A5/3 engine in the DSP blob and the whole firmware (headless
+Ghidra + direct binary search of the TeakLite image). **A5/3 is genuinely absent**,
+not merely un-triggered:
+1. **Engine (dis 0x8640):** `0xfbf4 = ([0xfbf2]==1) ? 1 : 0` — one comparison against
+   algorithm value 1, no `==2`/`==3` branch. Only A5/1 can be enabled; A5/2 and A5/3
+   fall through to off.
+2. **No KASUMI S-boxes** S7 (128) / S9 (512×9-bit) in ANY of 60 firmware images
+   (DSP blobs, flash dumps, ARM `dump_firmware.bin`, `user_raw`), any layout/endian.
+3. **No KASUMI key-schedule constants** `C1..C8 = 0123 4567 89AB CDEF FEDC BA98 7654
+   3210`: not contiguous anywhere, and `4567/89AB/BA98/3210` do not occur at all in
+   the decoded blob.
+
+**Implication:** the stock phone can only do A5/1, so TT must accept A5/1 for this
+handset — forcing A5/1 via the MS classmark (A5/2=A5/3=0, done in rr_encode_classmark_change)
+is the correct and sufficient path. A CIPHER MODE COMMAND asking for A5/3 (`w5 e000`)
+means we advertised A5/3; the fix is the classmark, never the DSP. There is no A5/3
+engine to enable, so stop treating "TT requires A5/3" as a possible hard wall.
