@@ -49,7 +49,7 @@ static const icon_t icon = { {
 
 const kit_game_t kit_game = {
     .log_name = "quake",
-    .stack = 128 * 1024,                /* a level's first frames took more than 64 */
+    .stack = 80 * 1024,                 /* a level: 61 KB at most (r_main.c no longer 64 more) */
     .arena_reserve = 128 * 1024,
     .arena_min = 1024 * 1024,
     .view = { KIT_ROT_90, KIT_FILL, 1, KIT_KEYS_TURNED },

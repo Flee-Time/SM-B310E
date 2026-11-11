@@ -20,6 +20,10 @@ the software renderer, copied to the build with these changes (each checked):
     surface cache. No underwater warping (it draws to the screen).
  8. Room for 160 models, not 256 (a map's 131 submodels at most, and its precaches);
     1500 spans (the view is half as tall); a 32 KB zone.
+11. A model of 20 frames or more keeps every other pose only: an odd frame is
+    the one before it (Quake animates at 10 a second; a monster's poses were most
+    of its memory, and e1m3's monsters did not fit in the cache together: they
+    were read from the card again and again, 2 to 6 frames a second).
 10. A model's skins are kept at half their size (every other texel of every other
     row; its s and t halved with them), and its file is let go before the model is
     copied to the cache (id's had file, model and copy at once: e1m3 then ran out
@@ -155,6 +159,17 @@ CHANGES = {
         ('\tCache_Alloc (&mod->cache, total, loadname);\n',
          '\tHunk_TempFree (buffer);\t// (B310E) the file is read: away first, if it is the temp hunk (see 10)\n'
          '\tCache_Alloc (&mod->cache, total, loadname);\n'),
+        ('\t\tif (frametype == ALIAS_SINGLE)\n\t\t{\n\t\t\tpframetype = (daliasframetype_t *)\n',
+         '\t\tif (frametype == ALIAS_SINGLE && (i & 1) && numframes >= 20 &&\n'
+         '\t\t\tpheader->frames[i - 1].type == ALIAS_SINGLE)\n'
+         '\t\t{\t// (B310E) every other pose is the one before\'s (see 11)\n'
+         '\t\t\tdaliasframe_t\t*pdaliasframe = (daliasframe_t *)(pframetype + 1);\n'
+         '\n'
+         '\t\t\tpheader->frames[i] = pheader->frames[i - 1];\n'
+         '\t\t\tmemcpy (pheader->frames[i].name, pdaliasframe->name, sizeof(pheader->frames[i].name));\n'
+         '\t\t\tpframetype = (daliasframetype_t *)((trivertx_t *)(pdaliasframe + 1) + pmodel->numverts);\n'
+         '\t\t}\n'
+         '\t\telse if (frametype == ALIAS_SINGLE)\n\t\t{\n\t\t\tpframetype = (daliasframetype_t *)\n'),
     ],
     'd_init.c': [
         ('\t\td_viewbuffer = (void *)(byte *)vid.buffer;\n',
@@ -173,6 +188,8 @@ CHANGES = {
     'r_main.c': [
         ('\tedge_t\tledges[NUMSTACKEDGES +\n', '\tstatic edge_t\tledges[NUMSTACKEDGES +\t// (B310E) static: not 128 KB of stack\n'),
         ('\tsurf_t\tlsurfs[NUMSTACKSURFACES +\n', '\tstatic surf_t\tlsurfs[NUMSTACKSURFACES +\n'),
+        ('\tbyte\twarpbuffer[WARP_WIDTH * WARP_HEIGHT];\n',
+         '\tstatic byte\twarpbuffer[4];\t// (B310E) no warping (r_misc.c): not 64 KB of stack\n'),
     ],
     'r_edge.c': [
         ('\tbyte\tbasespans[MAXSPANS*sizeof(espan_t)+CACHE_SIZE];\n',
