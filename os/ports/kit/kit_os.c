@@ -208,17 +208,22 @@ static uint32_t frame_at, worst_ms, slow_frames, heap_low = ~0u;
  * a second every 10 s: the phone's numbers */
 /* where the phone's time went, for the log: the game's thread and the sound's, of
  * each 10 s, in the kernel's 26 MHz cycles */
+static uint32_t kit_sound_taken(void);
+
 static void cpu_report(uint32_t ms)
 {
-    static uint32_t game_last, sound_last;
+    static uint32_t game_last, sound_last, taken_last;
     uint32_t game = k.thread ? k.thread->cycles : 0, sound = kit_sound_cycles();
+    uint32_t taken = kit_sound_taken();
 
     if (ms)
-        klog("%s: of the time: game %lu%%, sound %lu%%", kit_game.log_name,
-             (unsigned long)((game - game_last) / 26000 * 100 / ms),
-             (unsigned long)((sound - sound_last) / 26000 * 100 / ms));
+        klog("%s: of the time: game %lu%%, sound %lu%%; the speaker took %lu frames a second",
+             kit_game.log_name, (unsigned long)((game - game_last) / 26000 * 100 / ms),
+             (unsigned long)((sound - sound_last) / 26000 * 100 / ms),
+             (unsigned long)((uint64_t)(taken - taken_last) * 1000 / ms));
     game_last = game;
     sound_last = sound;
+    taken_last = taken;
 }
 
 static void frame_done(void)
@@ -623,6 +628,12 @@ static void sound_main(void *arg)
         sem_wait(&snd.more, k.dark ? 500 : 20);
     }
     snd.thread = NULL;
+}
+
+/* the frames the speaker has taken (sound_fill), for the log */
+static uint32_t kit_sound_taken(void)
+{
+    return snd.on ? snd.out : 0;
 }
 
 static uint32_t kit_sound_cycles(void)

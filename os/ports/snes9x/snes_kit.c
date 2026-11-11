@@ -217,7 +217,7 @@ static uint32_t frames;
 /* Whether the core draws the next frame (prepare.py 7): not when the sound queued for
  * the speaker is below LOW (the emulation is behind: the time goes to the CPU and the
  * sound); at least every MAX_SKIP + 1st frame is drawn all the same */
-#define MAX_SKIP 4
+#define MAX_SKIP 6
 int s9x_render = 1;
 static uint32_t skipped, skipped_all;
 
@@ -231,9 +231,10 @@ static void video_refresh(const void *data, unsigned width, unsigned height, siz
 /* ---- the sound: a ring of stereo frames ------------------------------------------------ */
 #define RATE 32000                      /* (the core's is 32040: near enough) */
 #define RING 4096                       /* frames: 0.13 s */
-#define FRAME (RATE / 60)               /* what a frame makes, about */
-#define TARGET (2048 + FRAME)           /* the kit's 64 ms and a frame of ours */
-#define LOW (2048 - FRAME)              /* the kit's short of a frame */
+#define FRAME (RATE / (Settings.PAL ? 50 : 60))        /* what a frame makes, about */
+#define TARGET (2048 + 2 * FRAME)       /* the kit's 64 ms and two frames of ours: a page
+                                         * read from the card can hold a frame up */
+#define LOW (2048 - FRAME / 4)          /* on time: the kit about full */
 
 static int16_t ring[RING * 2];
 static volatile unsigned ring_in, ring_out;
@@ -242,16 +243,17 @@ static volatile bool sound_ending;
 static int16_t last_l, last_r;
 
 /* The kit's sound thread, for its next chunk. It keeps up to 64 ms ahead of the speaker
- * (kit_audio_queued), so a chunk the game has not made yet is worth waiting for (a frame
- * comes in one go of ~534): silence put in its place was a crack each time. Still
- * short after WAIT_MS, the rest fades out from the last sample, not a step to 0 */
-#define WAIT_MS 12
+ * (kit_audio_queued), so a chunk the game has not made yet is waited for while the
+ * kit still has SAFE frames for the speaker (a frame comes in one go of ~534):
+ * silence put in its place was a crack each time, and made the queue look fuller
+ * than its sound. Only then the rest fades out from the last sample, not a step to 0 */
+#define SAFE 512                        /* frames: 16 ms */
 
 static void render(int16_t *lr, unsigned n)
 {
     unsigned out = ring_out;
 
-    for (int ms = 0; ring_in - out < n && ms < WAIT_MS && !sound_ending; ms += 2)
+    while (ring_in - out < n && !sound_ending && kit_audio_queued() > SAFE)
         kit_sleep(2);
     for (unsigned i = 0; i < n; i++) {
         if (out == ring_in) {
