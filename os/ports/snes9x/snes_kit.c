@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
 
 #include "libretro.h"
 #include "snes9x.h"
@@ -153,8 +154,11 @@ static void pages_setup(void)
             if (page_of[b] >= 0)
                 page_blocks[at[page_of[b]]++] = (uint16_t)b;
     }
+    /* as many as fit, wherever there is a block for one (the memory freed after the load
+     * is in pieces), while KEEP_FREE stays free in all */
     while (nslots < (int)(sizeof(slots) / sizeof(slots[0])) &&
-           kit_heap_largest() > page_size + KEEP_FREE &&
+           (size_t)mallinfo().fordblks > page_size + KEEP_FREE &&
+           kit_heap_largest() >= page_size &&
            (slots[nslots].data = malloc(page_size)) != NULL)
         slots[nslots++].page = -1;
 }
@@ -164,6 +168,30 @@ static void pages_age(void)
     for (int i = 0; i < nslots; i++)
         if (slots[i].page >= 0)
             slot_map(&slots[i], false);
+}
+
+/* A plain cartridge's battery RAM, 128 KB from the core's Init whatever the game,
+ * cut to its own size (Super Metroid's 8 KB): the rest is room for ROM pages. Not
+ * for a chip's games, nor where Map points into it rather than through its mask */
+extern uint8 *s9x_dma_buffer;           /* (dma.c, prepare.py 9) */
+
+static void sram_trim(void)
+{
+    const uint8 *lo = Memory.SRAM, *hi = Memory.SRAM + 0x20000;
+    unsigned size = Memory.SRAMSize ? (1u << (Memory.SRAMSize + 3)) * 128 : 0;
+    uint8 *n;
+
+    if (Settings.SA1 || Settings.SuperFX || Settings.SDD1 || Settings.C4 || Settings.SRTC ||
+        Settings.BS || size >= 0x20000)
+        return;
+    for (int b = 0; b < MEMMAP_NUM_BLOCKS; b++)
+        if ((Memory.Map[b] >= lo && Memory.Map[b] < hi) ||
+            (Memory.WriteMap[b] >= lo && Memory.WriteMap[b] < hi))
+            return;
+    if (size < 0x800)
+        size = 0x800;
+    if ((n = realloc(Memory.SRAM, size)) != NULL)
+        CPU.Memory_SRAM = Memory.SRAM = n;
 }
 
 /* ---- the keys -------------------------------------------------------------------------- */
@@ -391,6 +419,11 @@ int kit_main(int argc, char **argv)
     CPU.DSPGet = (void *)S9xGetDSP;
     CPU.DSPSet = (void *)S9xSetDSP;
 #endif
+    if ((Settings.SA1 || Settings.SDD1) && !(s9x_dma_buffer = malloc(0x10000))) {
+        kit_log("snes9x: no room for the chip's 64 KB buffer");
+        return 1;
+    }
+    sram_trim();
     if (s9x_rom_paged) {
         char text[112];
 
@@ -399,8 +432,9 @@ int kit_main(int argc, char **argv)
             return 1;
         }
         pages_setup();
-        snprintf(text, sizeof(text), "snes9x: %ld KB ROM in %u KB pages, %d of them in memory",
-                 size / 1024, page_size / 1024, nslots);
+        snprintf(text, sizeof(text), "snes9x: %ld KB ROM in %u KB pages, %d of them in memory "
+                 "(%u KB free after them, the largest piece %u KB)", size / 1024, page_size / 1024, nslots,
+                 (unsigned)(mallinfo().fordblks / 1024), (unsigned)(kit_heap_largest() / 1024));
         kit_log(text);
     }
     snprintf(srm_path, sizeof(srm_path), "%s", argv[1]);

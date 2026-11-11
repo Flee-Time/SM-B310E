@@ -4,6 +4,11 @@ os/ports/sources.py snes9x2002), its core and its libretro glue, copied to the b
 with these changes (each checked). Snes9x's licence is not the GPL: nothing of it is
 in the repository, and a built snes9x.app is for the user's own phone.
 
+ 9. Memory for ROM pages: no 128 KB GFX.ZERO table (its value is worked out where
+    the mosaic's half subtraction wants it), the 64 KB S-DD1 / SA-1 buffer only for
+    those games (SA-1's was past the end of the ROM's buffer: it is the ROM's size
+    now, not 6 MB), the echo buffer 240 ms at 32 kHz, not 24000 samples. A plain
+    cartridge's 128 KB of SRAM shrinks to its own size after the load (snes_kit.c).
  8. The SPC700 is run up to the CPU when the CPU reads or writes its ports and at
     each of the line's events, not after every CPU instruction (a call each time:
     17% of the phone's time was that loop).
@@ -100,6 +105,59 @@ CHANGES = {
          '#ifdef CPU_SHUTDOWN\n   CPU.WaitCounter++;\n#endif\n\n   asm_APU_EXECUTE(1);  /* (B310E) (see 8) */\n   switch (CPU.WhichEvent)\n'),
         ('#ifdef ASM_SPC700\n      if (Settings.asmspc700)\n         asmMainLoop_spcAsm(&CPU);\n      else\n#endif\n         asmMainLoop_spcC(&CPU);\n',
          '      asmMainLoop_spcAsm(&CPU);  /* (B310E) the assembly SPC700 only: the C one\'s copy of the CPU is 390 KB */\n'),
+    ],
+    'src/gfx.h': [                             # (see 9)
+        ('#define COLOR_SUB1_2(C1, C2) \\\nGFX.ZERO [(((C1) | RGB_HI_BITS_MASKx2) - \\\n      ((C2) & RGB_REMOVE_LOW_BITS_MASK)) >> 1]\n',
+         '/* (B310E) GFX.ZERO\'s value (gfx16.c built a 128 KB table of it): each RGB565\n'
+         ' * field kept, its top bit cleared, where that bit is set; else 0 */\n'
+         'static INLINE uint16 S9xZero(uint32 x)\n'
+         '{\n'
+         '   return ((x & 0x8000) ? (x & 0x7800) : 0) | ((x & 0x0400) ? (x & 0x03e0) : 0) |\n'
+         '          ((x & 0x0010) ? (x & 0x000f) : 0);\n'
+         '}\n'
+         '#define COLOR_SUB1_2(C1, C2) \\\n'
+         'S9xZero(((((C1) | RGB_HI_BITS_MASKx2) - \\\n'
+         '      ((C2) & RGB_REMOVE_LOW_BITS_MASK)) >> 1) & 0xffff)\n'),
+    ],
+    'src/gfx16.c': [                           # (see 9)
+        ('   if (!(GFX.ZERO = (uint16_t*) malloc(sizeof(uint16_t) * 0x10000)))\n      return false;\n#endif\n',
+         '#endif\n#if 0  /* (B310E) no GFX.ZERO table: S9xZero (gfx.h) */\n'),
+        ('            GFX.ZERO [BUILD_PIXEL2(r, g, b) & ~ALPHA_BITS_MASK] = BUILD_PIXEL2(r2, g2, b2);\n         }\n      }\n   }\n\n   return (TRUE);\n}\n',
+         '            GFX.ZERO [BUILD_PIXEL2(r, g, b) & ~ALPHA_BITS_MASK] = BUILD_PIXEL2(r2, g2, b2);\n         }\n      }\n   }\n#endif\n\n   return (TRUE);\n}\n'),
+    ],
+    'src/dma.c': [                             # (see 9)
+        ('uint8 buffer[0x10000];\n',
+         'uint8 *s9x_dma_buffer;  /* (B310E) 64 KB, for S-DD1 and SA-1 games only (snes_kit.c) */\n'),
+        ('            SDD1_decompress(buffer, in_ptr, d->TransferBytes);\n            in_sdd1_dma = buffer;\n',
+         '            SDD1_decompress(s9x_dma_buffer, in_ptr, d->TransferBytes);\n            in_sdd1_dma = s9x_dma_buffer;\n'),
+        ('      uint8* buffer = &Memory.ROM [MAX_ROM_SIZE - 0x10000];\n',
+         '      uint8* buffer = s9x_dma_buffer;  /* (B310E) not past the ROM\'s own buffer */\n'),
+        ('         base = &Memory.ROM [MAX_ROM_SIZE - 0x10000];\n',
+         '         base = s9x_dma_buffer;  /* (B310E) */\n'),
+    ],
+    'src/sa1.c': [                             # (see 9)
+        ('         memmove(&Memory.ROM [MAX_ROM_SIZE - 0x10000] + (SA1.in_char_dma << 4),\n',
+         '         memmove(s9x_dma_buffer + (SA1.in_char_dma << 4),  /* (B310E) */\n'),
+        ('   uint8* q = &Memory.ROM [MAX_ROM_SIZE - 0x10000] + offset * 64;\n',
+         '   uint8* q = s9x_dma_buffer + offset * 64;  /* (B310E) */\n'),
+        ('#include "sa1.h"\n',
+         '#include "sa1.h"\nextern uint8 *s9x_dma_buffer;  /* (B310E) dma.c */\n', 1),
+    ],
+    'src/globals.c': [                         # (see 9)
+        ('int Echo [24000];\n',
+         'int Echo [ECHO_MAX];  /* (B310E) 240 ms, stereo, at 32040 Hz: not 24000 */\n'),
+    ],
+    'src/soundux.h': [                         # (see 9)
+        ('extern int Echo [24000];\n',
+         '#define ECHO_MAX 15104  /* (B310E) S9xSetEchoDelay\'s most: 2 x (512 x 15 x 32040 >> 15) */\n'
+         'extern int Echo [ECHO_MAX];\n'),
+    ],
+    'src/soundux.c': [                         # (see 9)
+        ('   if (so.stereo)\n      SoundData.echo_buffer_size <<= 1;\n   if (SoundData.echo_buffer_size)\n',
+         '   if (so.stereo)\n      SoundData.echo_buffer_size <<= 1;\n'
+         '   if (SoundData.echo_buffer_size > ECHO_MAX)  /* (B310E) a faster rate: no further */\n'
+         '      SoundData.echo_buffer_size = ECHO_MAX;\n'
+         '   if (SoundData.echo_buffer_size)\n'),
     ],
     'src/getset.h': [
         ('#include "sa1.h"\n',
