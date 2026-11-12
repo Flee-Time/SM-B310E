@@ -1393,6 +1393,25 @@ int txbuf_free(void)
     return (int)((out + TXBUF_SLOTS - 1u - in) % TXBUF_SLOTS);
 }
 
+/* TXBUFQ block-type for the dedicated uplink. The on-phone stock DSP logger
+ * (2026-11-12) shows stock writes the 23-byte L2 block with TXBUFQ type = 2 for the
+ * SDCCH (main DCCH signalling) and type = 1 for the SACCH, and carries that same
+ * type in the PA-key command (0x0004) word 1 - NOT the type 3 / word-1 0 we used.
+ * (The RACH is type 0 in both, which already matched.) dm_sched sets this to 1
+ * before posting a SACCH block and back to 2 for the SDCCH. */
+uint16_t l1_ul_block_type = 2;          /* 2 = SDCCH, 1 = SACCH (stock TXBUFQ type) */
+/* Dedicated uplink FI format. Ghidra RE (2026-11-12) showed our old path (FI type
+ * 7|0xa000=0xa007, a TXBUFQ control word + PA-key per burst) is stock's CCCH uplink
+ * primitive (FUN_00050426 asserts AGCH/BCCH/PCH), wrong for the dedicated SDCCH. Stock's
+ * dedicated TX uses FI type 0x0003/0x0005 and posts ONE block + ONE PA-key per block
+ * (no per-burst control words), the DSP building the 4 bursts. l1_ul_fi_type sets the FI
+ * f0 (3 = stock dedicated, 7 = old 0xa007); l1_ul_perblock=1 collapses to one block+PA-key
+ * per block and drops the per-burst control words. Knobs so a broken uplink can be bisected. */
+uint16_t l1_ul_fi_type  = 7;            /* uplink FI f0: 3 (stock) or 7 (old 0xa007). 7 =
+                                         * known-establishing uplink, to ISOLATE the downlink
+                                         * RX-tag fix on the first test; flip to 3 after. */
+uint8_t  l1_ul_perblock = 0;            /* 0 = old per-burst (isolate downlink fix first) */
+
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
                    uint8_t bsic, const uint8_t block[23])
 {
@@ -1411,17 +1430,19 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
      * checks txbuf_free before each burst). Post nothing unless the whole burst
      * fits - block+word on burst 0, word otherwise, plus one FI slot - so an FI
      * is never left without its TXBUFQ entry. */
-    if (txbuf_free() < (burst == 0 ? 2 : 1) || l1_fi_free() < 1)
+    uint32_t need = l1_ul_perblock ? (burst == 0 ? 1u : 0u) : (burst == 0 ? 2u : 1u);
+    if ((uint32_t)txbuf_free() < need || l1_fi_free() < 1)
         return DSP_EFULL;
-    if (burst == 0 && (rc = tx_desc_post((uint16_t)(tag & 0xf), 3, block, 23)) != DSP_OK)
+    if (burst == 0 &&
+        (rc = tx_desc_post((uint16_t)(tag & 0xf), l1_ul_block_type, block, 23)) != DSP_OK)
         return rc;
-    /* a type-2 rx frame (as l1_burst_post), then the type-7 rewrite */
     fi_init(fi, ext, FI_BLOCK);
     fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
     fi[3] = (uint16_t)((tn & 7) << 8);
     fi[4] = (uint16_t)((tsc & 7) << 8);
     fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
-    fi[0] = (uint16_t)(FI_UPLINK | 0xa000u);        /* word0: type 7 + flags */
+    fi[0] = l1_ul_fi_type == 7 ? (uint16_t)(FI_UPLINK | 0xa000u)   /* old CCCH 0xa007 */
+                               : (uint16_t)(l1_ul_fi_type & 0x1f); /* stock dedicated: 3 */
     fi[5] = txpwr_w5() | cipher_w5;                 /* power update + cipher the uplink */
     fi[6] = (uint16_t)(index & 0x3ffu);             /* word6 = ARFCN index */
     fi[7] = (uint16_t)(index & 0x3ffu);             /* word7 = ARFCN index */
@@ -1429,11 +1450,19 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     fi[3] = (uint16_t)(fi[3] & 0x0fffu);            /* clear word3 bits 15:12 */
     if ((rc = post_fi(fi, ext)) != DSP_OK)
         return rc;
-    /* the per-burst control word: byte 1 the BSIC (cell table +32, as the stock) */
-    { const uint8_t ctl[4] = { 0, (uint8_t)(bsic & 0x3f), 0, (uint8_t)(burst & 3) };
-      if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
-          return rc; }
-    { const uint16_t cmd[5] = { 4, 0, 1, 0, 0 }; return post_cmd(cmd); }
+    /* Old per-burst model only: a TXBUFQ control word per burst. Stock's dedicated path
+     * posts none (one 23-byte block + one PA-key per block; the DSP builds the bursts). */
+    if (!l1_ul_perblock) {
+        const uint8_t ctl[4] = { 0, (uint8_t)(bsic & 0x3f), 0, (uint8_t)(burst & 3) };
+        if ((rc = tx_desc_post(0, 0, ctl, sizeof ctl)) != DSP_OK)
+            return rc;
+    }
+    /* PA-key (command 4, word1 = block type): once per block in per-block mode. */
+    if (!l1_ul_perblock || burst == 0) {
+        const uint16_t cmd[5] = { 4, l1_ul_block_type, 1, 0, 0 };
+        return post_cmd(cmd);
+    }
+    return DSP_OK;
 }
 
 /* The frame-synced uplink, split so the FI ring and the TXBUFQ are fed
@@ -1548,6 +1577,44 @@ int l1_cell_track(int cell, uint8_t rxlev)
 {
     const uint16_t cmd[5] = { 3, (uint16_t)(cell & 0x3f), l1_track_mode,
                               (uint16_t)(rxlev & 0x7f), l1_track_flags };
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    return post_cmd(cmd);
+}
+
+/* Dedicated-mode hold - from the ON-PHONE stock DSP-call logger (2026-11-12, "Stock
+ * OS USB logging" session), which supersedes the static-RE guesses above. The stock
+ * dedicated establish posts, in strict order within one tick:
+ *     command 3  {3, channel, 0, rxlev, 0x0101}   (cell/channel select; posted ONCE)
+ *     command 0x1a {0x1a, 0, 0, 0, 0}              (all-zero tail)
+ *     command 0x1f {0x1f, 3, 0, 1, 0}              (tune/commit tail)
+ * then enters the dedicated state. It HOLDS the channel by re-posting
+ *     command 0x0d {0x0d, 1, 0, 0, 0}
+ * at the dedicated-active transition and ~every 0.6-1.4 s after - and it NEVER
+ * re-posts command 3 during the dedicated phase (our old every-block re-post was not
+ * the stock mechanism). There is NO DSP command 0x0c: the stock "SetState" is an
+ * ARM-internal L1 state (the ~S lines in the logger), not a DSP post. l1_dm_est_tail
+ * posts the two tail commands right after command 3; l1_dm_refresh is the 0x0d hold. */
+int l1_dm_est_tail(void)
+{
+    const uint16_t a[5] = { 0x1a, 0, 0, 0, 0 };
+    const uint16_t b[5] = { 0x1f, 3, 0, 1, 0 };
+    int rc;
+
+    if (dsp_info.state != DSP_RUNNING)
+        return DSP_ENOTRUN;
+    if ((rc = post_cmd(a)) != DSP_OK)
+        return rc;
+    return post_cmd(b);
+}
+
+uint16_t l1_dm_refresh_w1 = 1;          /* command-0x0d word 1 (stock = 1; test knob) */
+uint8_t  l1_dm_reposts = 1;             /* 1 = also re-post command 3 per block (old path) */
+
+int l1_dm_refresh(void)
+{
+    const uint16_t cmd[5] = { 0xd, l1_dm_refresh_w1, 0, 0, 0 };
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;
@@ -1690,6 +1757,27 @@ int l1_pm_post(const uint16_t *index, const uint8_t *gain, int n)
             ext[k - 4] = v;
     }
     return post_fi(fi, ext);
+}
+
+/* Bare power-measure filler FI (type 0x0b, no ARFCN list - words 6..9 stay 0xffff),
+ * i.e. measure the serving/dedicated channel this frame. Stock fills nearly every
+ * non-burst dedicated frame with this (logger v6: 499 type-0x0b FIs across one 3.6 s
+ * LU, 283 ~P results), which keeps the DSP's power/AFC measurement - and so the
+ * dedicated lock - alive the whole LU. Our dedicated scheduler used FI_IDLE (type 0)
+ * there instead, so the AFC coasted on the camp lock and the decode collapsed ~1.3 s
+ * in. Use this as the dedicated filler so the AFC keeps tracking the SDCCH. */
+int l1_pm_idle_post(int frames)
+{
+    uint16_t fi[11], ext[3];
+
+    for (int i = 0; i < frames; i++) {
+        int rc;
+
+        fi_init(fi, ext, FI_POWER);
+        if ((rc = post_fi(fi, ext)) != DSP_OK)
+            return rc;
+    }
+    return DSP_OK;
 }
 
 /* FUN_0005ed64: "in" is the slot the DSP wrote last, so read from out+1

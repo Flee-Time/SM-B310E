@@ -534,7 +534,17 @@ int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st)
 
 /* ---- dedicated channel (SDCCH/8) ------------------------------------------- */
 
-#define TAG_DCH     9                   /* dedicated-channel RxChannelTag (stock) */
+#define TAG_DCH     9                   /* camped RxChannelTag (WRONG for dedicated RX) */
+/* The RX request tag selects the DSP's DECODE MODE (stock logger v6, 2026-11-12): camped
+ * reads use tag 9, but the dedicated SDCCH downlink uses tag 5 and the SACCH downlink tag 3
+ * (confirmed: stock's dedicated RX FI w1 bits 7:4 = 5/3, results come back tagged 5/3, and
+ * stock sustains the decode for the whole 3.4 s LU). We were requesting the dedicated
+ * downlink with tag 9 (camped mode), so our DSP decoded the SDCCH in camped mode - good only
+ * while the camp AFC lock held (~1.3 s) then drifting out = the decode collapse. Request 5. */
+#define TAG_SDCCH   5                   /* dedicated SDCCH downlink RX decode mode (stock) */
+#define TAG_SACCH_DL 3                  /* dedicated SACCH downlink RX decode mode (stock) */
+uint8_t l1_dm_pmfill = 1;               /* 1 = power-measure (0x0b) fill dedicated gaps (stock)
+                                         * so the AFC keeps tracking; 0 = old idle fill (test) */
 
 /* SDCCH/8 schedule (GSM 05.02): subchannel k's downlink block occupies FN mod 51
  * in [k*4, k*4+3]; the uplink is the same pattern offset by 15 frames. SACCH/C8
@@ -640,7 +650,7 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
             if ((uint32_t)queued() >= (want_ul || want_sacch ? 2u : (uint32_t)AHEAD))
                 break;
             if (db >= 0) {
-                rc = l1_burst_post(c->index, TAG_DCH, db, tn, tsc, c->slot);
+                rc = l1_burst_post(c->index, TAG_SDCCH, db, tn, tsc, c->slot);
                 if (rc == DSP_OK)
                     st->dl_bursts++;
             } else if (want_ul) {
@@ -664,15 +674,15 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                     dm_sacch_mf = (uint32_t)-1;
                 }
             } else {
-                /* TEST 2026-11-11: FCCH-interleave DISABLED. The tn0 CCCH decodes 100%
-                 * (303/0) at this signal, so the carrier AFC is ALREADY locked - the
-                 * FCCH re-reads (l1_fcch_post on tn0) were not fixing an AFC drift, and
-                 * the tn0<->tn1 retune they force every few frames is the suspected
-                 * cause of the tn1 SDCCH CRC failures (bad blocks tagged hdr0=9 with
-                 * uplink idle). Idle-fill every non-SDCCH frame instead and keep the DSP
-                 * parked on the dedicated tn1 timeslot. If the SDCCH decode jumps, the
-                 * interleave was the bug; if it collapses, the AFC theory was right. */
-                rc = l1_idle_post(1);
+                /* Fill non-SDCCH frames with a POWER-MEASURE FI (type 0x0b), not idle.
+                 * Stock logger v6 (2026-11-12) shows stock fills nearly every non-burst
+                 * dedicated frame this way (499 type-0x0b FIs + 283 ~P results across one
+                 * 3.6 s LU), which keeps the DSP's power/AFC measurement - and the dedicated
+                 * lock - alive the whole LU. We idled these frames, so the AFC coasted on the
+                 * camp lock and the decode collapsed ~1.3 s in. This is the ARM lever on the
+                 * dedicated AFC that earlier RE concluded did not exist (it measures the
+                 * serving channel, no tn0 retune, so it does not disturb tn1). Toggle knob. */
+                rc = l1_dm_pmfill ? l1_pm_idle_post(1) : l1_idle_post(1);
             }
             if (rc != DSP_OK)
                 return rc;
@@ -687,10 +697,12 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
             while (l1_rx_read(&rx) == 1) {
                 st->dl_seen++;
                 st->dl_hdr0 = (uint8_t)rx.hdr[0];
-                /* a dedicated block comes back tagged with the RxChannelTag we
-                 * asked for (TAG_DCH = 9), not the BCCH 7/8 - accept it, or every
-                 * SDCCH block (incl. the UA) is dropped. */
-                if (rx.hdr[0] != RX_BLOCK && rx.hdr[0] != 8 && rx.hdr[0] != TAG_DCH)
+                /* A dedicated block comes back tagged with the DECODE MODE the DSP used:
+                 * the SDCCH downlink is tag 5 (TAG_SDCCH), SACCH tag 3 - NOT the camped 9.
+                 * Accept 5/3 (and keep 7/8/9 for the camped/CCCH reads), or every dedicated
+                 * block (incl. the UA and AUTH REQUEST) is dropped. (stock logger v6.) */
+                if (rx.hdr[0] != RX_BLOCK && rx.hdr[0] != 8 && rx.hdr[0] != TAG_DCH &&
+                    rx.hdr[0] != TAG_SDCCH && rx.hdr[0] != TAG_SACCH_DL)
                     continue;
                 if (rx.hdr[1] != 0) {
                     st->dl_bad++;

@@ -32,6 +32,10 @@
                                          * froze independently of this - see the SACCH
                                          * arming below, disabled to test if its TXBUFQ
                                          * posts were jamming the queue head (txout=1). */
+#define LU_REFRESH_MS   600u            /* stock dedicated-hold cadence (DSP command 0x0d):
+                                         * stock re-posts 0x0d ~0.6-1.4 s apart to hold the
+                                         * channel; 600 ms refreshes before our ~1.3 s decode
+                                         * collapse yet is no denser than stock's min gap. */
 #define LU_T200_MS      300u            /* resend the SABM / an unacked I-frame by this */
 #define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
@@ -210,7 +214,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0;
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
     uint8_t sacch[LAPDM_BLOCK];          /* the uplink SACCH keep-alive, armed for the run */
-    uint32_t last_ul = 0, last_track = 0;
+    uint32_t last_ul = 0, last_refresh = 0;
     int dm_dbg = 0;
     uint32_t t0;
 
@@ -290,7 +294,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * re-posted in the loop below - which is SAFE (RE 2026-11-12: command 3 does not
      * reset the tracked flag; it only re-selects cell/channel/gain). */
     l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-    last_track = kernel_ticks();
+    l1_dm_est_tail();                 /* stock establish tail: command 0x1a + 0x1f{3,0,1,0} */
+    l1_dm_refresh();                  /* stock dedicated-hold command 0x0d at dedicated entry */
+    last_refresh = kernel_ticks();
     /* Apply the grant's timing advance. NOTE: this sets the TX TA (TXTA_SHARE); the
      * RX burst window TA (stock pushes it via the RF shadow at command 3) may also be
      * needed if per-burst equalizer failures persist after removing the re-track. */
@@ -336,30 +342,30 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
            r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
         l1_dm_t st;
 
-        /* Re-track (re-post command 3) through the dedicated phase to re-position the
-         * synth. CORRECTED (RE 2026-11-12, ARM-DSP session, verified in DSP 0x9ab4):
-         * command 3 only re-selects cell/channel/gain - it does NOT reset the tracked
-         * flag (0xff72 bit 3) or the timing - so re-tracking is SAFE and NEEDED. The
-         * DSP's AFC loop coasts ~5 blocks on the camp lock then loses lock, because the
-         * SDCCH gives only 4 bursts/235ms AND our SABM TX keys the PA (pulls the synth);
-         * bad post-TX bursts can't re-measure frequency -> collapse. Re-tracking re-pre-
-         * positions the synth so the next RX bursts decode and the loop re-measures. */
-        if (have_ul || kernel_ticks() - last_track >= LU_RETRACK_MS) {
-            l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-            last_track = kernel_ticks();
+        /* Hold the dedicated channel the STOCK way (on-phone DSP logger, 2026-11-12):
+         * re-post command 0x0d{1} on the stock cadence and do NOT re-post command 3.
+         * This supersedes the old "re-post command 3 every block" model - stock posts
+         * command 3 exactly once (at establish) and holds the lock purely with 0x0d.
+         * The old per-block command-3 path is kept behind l1_dm_reposts for bisecting. */
+        if (kernel_ticks() - last_refresh >= LU_REFRESH_MS) {
+            l1_dm_refresh();
+            last_refresh = kernel_ticks();
         }
+        if (l1_dm_reposts)            /* old per-block command-3 re-post (bisect knob) */
+            l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
         l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, bsic, LU_BLOCK_MS,
                         have_ul ? ul : (const uint8_t *)0, &st);
         if (have_ul && st.ul_done) {
             last_ul = kernel_ticks();
             if (!p.established)
                 p.sabm_sent++;
-            /* Re-track right after the uplink block: the PA keying pulled the synth and
-             * the network's reply (UA / AUTH REQUEST / ACCEPT) lands right after - re-
-             * position the synth so those RX bursts decode and the AFC loop re-measures.
-             * (RE 2026-11-12: command 3 does not reset tracking, so this is correct.) */
-            l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-            last_track = kernel_ticks();
+            /* After the uplink block, refresh the dedicated hold: the PA keying pulled
+             * the synth and the network's reply (UA / AUTH REQUEST / ACCEPT) lands right
+             * after, so re-post 0x0d (stock does this at its uplink/SACCH events). */
+            l1_dm_refresh();
+            last_refresh = kernel_ticks();
+            if (l1_dm_reposts)
+                l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
         }
         have_ul = 0;
         p.dl_blocks = (uint16_t)(p.dl_blocks + st.dl_blocks);

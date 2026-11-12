@@ -157,6 +157,7 @@ uint16_t l1_arfcn_index(int band, int arfcn);
 #define L1_PM_PER_FRAME 6
 int l1_pm_post(const uint16_t *index, const uint8_t *gain, int n);
 int l1_idle_post(int frames);   /* idle frame instructions */
+int l1_pm_idle_post(int frames);/* power-measure filler (0x0b) - keeps dedicated AFC alive */
 int l1_sleep_post(int frames);  /* one multi-frame sleep, below 1000 frames */
 void l1_ask_more(int back);     /* flag the instruction this many slots back */
 int l1_run(void);               /* after l1_start(): start the frame clock */
@@ -270,6 +271,16 @@ int l1_dm_est(uint16_t sel, uint8_t gain, uint16_t aux);
 int l1_cell_track(int cell, uint8_t rxlev);
 extern uint8_t l1_track_mode;           /* command-3 mode word (test) */
 extern uint16_t l1_track_flags;         /* command-3 flags word (test) */
+/* Dedicated-mode hold, from the on-phone stock DSP-call logger (2026-11-12). Stock
+ * establishes with command 3 then posts command 0x1a + command 0x1f{3,0,1,0} (tail),
+ * and HOLDS the channel by re-posting command 0x0d{1,0,0,0} - NOT by re-posting
+ * command 3 (stock posts command 3 exactly once per episode). (The old command-0x0c
+ * "SetState" was wrong: SetState is an ARM-internal L1 state, not a DSP command.) */
+int l1_dm_est_tail(void);               /* post command 0x1a then 0x1f{3,0,1,0} */
+int l1_dm_refresh(void);                /* dedicated-hold heartbeat (DSP command 0x0d) */
+extern uint16_t l1_dm_refresh_w1;       /* command-0x0d word 1 (test knob, stock = 1) */
+extern uint8_t  l1_dm_reposts;          /* 1 = also re-post command 3 per block (old) */
+extern uint16_t l1_ul_block_type;       /* dedicated uplink TXBUFQ type: 2 SDCCH / 1 SACCH */
 
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {
