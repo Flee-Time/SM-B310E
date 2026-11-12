@@ -32,10 +32,9 @@
                                          * froze independently of this - see the SACCH
                                          * arming below, disabled to test if its TXBUFQ
                                          * posts were jamming the queue head (txout=1). */
-#define LU_REFRESH_MS   600u            /* stock dedicated-hold cadence (DSP command 0x0d):
-                                         * stock re-posts 0x0d ~0.6-1.4 s apart to hold the
-                                         * channel; 600 ms refreshes before our ~1.3 s decode
-                                         * collapse yet is no denser than stock's min gap. */
+#define LU_REFRESH_MS   1300u           /* stock dedicated-hold cadence (DSP command 0x0d):
+                                         * the 1:1 call diff shows stock posts 0x0d ~2x/LU,
+                                         * ~1.3 s apart; match that (600 ms over-posted it). */
 #define LU_T200_MS      300u            /* resend the SABM / an unacked I-frame by this */
 #define LU_SABM_MAX     60              /* resend the SABM at every chance */
 #define LU_FN_MOD       2715648u        /* 26 x 51 x 2048 */
@@ -359,11 +358,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             last_ul = kernel_ticks();
             if (!p.established)
                 p.sabm_sent++;
-            /* After the uplink block, refresh the dedicated hold: the PA keying pulled
-             * the synth and the network's reply (UA / AUTH REQUEST / ACCEPT) lands right
-             * after, so re-post 0x0d (stock does this at its uplink/SACCH events). */
-            l1_dm_refresh();
-            last_refresh = kernel_ticks();
+            /* NOTE: stock does NOT re-post 0x0d after every uplink - the 1:1 call-stream
+             * diff shows stock posts 0x0d only ~2x per LU (at establish and ~1.3 s later),
+             * so the periodic path below is enough; posting it here over-posts 0x0d. */
             if (l1_dm_reposts)
                 l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
         }
@@ -420,37 +417,24 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             if (state == REG_NEED_CIPHER) {
                 p.ciphered = 1;
                 klog("lu: CIPHER cmd sc=%u A5/%u", r->ciph_sc, r->ciph_alg + 1);
-                /* This DSP implements A5/1 only (alg 0); A5/2 and A5/3 (KASUMI) are
-                 * absent. If the network commands anything else, do NOT fake a
-                 * CIPHERING MODE COMPLETE: a garbage ciphered COMPLETE the network
-                 * cannot validate both fails the attempt AND reinforces the VLR's
-                 * belief that this IMSI does A5/3 (bidding-down lock), so every retry
-                 * is commanded A5/3 again. Abort cleanly instead - send nothing, let
-                 * the channel release - so the VLR is not fed a bogus A5/3 completion. */
-                if (r->ciph_sc && r->ciph_alg != 0) {
-                    /* We cannot do A5/2/3 (DSP is A5/1 only). Do NOT complete it, but
-                     * do NOT abort either: keep the link up and keep listening, to test
-                     * whether TT, on our non-response, downgrades and re-commands A5/1
-                     * (which we would then complete). If it only ever re-sends A5/3 or
-                     * releases, the "dropped/retry" idea is dead. State back to RUNNING
-                     * so a subsequent CIPHER MODE COMMAND is processed afresh. */
-                    klog("lu: A5/%u commanded (DSP A5/1 only) - not completing, listening for A5/1",
-                         r->ciph_alg + 1);
-                    r->state = REG_RUNNING;
-                } else {
-                    if (r->ciph_sc)
-                        l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
-                    {
-                        int cc = reg_cipher_complete(r, ul);
+                /* The DSP does A5/1 AND A5/3, via the command path (cmd 5 + cmd 0x1e);
+                 * only the FI word-5 engine is A5/1-only. The stock logger v6 (2026-11-12)
+                 * shows THIS network commands stock A5/3 (CIPHER MODE setting 0x05) and stock
+                 * deciphers + completes (a valid MM LU ACCEPT comes back). So honour whatever
+                 * algorithm is commanded: enable the cipher (l1_cipher_set posts cmd 5+0x1e),
+                 * then send CIPHERING MODE COMPLETE enciphered (the DSP ciphers TX from here). */
+                if (r->ciph_sc)
+                    l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
+                {
+                    int cc = reg_cipher_complete(r, ul);
 
-                        klog("lu: CIPHER COMPLETE build=%d (tx_pend=%u vs=%u va=%u)", cc,
-                             r->dl.tx_pending, r->dl.vs, r->dl.va);
-                        if (cc > 0) {
-                            for (int i = 0; i < LAPDM_BLOCK; i++)
-                                sabm[i] = ul[i];
-                            have_ul = 1;
-                            sabm_tries = 0;
-                        }
+                    klog("lu: CIPHER COMPLETE build=%d (tx_pend=%u vs=%u va=%u)", cc,
+                         r->dl.tx_pending, r->dl.vs, r->dl.va);
+                    if (cc > 0) {
+                        for (int i = 0; i < LAPDM_BLOCK; i++)
+                            sabm[i] = ul[i];
+                        have_ul = 1;
+                        sabm_tries = 0;
                     }
                 }
             }

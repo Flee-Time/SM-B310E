@@ -281,6 +281,7 @@ int l1_dm_refresh(void);                /* dedicated-hold heartbeat (DSP command
 extern uint16_t l1_dm_refresh_w1;       /* command-0x0d word 1 (test knob, stock = 1) */
 extern uint8_t  l1_dm_reposts;          /* 1 = also re-post command 3 per block (old) */
 extern uint16_t l1_ul_block_type;       /* dedicated uplink TXBUFQ type: 2 SDCCH / 1 SACCH */
+extern uint8_t  l1_calllog;              /* 1 = log every DSP call to klog (1:1 diff vs stock) */
 
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {

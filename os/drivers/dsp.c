@@ -676,6 +676,9 @@ static void note_fi_out(void)
 }
 
 /* ARM->DSP command (FUN_0005f474): 8-slot ring, then the doorbell. */
+uint8_t l1_calllog = 0;                  /* 1 = log every DSP call (~C/~T/~F) to klog for a
+                                         * 1:1 diff vs the stock logger; Kc + L3 payload redacted */
+
 static int post_cmd(const uint16_t cmd[5])
 {
     uint32_t in = sm_r16(CMD_IN), out = sm_r16(CMD_OUT), next;
@@ -690,6 +693,15 @@ static int post_cmd(const uint16_t cmd[5])
     sm_w16(CMD_IN, (uint16_t)next);
     REG32(APB_INT_SET_CLR) = 1u;        /* MCU_IRQ_SET (FUN_00067fee) */
     dsp_info.cmds++;
+    /* Call-stream log for 1:1 comparison against the stock DSP logger. Redact command
+     * 0x1e (the Kc load) - never log key material. fn = our frame number. */
+    if (l1_calllog) {
+        if (cmd[0] == 0x1e)
+            klog("~C %08lx 001e <key redacted>", (unsigned long)frame_number);
+        else
+            klog("~C %08lx %04x %04x %04x %04x %04x", (unsigned long)frame_number,
+                 cmd[0], cmd[1], cmd[2], cmd[3], cmd[4]);
+    }
     return DSP_OK;
 }
 
@@ -1023,6 +1035,9 @@ static bool txpwr_pending;              /* flag it in the next TX frame's word 5
  * algorithm (1 = A5/1). 0 = ciphering off. Set by l1_cipher_set; see
  * docs/a5-cipher-re.md. */
 static uint16_t cipher_w5;
+static bool cipher_active;               /* ciphering is on (either path) - drives the A5
+                                          * COUNT seed/advance in fi_init, independent of the
+                                          * FI word-5 bits (the cmd-5 path leaves cipher_w5 0) */
 static bool cipher_count_load;          /* next FI loads the A5 COUNT from share +0x3f0
                                          * (word-1 bit 8 = 0); after that the FIs set bit
                                          * 8 = 1 so the DSP advances the count itself */
@@ -1157,18 +1172,19 @@ static void fi_init(uint16_t fi[11], uint16_t ext[3], unsigned type)
      * frame (bit 8 = 0, share written) and from then on let the DSP run it (bit 8 =
      * 1) - otherwise it reloads an unset +0x3f0 every frame and the keystream frame
      * number never matches the network's. Not touched before ciphering. */
-    if (cipher_w5) {
-        if (cipher_count_load) {
-            uint32_t cfn = (frame_number + cipher_fn_offset) % FN_MOD;
+    if (cipher_active) {
+        /* Seed the A5 COUNT with THIS frame's cell FN EVERY frame, bit 8 = 0 (the fi_init
+         * default). Stock logger v6 (2026-11-12): stock's FI word-1 bit 8 is 0 on every
+         * frame (RX and TX) once ciphering is on, so the DSP reloads the COUNT from share
+         * +0x3f0 each frame - it never uses the bit-8 "advance" path. We used to seed once
+         * then set bit 8 = 1; the DSP's advance did not track the cell FN, so the keystream
+         * drifted off and the ciphered exchange stayed unreadable. Re-seed every frame. */
+        uint32_t cfn = (frame_number + cipher_fn_offset) % FN_MOD;
 
-            sm_w16(CIPHER_CNT_SHARE,      (uint16_t)((cfn >> 16) & 0xffu));
-            sm_w16(CIPHER_CNT_SHARE + 2u, (uint16_t)(cfn & 0xffu));
-            sm_w16(CIPHER_CNT_SHARE + 4u, (uint16_t)((cfn >> 8) & 0xffu));
-            sm_w16(CIPHER_CNT_SHARE + 6u, 0);
-            cipher_count_load = false;  /* leave bit 8 = 0 this frame: the DSP loads it */
-        } else {
-            fi[1] |= 0x100u;            /* bit 8 = 1: keep the DSP's advancing count */
-        }
+        sm_w16(CIPHER_CNT_SHARE,      (uint16_t)((cfn >> 16) & 0xffu));
+        sm_w16(CIPHER_CNT_SHARE + 2u, (uint16_t)(cfn & 0xffu));
+        sm_w16(CIPHER_CNT_SHARE + 4u, (uint16_t)((cfn >> 8) & 0xffu));
+        sm_w16(CIPHER_CNT_SHARE + 6u, 0);
     }
 }
 
@@ -1286,6 +1302,11 @@ static int tx_desc_post(uint16_t tag, uint16_t type, const uint8_t *buf, uint32_
     if (nbytes & 1)
         sm_w16(base + 8 + (nbytes / 2) * 2, (uint16_t)(buf[nbytes - 1] << 8));
     sm_w16(TXBUF_IN, (uint16_t)next);
+    /* Call-stream log: TX block HEADER only (tag/type/len). Never log the payload - an
+     * uplink block can carry SIM-derived L3 (SRES in the AUTH RESPONSE). */
+    if (l1_calllog)
+        klog("~T %08lx tag=%x type=%x len=%lu", (unsigned long)frame_number,
+             tag, type, (unsigned long)nbytes);
     return DSP_OK;
 }
 
@@ -1407,10 +1428,10 @@ uint16_t l1_ul_block_type = 2;          /* 2 = SDCCH, 1 = SACCH (stock TXBUFQ ty
  * (no per-burst control words), the DSP building the 4 bursts. l1_ul_fi_type sets the FI
  * f0 (3 = stock dedicated, 7 = old 0xa007); l1_ul_perblock=1 collapses to one block+PA-key
  * per block and drops the per-burst control words. Knobs so a broken uplink can be bisected. */
-uint16_t l1_ul_fi_type  = 7;            /* uplink FI f0: 3 (stock) or 7 (old 0xa007). 7 =
-                                         * known-establishing uplink, to ISOLATE the downlink
-                                         * RX-tag fix on the first test; flip to 3 after. */
-uint8_t  l1_ul_perblock = 0;            /* 0 = old per-burst (isolate downlink fix first) */
+uint16_t l1_ul_fi_type  = 7;            /* uplink FI f0: 3 (stock per-block, but it over-transmits
+                                         * - ul=318, needs a pacing fix) or 7 (old 0xa007, works).
+                                         * Back to 7 to isolate + verify the cipher fixes. */
+uint8_t  l1_ul_perblock = 0;            /* 0 = working per-burst uplink (per-block has a bug) */
 
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
                    uint8_t bsic, const uint8_t block[23])
@@ -1480,18 +1501,53 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
  * The GSM frame-number COUNT the keystream also needs is the DSP's own (share
  * +0x3f0 -> 0xec4c, maintained per frame), so we supply only Kc and the mode bits.
  * alg: 0 = A5/1, 1 = A5/2, 2 = A5/3. alg 0xff disables. */
+/* Stock cipher path (Ghidra RE + on-phone logger v6, 2026-11-12): stock does NOT use the
+ * FI word-5 bits above - it posts DSP command 5 {1, alg} (cipher enable + algorithm) then
+ * command 0x1e {Kc packed two bytes per word, high byte first} (FUN_0004b4b4 / FUN_0004b828),
+ * and the DSP tracks the A5 COUNT itself. THIS path does A5/3: the v6 capture shows TT
+ * commanding stock A5/3 (CIPHER MODE setting 0x05) and stock DECIPHERING the downlink (a valid
+ * MM LU ACCEPT comes back in plaintext) - so the DSP has A5/3, reached only via this command
+ * path, not the FI word-5 engine (which is A5/1-only). l1_cipher_cmdpath selects it (default). */
+uint8_t l1_cipher_cmdpath = 1;          /* 1 = stock cmd 5 + cmd 0x1e (does A5/3); 0 = FI w5 */
+
 void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
 {
     if (alg == 0xff) {
         cipher_w5 = 0;
+        cipher_active = false;
         cipher_count_load = false;
+        if (l1_cipher_cmdpath) {
+            const uint16_t off[5] = { 5, 0, 0, 0, 0 };   /* stock cipher-off */
+            post_cmd(off);
+        }
         klog("dsp: cipher off");
+        return;
+    }
+    if (l1_cipher_cmdpath) {
+        /* alg is the L3 algorithm id (0=A5/1, 1=A5/2, 2=A5/3), exactly the DSP cmd-5 arg. */
+        const uint16_t c5[5] = { 5, 1, alg, 0, 0 };
+        const uint16_t ck[5] = { 0x1e,
+            (uint16_t)((uint16_t)kc[0] << 8 | kc[1]), (uint16_t)((uint16_t)kc[2] << 8 | kc[3]),
+            (uint16_t)((uint16_t)kc[4] << 8 | kc[5]), (uint16_t)((uint16_t)kc[6] << 8 | kc[7]) };
+
+        post_cmd(c5);
+        post_cmd(ck);                    /* loads Kc into the DSP; never logged */
+        cipher_w5 = 0x0010;              /* stock sets FI word-5 = 0x0010 on every frame once
+                                          * ciphering is on (logger v6); match it (test knob) */
+        /* The A5 COUNT (GSM FN) is still seeded via share +0x3f0 / FI word-1 bit 8 - that is
+         * independent of the key path. Without it the DSP ciphers with the wrong frame number
+         * and both our COMPLETE and TT's reply are unreadable. Seed the cell's absolute FN. */
+        cipher_fn_offset = fn_offset % FN_MOD;
+        cipher_count_load = true;
+        cipher_active = true;
+        klog("dsp: cipher A5/%u via cmd5+0x1e", alg + 1);
         return;
     }
     for (int i = 0; i < 8; i++)
         sm_w16(CIPHER_KC_SHARE + 2u * (uint32_t)i, kc[i]);
     cipher_fn_offset = fn_offset % FN_MOD;
     cipher_count_load = true;            /* seed the COUNT on the first ciphered frame */
+    cipher_active = true;
     cipher_w5 = (uint16_t)(0x8000u | ((uint16_t)((alg + 1) & 3) << 13));
     klog("dsp: cipher A5/%u enabled (w5 %04x, fn_off %lu)", alg + 1, cipher_w5,
          (unsigned long)cipher_fn_offset);
@@ -1610,7 +1666,10 @@ int l1_dm_est_tail(void)
 }
 
 uint16_t l1_dm_refresh_w1 = 1;          /* command-0x0d word 1 (stock = 1; test knob) */
-uint8_t  l1_dm_reposts = 1;             /* 1 = also re-post command 3 per block (old path) */
+uint8_t  l1_dm_reposts = 0;             /* 0 = post command 3 ONCE at establish, like stock
+                                         * (1 re-posts it every block - 175x vs stock's 1x,
+                                         * which wrecks the AFC/decode/cipher; was left 1 by
+                                         * mistake, caught by the 1:1 call-stream diff). */
 
 int l1_dm_refresh(void)
 {
