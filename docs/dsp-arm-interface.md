@@ -258,6 +258,115 @@ Returns `hdr[0..8]` + 58 data bytes (`+0x12` on, each halfword high-byte-first):
 | `[4]` | SCH only: hi<<8\|lo frame span from search (`FUN_000461e4`) |
 | `[7]` | signed SNR / freq-error proxy [G] (diagnostic `l1_cch_hdr7`) |
 
+**No per-burst signal level in the ring header [C, RE-traced 2026-11-12].** The tag
+handlers read only `{tag, BFI, FN, cell, SCH-span}`: the dedicated handler
+`FUN_0004dd7c` reads *only* `+4`/`+6` (the FN) and nothing else; BCCH `FUN_0004d91a`
+and SCH `FUN_000461e4` add only cell and the SCH hi−lo span. `hdr[5]`/`[6]`/`[8]`
+are not consumed — there is **no RXLEV/RSSI field in `hdr[0..8]`**, and `hdr[7]` is
+an SNR/freq-error proxy, not absolute level.
+
+### 5.5a Dedicated-mode signal level & AGC — DSP-internal [C headers / RE]
+The DSP runs a **closed-loop AGC** and maintains its own current level: the SDK L1
+headers (`calibration.h`) expose `CAL_GetDspRxLev()` / `CAL_GetDspRssi()`
+(zero-arg getters of a DSP-updated scalar) and a per-slot
+`FASTCALI_FRAME_RXLEV_T { slot_mask; rxlev[8]; rssi[8] }`. So the per-burst/per-slot
+RXLEV+RSSI the DSP computes (for the SACCH measurement report) is **not** in the RX
+ring — it lives in a DSP-maintained scalar read by `CAL_GetDspRxLev/Rssi` (share
+offset not yet pinned; kernel is stripped with no rxlev string to anchor).
+Consequence for re-track: the FI word-6 gain (bits 15:10) and the command-3 `rxlev`
+word are a **coarse 6-bit seed** the DSP's AGC rides around — not a per-frame
+authoritative value. Stock seeds command 3 **once** at establish (re-posting does
+not reset tracked state, §11) and lets the DSP AGC track level through the
+transaction; it does **not** re-pass a fresh gain per frame. The type-11 power FI
+(POWERMONQ, §5.3) is a retune-scan that conflicts with the dedicated lock, so it
+returns garbage while tracked — do not use it to re-measure in dedicated mode.
+
+### 5.6 Downlink block dispatch — what the stock ARM does with a received block [C, RE-traced]
+RE of the stock (2026-11-11). The DSP raises the IRQ; the ARM drains the RX ring
+with **`FUN_0005f692`** (= our `rx_read`) and hands each 72-byte block to a
+per-context consumer (`FUN_0005a8da` and four siblings `…92e/984/9fe/aa50`). Every
+consumer **switches on `hdr[0]` (the RxChannelTag)** and calls a tag handler — it
+does **not** look at the L3 content:
+
+| tag `hdr[0]` | channel | stock handler |
+|---|---|---|
+| 1 | SCH | `FUN_0004ce38` / `FUN_0004d20a` (BSIC + sync) |
+| 3 | (AGCH/PCH variant) | `FUN_0004c788` |
+| 6 | (access-grant) | `FUN_0004e6b6` |
+| 7 | BCCH / CCCH block | `FUN_0004d91a` / `FUN_0004d5b4` |
+| 8 | CCCH (alt) | `FUN_0004dad0` |
+| **9** | **dedicated (SDCCH/SACCH)** | **`FUN_0004dd7c`** |
+
+A handler reads the header (BFI `hdr[1]`, FN from `hdr[2]`/`hdr[3]`), does channel
+bookkeeping, then **forwards the 23-byte L2 payload at `block+0x12` upward** (e.g.
+`FUN_0004d91a` → `FUN_0004bd84`/`FUN_0004a87a` → a `PH_DATA_IND`-style post to the
+L2/L3 task). The decisive point for ciphering/classmark: **L1 is content-agnostic**
+— a dedicated block carrying CIPHER MODE COMMAND, CLASSMARK ENQUIRY, AUTHENTICATION
+REQUEST or LU ACCEPT all go up the *same* tag-9 path (`FUN_0004dd7c`); only L2
+(LAPDm) and L3 (RR/MM) interpret them, and that code is in the **demand-paged
+protocol stack** (`user_raw.bin` / `drps_12E524_0.bin`), not this resident kernel.
+
+**So, inferring the cipher / classmark handling** (the L1↔DSP side, which *is*
+known):
+- **CIPHER MODE COMMAND** (RR 0x35, down the tag-9 path) → L3 RR decodes it and
+  sends **`MPH_CIPHER_MODE_REQ`** (SDK: `CIPHER_PARAM_T` + `KC_T kc[8]`) down to L1.
+  L1's MPH handler then programs the DSP exactly as `docs/a5-cipher-re.md` maps:
+  write **Kc[8] → share `+0x3f8`** and set the **FI word-5 cipher bits** (bit 15
+  Kc-load, bits 14:13 = A5/1). That is precisely what our `l1_cipher_set` does — so
+  the stock's cipher action is the share-write path in §7, triggered by an MPH
+  signal, not by L1 inspecting the block.
+- **CLASSMARK ENQUIRY** (RR 0x16) → L3 RR builds a **CLASSMARK CHANGE** and sends it
+  **uplink** through the ordinary dedicated TX path (a type-7 uplink burst, §6.3) —
+  no special DSP interaction beyond a normal uplink block.
+- **AUTHENTICATION REQUEST / LU ACCEPT** → same tag-9 receive, handed to L3; the
+  only DSP-facing consequence is the uplink response (AUTH RESPONSE / nothing) via
+  the TX path. The DSP never parses L3; it only ciphers/deciphers per the FI word-5
+  bits once the MPH cipher request has been applied.
+
+The practical consequence for our OS: to react to these messages we reproduce the
+**L3 decision** (decode the block, decide to cipher / send classmark) and drive the
+**same L1 primitives** — the DSP side needs nothing new beyond `l1_cipher_set` and
+the uplink path, both already built.
+
+### 5.7 Decode paths — where a received block is actually decoded [C, RE-traced]
+RE of the stock (2026-11-11). Decoding happens in **three layers**, and the ARM
+kernel does surprisingly little of it:
+
+1. **PHY channel decode — in the DSP** (not the ARM). The DSP turns the 4 soft
+   bursts into a **23-byte L2 block**: de-interleave, Viterbi (convolutional) decode,
+   and the FIRE/parity CRC that sets **BFI** (`hdr[1]`). By the time a block reaches
+   `rx_read` it is already hard bits + a good/bad flag; the ARM never sees soft
+   symbols. This is the real "decode" and it lives in the TeakLite blob
+   (`dsp-blob-CC874.dis`), not here.
+2. **L1 header decode — in the resident ARM kernel** (thin, [C]). The tag handlers
+   decode only what L1 itself needs:
+   - **SCH** (`FUN_0004ce38`): the BSIC is **`block[0x12] >> 2`**, checked against the
+     cell's expected BSIC (`FUN_00048b90`); the reduced frame number comes from
+     `block[0x10]`. (Confirms our `sch_decode`: BSIC = `d[0]>>2`.) A BSIC mismatch
+     triggers a cell-change path, not a message.
+   - **Immediate-assignment channel** (`FUN_0004c788` → **`FUN_00062c42`**): the grant's
+     channel description is pulled from `block[0x12]` — **TN** `=(… &0x3fff)>>8`, **TSC/
+     subch** `=… &0x1f` — and written straight into the serving-cell RF shadow structs
+     (`DAT_00062e74`/`DAT_00062ec8`), plus the frame-timing compare (`FUN_00062dee`).
+     L1 applies the channel; it does **not** parse the IMMEDIATE ASSIGNMENT IEs.
+   - **BCCH / CCCH** (`FUN_0004d91a`): extracts the header, forwards the block; the SI
+     field extraction is split between resident helpers (`FUN_000484e4/48658`) and L3.
+   - **Dedicated** (tag 9, `FUN_0004dd7c`): no content decode at all — it forwards the
+     23-byte L2 payload (`block+0x12`) straight up.
+3. **L2 (LAPDm) + L3 (RR/MM) message decode — in the demand-paged stack.** The
+   actual parse of the L2 address/control/length octets into SABM/UA/I-frames, and of
+   the L3 protocol-discriminator + message-type into AUTH / CIPHER MODE COMMAND /
+   CLASSMARK ENQUIRY / LU ACCEPT, is in `user_raw.bin`/`drps` — **not in this image**
+   (only `RR_`/`Classmark` string fragments are resident; `LAPDm`, `IMMEDIATE`,
+   `CIPHER_MODE`, `LOCATION UPDAT` are absent, i.e. paged or numeric-trace).
+
+**So "the decode path" is mostly not the ARM's:** the DSP does the heavy channel
+decode, the ARM L1 decodes a few header fields (BSIC, FN, the grant's TN/TSC) for its
+own setup, and the message semantics are decoded in the paged L2/L3. For our OS this
+is why `os/net/{lapdm,rr,mm}.c` had to **re-implement the L2/L3 decode from the spec**
+— that layer isn't in the resident kernel to copy — while the L1 header decode
+(`sch_decode`, the grant's channel fields) matches what the stock does.
+
 ---
 
 ## 6. TX path
@@ -325,12 +434,68 @@ Two protocol details the scheduler enforces per frame:
   deep (`AHEAD`) so the DSP has steady look-ahead; only an actual uplink/SACCH
   burst throttles to a shallow ring (2), because its TXBUFQ slot frees only when
   the DSP transmits. Gating the whole call shallow dropped DL decode to ~18%.
-- **FCCH re-lock:** at `FN%51 ∈ {0,10,20,30,40}` the scheduler reads an FCCH burst
-  on the BCCH carrier (same ARFCN, tn0) to re-lock the DSP AFC — without it the AFC
-  free-runs on the dedicated timeslot and the SDCCH CRC drifts to ~0 within a
-  second. `window=1` keeps the TDMA frame accounting exact.
+- **FCCH re-lock — HARMFUL, do not use (corrected 2026-11-11).** An earlier idea
+  interleaved FCCH reads on tn0 during the dedicated phase to "re-lock" the AFC.
+  Measurement shows this **corrupts** the tn1 SDCCH decode (≈10% with it, ≈73%
+  without). See §6.8: in dedicated mode the DSP tracks AFC off the SDCCH bursts
+  itself, so retuning to tn0 pulls it off the tracked timeslot. Remove any tn0
+  retune in the dedicated phase.
 
-### 6.7 Dedicated-mode establish — `l1_dm_est` / `l1_cell_track` (command 3, FUN_0004b410 / FUN_000589d8) [C, partial]
+### 6.8 Dedicated-mode RX AFC — how the DSP tracks, and why the SDCCH drifts [C, RE-confirmed 2026-11-12, dsp-blob-CC874.dis]
+Mechanism, traced in the DSP blob (this supersedes an earlier draft that wrongly
+said normal bursts self-track and that command 3 must be posted once):
+- **`0xff72` bit 3 = the "tracked/camped" flag.** The type-2 decode at dis `0x82f2`
+  does `a1 = 8 & [0xff72]`: if set it uses the **stored per-cell RX timing**
+  `[0xebe2]`/`[0xebe4]` for the burst window (`[0xec1b]`/`[0xec25]`); if clear it
+  uses a wrong **default `0x0032`** → the window is off and the block fails.
+- **`[0xebe2]` (per-cell timing / AFC) is updated by a tracking loop** at
+  `0x7b04`/`0x7b5c`/`0x7b79`. That loop is reached **only** via `0x3f37` ← `0x8AC2`
+  inside the **type-3 FI handler (`0x88b2`)**, and via the sync (FCCH/SCH) path.
+  **The normal type-2 block decode (`0x8771` → `0x5c4a`) never calls it.**
+- **So normal bursts do NOT refresh AFC/timing.** SDCCH, SACCH and idle reads are
+  all type-2 — pure consumers, regardless of tag or CRC. On the dedicated timeslot
+  (no FCCH/SCH, no type-3) nothing refreshes the lock: it **coasts off the camp lock
+  for ~5 blocks (~1.2 s) then drifts out** and the decode collapses.
+- **Command 3 (`0x9ab4`) does NOT touch `0xff72` or `0xebe2`** — it re-selects
+  cell/channel/gain. So re-posting command 3 does **not** reset the tracked state.
+
+What this means for *our* OS (which lacks stock's continuous frame-driven tracking):
+- **Re-track (command 3) is the correct AFC refresh** — re-assert it on a timer and
+  after every uplink block (the PA keying pulls the synth). Pass the **current**
+  rxlev/gain each time (a stale gain → bad bursts → re-acquire from a bad measure).
+- **Do not** try to feed the loop with extra type-2 reads (SACCH/idle) — they don't
+  track. **Do not** FCCH-interleave (type-9 search retunes and shifts the frame
+  timer, trashing tn1).
+- **There is no ARM-postable AFC-refresh frame (RE'd 2026-11-12).** The type-3
+  handler (`0x88b2`) feeds the tracking loop and does **not** retune (no `0xfbxx`
+  synth writes), but stock's ARM **never posts type-3** — the sync-FI builder
+  (`FUN_000506e0`) is only ever called with type 9/10, and no builder posts type 3;
+  type-3 is an internal DSP frame type. The tracking loop is driven **only** by
+  DSP-internal paths (`0x43AC`, the type-3 handler, functions in `0x6xxx`/`0xCxxx`) —
+  **not** by the SCH/FCCH handlers (`0x8ee6`/`0x4e7d`), **not** by command 3
+  (`0x9ab4`→`0xf1f8` never reaches it), and **not** by the type-2 decode. The
+  per-burst demod (`0x32xx`) tests `0xffa0` but never writes the synth. So the
+  continuous fine AFC is internal to the DSP's RF state machine with **no ARM hook**:
+  command-3 re-track is only a coarse re-center (re-selects cell/gain/RF), which is
+  why it helps but caps short of stock's ~100%. Matching stock means porting the RF/
+  AFC state machine (PSRAM RF-control + the internal tracking cadence), not posting a
+  single FI. Pragmatic path for our OS: re-track at a tighter cadence (toward per-RX-
+  frame) with the current gain. See the "SDCCH AFC drift" memory.
+
+**TA is uplink-only — there is no RX TA (corrected 2026-11-11).** The dedicated RX
+window is *not* TA-shifted: it comes from the DSP's per-cell frame timing (set at
+SCH **sync**, held in the DSP cell-timing table ~`0xeb22+4·cell`) and the continuous
+AFC above. TA (`FUN_00062d92` → serving-cell RF shadow `scell+0xb/+0xc`, dirty
+`+0xe=1`) advances only the MS **transmitter** (TS 45.010) and is applied on the TX
+burst via share `+0x3e4` + the word-5 flag (§6.4). Note the stock RF-push chain
+(`FUN_00062dc2/62d78/62dce/63000`) writes only **PSRAM shadow structs**
+(`DAT_00062ec8/e74/63050`, the "PGMODE/PGPARAM" bookkeeping), **never the share
+window** — so there is no RX-TA share offset. Run-to-run SDCCH decode variability
+after fixing the FCCH-interleave is a **sync-timing / AGC-gain / AFC-lock quality**
+issue at establish (re-sync fresh right before command 3; check the gain/rxlev
+passed to command 3), not a missing TA.
+
+### 6.9 Dedicated-mode establish — `l1_dm_est` / `l1_cell_track` (command 3, FUN_0004b410 / FUN_000589d8) [C, partial]
 - `l1_cell_track(cell, rxlev)` posts `{3, cell, mode, rxlev, flags}`. A **tracked**
   cell's per-burst frequency error is steered into the AFC (DSP `0x79b3`) and the
   synth — and therefore the transmitter — follows the cell. **This is the piece

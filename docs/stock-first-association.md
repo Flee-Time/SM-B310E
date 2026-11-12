@@ -15,6 +15,35 @@ Two evidence levels:
 
 ---
 
+## RE-traced control flow (static, 2026-11-11)
+The phases below are not just spec-inferred — the stock L1 control flow was traced
+in Ghidra. The L1 is an event/state machine: **`SetState` = `FUN_0002f348`**, whose
+context struct is PSRAM `0x0422e0a8` (`+8` = current state) and which dispatches
+through a per-state handler table (`+0x40`). The state handlers (the `SetState`
+callers, cluster `FUN_000573xx–0x588xx`) each post DSP calls and transition:
+
+| Handler (fn) | Posts to DSP | Transitions |
+|---|---|---|
+| `FUN_0005a874` | **cmd 1** (`FUN_0004b3ca`, start frame clock) | `SetState(1)` |
+| `FUN_00057ab4` | — | `SetState(1)` |
+| `FUN_0005755e` / `FUN_00057352` | (`FUN_0004bd0c`, RF/chan) | `SetState(3)` |
+| `FUN_00057ec2` | (`FUN_0004bc86`, RF/chan) | **`SetState(4)` = SDCCH dedicated** |
+| `FUN_00058812` | (`FUN_0004b046`) | **`SetState(6)` = TCH dedicated** |
+| `FUN_000580d2` / `FUN_00058196` | — | `SetState(7)` |
+| `FUN_00058bea` | **cmd 0x0d** (`FUN_0004b6aa`) | `SetState(8)` |
+| **`FUN_000589d8`** (dedicated-establish) | **cmd 3** (`FUN_0004b410`) + RF writes (`FUN_00062dc2/62d78/62dce`) | `SetState(4)` SDCCH or `SetState(6)` TCH |
+
+**The association trigger path, fully RE-confirmed:** the PSRAM L1 router
+`FUN_003b13c6` calls `FUN_000589d8` (the only caller), which posts **command 3**
+with the channel-mode field from the serving-cell struct, runs the RF/analog
+register writes, and `SetState(4)` — i.e. it moves L1 into the **SDCCH dedicated
+state** that carries the LOCATION UPDATING. Frame-clock start (`FUN_0005a874` →
+cmd 1 → state 1) and the DSP wake sequence (`FUN_0005b004` → `ActiveDspByCmds`
+`FUN_0002f11a` → cmds 2, 0x1b, 0x2f) are likewise traced. State labels 3/7/8 are
+the receive/idle phases (their exact names need the runtime PSRAM table); states
+**1** (frame clock), **4** (SDCCH), **6** (TCH) are code-confirmed. So the ordered
+sequence below is the real control flow, not a spec guess.
+
 ## Phase A — DSP bring-up  [QEMU, confirmed]
 1. **Download.** Reset released; the boot ROM answers `DSP_READY`; the ARM
    downloads the DSP program from NOR 0xcc874 in **66 blocks of 1024 halfwords**
