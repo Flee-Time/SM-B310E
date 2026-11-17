@@ -160,7 +160,7 @@ def main():
         if p.poll() is None:
             p.terminate()
             p.wait()
-    log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in log.splitlines() if 'music: nothing played' in l]
     assert result['log'], 'no line in the log'
     print('PASS ' + json.dumps(result))

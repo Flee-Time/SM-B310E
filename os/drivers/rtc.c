@@ -36,6 +36,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
+#include "os/db.h"
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
@@ -324,7 +325,10 @@ uint32_t rtc_unix(int tz_min)
     return (uint32_t)((int64_t)now_seconds() + UNIX_1980 - (int64_t)tz_min * 60);
 }
 
-#define CLOCK_FILE OS_DIR "/clock.txt"
+/* The saved time is "clock.saved" in the store (seconds since 1980); until
+ * 2026-11-17 it was clock.txt, read once into the store. */
+#define CLOCK_KEY  "clock.saved"
+#define OLD_FILE   OS_DIR "/clock.txt"
 #define PLAUSIBLE_DAYS (30u * 366u)     /* past this build's date: not a clock */
 #define SAVED_DAYS     (3u * 366u)      /* past the saved time: off that long? no */
 
@@ -339,37 +343,43 @@ static uint32_t build_seconds(void)
 #undef TWO
 }
 
+/* Into the store; written with the other settings a second later (db_sync at
+ * power-off) */
 void rtc_save(void)
 {
-    char buf[16];
-    FIL f;
-    UINT n;
-    int len = snprintf(buf, sizeof(buf), "%lu\n", (unsigned long)now_seconds());
-
-    if (f_open(&f, CLOCK_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
-        f_write(&f, buf, (UINT)len, &n);
-        f_close(&f);
-    }
+    db_set_int(CLOCK_KEY, (int)now_seconds());
 }
 
-void rtc_restore(void)
+static uint32_t import_clock(void)
 {
     char buf[16];
     FIL f;
     UINT n = 0;
-    uint32_t saved = 0, now = now_seconds(), to, built = build_seconds();
-    uint32_t day = adi_read(RTC_DAY) & 0xffff, last_day = built / 86400u + PLAUSIBLE_DAYS;
-    bool time_bad = (adi_read(RTC_HOUR) & 0x1f) > 23 || (adi_read(RTC_MIN) & 0x3f) > 59 ||
-                    (adi_read(RTC_SEC) & 0x3f) > 59;
-    rtc_datetime_t t;
+    uint32_t saved = 0;
 
-    if (f_open(&f, CLOCK_FILE, FA_READ) == FR_OK) {
+    if (f_open(&f, OLD_FILE, FA_READ) == FR_OK) {
         f_read(&f, buf, sizeof(buf) - 1, &n);
         f_close(&f);
         buf[n] = 0;
         for (char *p = buf; *p >= '0' && *p <= '9'; p++)
             saved = saved * 10 + (uint32_t)(*p - '0');
+        if (saved)
+            db_set_int(CLOCK_KEY, (int)saved);
     }
+    db_set_bool("import.clock", true);
+    return saved;
+}
+
+void rtc_restore(void)
+{
+    uint32_t saved, now = now_seconds(), to, built = build_seconds();
+    uint32_t day = adi_read(RTC_DAY) & 0xffff, last_day = built / 86400u + PLAUSIBLE_DAYS;
+    bool time_bad = (adi_read(RTC_HOUR) & 0x1f) > 23 || (adi_read(RTC_MIN) & 0x3f) > 59 ||
+                    (adi_read(RTC_SEC) & 0x3f) > 59;
+    rtc_datetime_t t;
+
+    saved = db_get_bool("import.clock", false) ? (uint32_t)db_get_int(CLOCK_KEY, 0)
+                                                : import_clock();
     if (saved / 86400u > last_day)      /* saved from a clock that had gone wrong */
         saved = 0;
     /* the clock is saved all the time it runs, and runs while the phone is off:

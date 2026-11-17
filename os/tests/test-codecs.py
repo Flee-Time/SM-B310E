@@ -320,7 +320,7 @@ def main():
         loud = {n: d for n, d in result['level_db'].items() if abs(d) > 1.5}
         assert not loud, ('level', loud, result)
 
-    log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     (out / 'card-log.txt').write_text(log)
     result['log'] = [l.split(' media: ', 1)[1] for l in log.splitlines() if ' media: ' in l]
     for n, hz in files:

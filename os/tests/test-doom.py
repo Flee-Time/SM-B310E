@@ -235,7 +235,7 @@ def main():
             key('f2', wait=0.5)
             qmp.command('quit')
             p.wait(timeout=20)
-            log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+            log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
             lines = [x for x in log.splitlines() if 'the screen is dark' in x or 'going on after' in x]
             result['log'] = lines
             assert any('going on after' in x for x in lines), lines
@@ -364,7 +364,7 @@ def main():
             p.wait()
 
     img = card.read_bytes()
-    log = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(img, '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in log.splitlines() if 'doom' in l]
     result['config'] = bool(card_file(img, f'{DIR}/default.cfg'))
     save = card_file(img, f'{DIR}/doomsav0.dsg') or b''

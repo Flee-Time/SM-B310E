@@ -1,6 +1,12 @@
-/* B310E OS — Notes: short texts, one file each in /b310e-os/notes
- * (NOTE0001.TXT ...), written with the multi-tap editor. The list shows
- * each note's first line, newest first; Center opens one, LSoft deletes.
+/* B310E OS — Notes: short texts, records of the app's "notes" table in the
+ * store (os/db.h; the text in UTF-8), written with the multi-tap editor. The
+ * list shows each note's first line, newest first; Center opens one, LSoft
+ * deletes.
+ *
+ * Until 2026-11-17 each note was a file, /b310e-os/notes/NOTE0001.TXT ...:
+ * they are read into the table once, oldest first, and left where they are.
+ * A note longer than the editor takes (one from a PC) opens to read only:
+ * saving what the editor loaded would cut the rest.
  *
  * A loadable app (os/modules); it was built into the OS until 2026-11-07.
  *
@@ -9,27 +15,30 @@
 #include "app.h"
 #include "icons.h"
 
-#define OS_DIR     "/b310e-os"
-#define NOTES_DIR  OS_DIR "/notes"
-#define NOTE_MAX   2000                 /* characters in one note */
-#define MAX_NOTES  64
+#define NOTES_DIR  "/b310e-os/notes"    /* the old files */
+#define NOTE_MAX   2000                 /* bytes the editor takes */
+#define MAX_NOTES  256                  /* listed */
+#define MAX_FILES  1024                 /* old files read in */
 #define FIRST_LINE 28
+#define BUF_SIZE   (DB_REC_MAX + 16)
+#define FILE_MAX   ((DB_REC_MAX - 64) / 2)  /* an old file's bytes: as UTF-8 they may double */
+
+enum { F_TEXT, F_FILE };
+static const db_field_t fields[] = { { "text", DB_STR }, { "file", DB_INT } };
+static const db_schema_t schema = { "notes", 1, 2, -1, fields, NULL };
 
 typedef struct {
-    uint16_t number;                    /* NOTEnnnn.TXT */
+    uint32_t id;
     char first[FIRST_LINE];
 } note_t;
 
+static db_table_t *table;
 static note_t *notes;
+static char *buf;                       /* one note */
 static int count;
 static list_t list;
 static bool stale = true;
-static int editing = -1;                /* the note number being edited; 0: new */
-
-static void path_of(int number, char *out, int n)
-{
-    snprintf(out, (size_t)n, NOTES_DIR "/NOTE%04d.TXT", number);
-}
+static uint32_t editing;                /* the note being edited; 0: new */
 
 static int number_of(const char *name)
 {
@@ -45,50 +54,104 @@ static int number_of(const char *name)
     return v;
 }
 
-static void load(void)
+/* NOTEnnnn.TXT into the table, by number; one too long for a record stays a file */
+static void import_one(int num, char *tmp)
 {
+    char path[48];
+    FIL f;
+    UINT n = 0;
+    size_t len;
+    db_value_t v[2];
+
+    snprintf(path, sizeof(path), NOTES_DIR "/NOTE%04d.TXT", num);
+    if (f_open(&f, path, FA_READ) != FR_OK)
+        return;
+    if (f_size(&f) > FILE_MAX) {
+        f_close(&f);
+        klog("notes: %s too long for the store, left as a file", path);
+        return;
+    }
+    f_read(&f, buf, FILE_MAX, &n);
+    f_close(&f);
+    len = 0;
+    for (UINT k = 0; k < n; k++)        /* CR LF from a PC: LF */
+        if (buf[k] != '\r' && buf[k])
+            buf[len++] = buf[k];
+    len = utf8_from_latin1(buf, len, tmp, BUF_SIZE);
+    v[F_TEXT].p = tmp;
+    v[F_TEXT].len = len;
+    v[F_FILE].i = num;
+    if (db_insert(table, v, 2))
+        klog("notes: %s read into the store", path);
+}
+
+static void import_files(void)
+{
+    uint16_t *nums = malloc(MAX_FILES * sizeof(uint16_t));
+    char *tmp = malloc(BUF_SIZE);
     DIR dir;
     FILINFO fi;
+    int n = 0;
+
+    if (nums && tmp && f_opendir(&dir, NOTES_DIR) == FR_OK) {
+        while (n < MAX_FILES && f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
+            int num = number_of(fi.fname), at;
+
+            if (!num || (fi.fattrib & AM_DIR))
+                continue;
+            for (at = n; at > 0 && nums[at - 1] > num; at--)    /* oldest first */
+                nums[at] = nums[at - 1];
+            nums[at] = (uint16_t)num;
+            n++;
+        }
+        f_closedir(&dir);
+        for (int i = 0; i < n; i++)
+            import_one(nums[i], tmp);
+    }
+    if (nums && tmp)
+        db_set_bool("imported", true);
+    free(nums);
+    free(tmp);
+}
+
+static void load(void)
+{
+    uint32_t *ids;
+    int n;
 
     count = 0;
     stale = false;
     if (!notes)
         notes = malloc(sizeof(*notes) * MAX_NOTES);
-    if (!notes || f_opendir(&dir, NOTES_DIR) != FR_OK)
+    if (!buf)
+        buf = malloc(BUF_SIZE);
+    if (!table)
+        table = db_table_open(&schema);
+    if (!notes || !buf || !table)
         goto done;
-    while (count < MAX_NOTES && f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
-        int num = number_of(fi.fname);
-        char path[48];
-        FIL f;
-        UINT n = 0;
-        note_t *t;
-        int at;
+    if (!db_get_bool("imported", false))
+        import_files();
+    ids = malloc(MAX_NOTES * sizeof(uint32_t));
+    n = ids ? db_find(table, -1, NULL, ids, MAX_NOTES, 0) : 0;
+    for (int i = 0; i < n; i++) {
+        db_value_t v[2];
+        note_t *t = &notes[count];
+        uint32_t len = 0;
 
-        if (!num || (fi.fattrib & AM_DIR))
+        if (db_get(table, ids[i], v, 2, buf, BUF_SIZE) != DB_OK)
             continue;
-        /* newest (highest number) first */
-        for (at = 0; at < count && notes[at].number > num; at++)
-            ;
-        memmove(&notes[at + 1], &notes[at], sizeof(*notes) * (size_t)(count - at));
-        t = &notes[at];
-        t->number = (uint16_t)num;
-        t->first[0] = 0;
-        path_of(num, path, sizeof(path));
-        if (f_open(&f, path, FA_READ) == FR_OK) {
-            f_read(&f, t->first, FIRST_LINE - 1, &n);
-            f_close(&f);
-        }
-        t->first[n] = 0;
-        for (UINT i = 0; i < n; i++)
-            if (t->first[i] == '\n' || t->first[i] == '\r') {
-                t->first[i] = 0;
-                break;
-            }
+        while (len < v[F_TEXT].len && buf[len] != '\n')
+            len++;
+        if (len > FIRST_LINE - 1)
+            len = utf8_cut(v[F_TEXT].p, FIRST_LINE - 1);
+        memcpy(t->first, v[F_TEXT].p, len);
+        t->first[len] = 0;
         if (!t->first[0])
             snprintf(t->first, FIRST_LINE, "(empty)");
+        t->id = ids[i];
         count++;
     }
-    f_closedir(&dir);
+    free(ids);
 done:
     list.count = count + 1;
     if (list.sel >= list.count)
@@ -110,97 +173,62 @@ static const icon_t *item_icon(void *ctx, int i)
 
 static void saved(const char *text, void *ctx)
 {
-    char path[48];
-    FIL f;
-    UINT n;
-    int num = editing;
     size_t len = strlen(text);
+    db_value_t v = { .p = text, .len = len };
+    char *fixed = NULL;
+    int r;
 
-    if (num == 0) {                     /* new: the next free number */
-        if (!len)
-            return;                     /* nothing typed: no file */
-        f_mkdir(OS_DIR);
-        f_mkdir(NOTES_DIR);
-        num = 1;
-        for (int i = 0; i < count; i++)
-            if (notes[i].number >= num)
-                num = notes[i].number + 1;
-    }
-    path_of(num, path, sizeof(path));
-    /* the list holds 64: past that, the highest listed is not the highest there is */
-    while (editing == 0 && num <= 9999 && f_stat(path, NULL) == FR_OK) {
-        num++;
-        path_of(num, path, sizeof(path));
-    }
-    if (num > 9999) {                   /* NOTE9999 is the last name the list knows */
-        ui_message("Notes", "No free note number left.");
+    if (!table)
         return;
+    if (!utf8_valid(text, len) && (fixed = malloc(2 * len + 1))) {
+        v.len = utf8_from_latin1(text, len, fixed, 2 * len + 1);
+        v.p = fixed;
     }
-    if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+    if (editing) {
+        r = db_update_field(table, editing, F_TEXT, &v);
+    } else {
+        if (!len) {
+            free(fixed);
+            return;                     /* nothing typed: no note */
+        }
+        r = (editing = db_insert(table, &v, 1)) ? DB_OK : DB_EIO;
+    }
+    free(fixed);
+    if (r != DB_OK) {
         ui_message("Notes", "Could not save the note.");
         return;
     }
-    f_write(&f, text, (UINT)len, &n);
-    f_close(&f);
-    klog("notes: saved NOTE%04d.TXT, %u bytes", num, (unsigned)len);
+    klog("notes: saved note %lu, %u bytes", (unsigned long)editing, (unsigned)v.len);
     stale = true;
 }
 
 static void open_note(int i)
 {
-    char path[48];
-    char *buf;
-    FIL f;
-    UINT n = 0;
+    db_value_t v[2];
 
     if (i == 0) {
         editing = 0;
         ui_text_edit("New note", "", NOTE_MAX, true, saved, NULL);
         return;
     }
-    buf = malloc(NOTE_MAX + 1);
-    if (!buf)
-        return;
-    editing = notes[i - 1].number;
-    path_of(editing, path, sizeof(path));
-    if (f_open(&f, path, FA_READ) != FR_OK) {
-        free(buf);                      /* an empty editor would save over it */
-        ui_message("Notes", "Could not open the note.");
+    editing = notes[i - 1].id;
+    if (!buf || db_get(table, editing, v, 2, buf, BUF_SIZE) != DB_OK) {
+        ui_message("Notes", "Could not open the note.");   /* an empty editor would save over it */
         return;
     }
-    {
-        bool too_long = f_size(&f) > NOTE_MAX;
-
-        f_read(&f, buf, NOTE_MAX, &n);
-        f_close(&f);
-        buf[n] = 0;
-        if (too_long) {                 /* saving the part loaded would cut the rest */
-            ui_text_view("Note (too long to edit)", buf);
-            free(buf);
-            return;
-        }
-    }
-    {
-        UINT w = 0;
-
-        for (UINT k = 0; k < n; k++)    /* CR LF from a PC: LF */
-            if (buf[k] != '\r')
-                buf[w++] = buf[k];
-        buf[w] = 0;
+    if (v[F_TEXT].len > NOTE_MAX) {     /* saving the part loaded would cut the rest */
+        ui_text_view("Note (too long to edit)", buf);
+        return;
     }
     ui_text_edit("Note", buf, NOTE_MAX, true, saved, NULL);
-    free(buf);
 }
 
-static int to_delete;
+static uint32_t to_delete;
 
 static void delete_yes(void)
 {
-    char path[48];
-
-    path_of(to_delete, path, sizeof(path));
-    if (f_unlink(path) == FR_OK)
-        klog("notes: deleted NOTE%04d.TXT", to_delete);
+    if (table && db_remove(table, to_delete) == DB_OK)
+        klog("notes: deleted note %lu", (unsigned long)to_delete);
     stale = true;
 }
 
@@ -220,10 +248,10 @@ static void key(screen_t *s, const key_event_t *ev)
         return;
     }
     if (ev->code == KEY_CENTER || (ev->code == KEY_LSOFT && list.sel == 0)) {
-        if (card_mounted())
+        if (card_mounted() && table)
             open_note(list.sel);
     } else if (ev->code == KEY_LSOFT && list.sel > 0) {
-        to_delete = notes[list.sel - 1].number;
+        to_delete = notes[list.sel - 1].id;
         ui_confirm("Delete note", notes[list.sel - 1].first, delete_yes);
     } else if (ev->code == KEY_RSOFT) {
         ui_pop();
@@ -233,7 +261,9 @@ static void key(screen_t *s, const key_event_t *ev)
 static void leave(screen_t *s)
 {
     free(notes);
+    free(buf);
     notes = NULL;
+    buf = NULL;
     stale = true;
 }
 

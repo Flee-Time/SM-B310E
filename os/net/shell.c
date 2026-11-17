@@ -32,6 +32,7 @@
 #include "build_info.h"
 #include "os/app.h"
 #include "os/arch.h"
+#include "os/db.h"
 #include "os/drivers.h"
 #include "os/dsp.h"
 #include "os/fs.h"
@@ -258,8 +259,10 @@ static bool read_line(sess_t *s)
                 over = true;
             continue;
         }
-        if (b == 8 || b == 127) {               /* Backspace */
+        if (b == 8 || b == 127) {               /* Backspace: a whole UTF-8 character */
             if (n) {
+                while (n > 1 && ((uint8_t)s->line[n - 1] & 0xc0) == 0x80)
+                    n--;
                 n--;
                 out_text(s, "\b \b", 3);
             }
@@ -271,10 +274,10 @@ static bool read_line(sess_t *s)
             strncpy(s->line, "exit", sizeof(s->line));
             out_text(s, "\n", 1);
             return true;
-        } else if (b >= 32 && b < 127 && n < LINE_MAX) {
+        } else if (b >= 32 && b != 127 && n < LINE_MAX) {   /* UTF-8 too (db set) */
             s->line[n++] = (char)b;
             put_byte(s, (char)b);
-        } else if (b >= 32 && b < 127) {
+        } else if (b >= 32 && b != 127) {
             over = true;
         }
         if (s->in_pos == s->in_len)
@@ -1718,6 +1721,247 @@ static void c_prof(sess_t *s, int argc, char **argv)
         say(s, "%lu samples in %lu ms to %s\n", (unsigned long)n, (unsigned long)ms, s->path);
 }
 
+/* ---- the data store (os/db.h) ------------------------------------------------- */
+
+static const char *db_err(int r)
+{
+    switch (r) {
+    case DB_ENOENT: return "no such key, record or table";
+    case DB_EINVAL: return "bad name or value (UTF-8?)";
+    case DB_ENOCARD: return "no card (or USB has it)";
+    case DB_ENOMEM: return "out of memory";
+    case DB_EIO: return "card error";
+    case DB_ETOOBIG: return "too big";
+    }
+    return r ? "error" : "ok";
+}
+
+/* a string as the export writes it: quoted, control bytes escaped, UTF-8 as it is */
+static void say_str(sess_t *s, const char *p, uint32_t n)
+{
+    put_byte(s, '"');
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t c = (uint8_t)p[i];
+
+        if (c == '\n')
+            out_text(s, "\\n", 2);
+        else if (c == '"' || c == '\\')
+            say(s, "\\%c", c);
+        else if (c < 0x20 || c == 0x7f)
+            say(s, "\\x%02x", c);
+        else
+            out_text(s, p + i, 1);
+    }
+    put_byte(s, '"');
+}
+
+static void say_blob(sess_t *s, const uint8_t *p, uint32_t n)
+{
+    say(s, "x");
+    for (uint32_t i = 0; i < n && i < 64; i++)
+        say(s, "%02x", p[i]);
+    if (n > 64)
+        say(s, "... (%lu bytes)", (unsigned long)n);
+}
+
+static void say_value(sess_t *s, int type, const db_value_t *v)
+{
+    if (type == DB_STR)
+        say_str(s, v->p, v->len);
+    else if (type == DB_BLOB)
+        say_blob(s, v->p, v->len);
+    else if (type == DB_BOOL)
+        say(s, "%s", v->i ? "true" : "false");
+    else
+        say(s, "%ld", (long)v->i);
+}
+
+static void say_key(sess_t *s, const char *key)
+{
+    static const char *const names[] = { "-", "int", "bool", "str", "blob" };
+    int type = db_type(key);
+    db_value_t v = { 0 };
+    char *buf = NULL;
+
+    if (type == DB_STR || type == DB_BLOB) {
+        if (!(buf = kmalloc(DB_REC_MAX + 1))) {
+            say(s, "ERR out of memory\n");
+            return;
+        }
+        v.p = buf;
+        v.len = (uint32_t)(type == DB_STR ? db_get_str(key, buf, DB_REC_MAX + 1, NULL)
+                                          : db_get_blob(key, buf, DB_REC_MAX));
+    } else if (type) {
+        v.i = db_get_int(key, 0);
+    }
+    say(s, "%s %s ", key, names[type]);
+    say_value(s, type, &v);
+    say(s, "\n");
+    kfree(buf);
+}
+
+static void db_list(sess_t *s)
+{
+    db_table_t *t[DB_TABLES];
+    uint32_t size, dead;
+    int keys, n = db_table_list(t, DB_TABLES);
+
+    db_stats(&size, &dead, &keys);
+    say(s, "%s: %lu bytes, %lu of them old values; %d keys, %lu card writes since boot\n",
+        DB_PATH, (unsigned long)size, (unsigned long)dead, keys, (unsigned long)db_writes());
+    for (int i = 0; i < n; i++)
+        say(s, "  %-28s %6d records %8lu bytes\n", db_table_name(t[i]), db_count(t[i]),
+            (unsigned long)db_table_bytes(t[i]));
+}
+
+static void db_dump(sess_t *s, const char *name, int max)
+{
+    db_table_t *t = db_table_find(name);
+    db_field_t f[DB_FIELDS];
+    db_value_t v[DB_FIELDS];
+    uint32_t ids[32], before = 0;
+    int version, index, nf, shown = 0;
+    uint8_t *buf;
+
+    if (!t) {
+        say(s, "ERR no table %s\n", name);
+        return;
+    }
+    nf = db_table_layout(t, f, DB_FIELDS, &version, &index);
+    say(s, "%s, version %d, %d records, newest first:", name, version, db_count(t));
+    for (int i = 0; i < nf; i++)
+        say(s, " %s%s", f[i].name, i == index ? "*" : "");
+    say(s, "\n");
+    if (!(buf = kmalloc(DB_REC_MAX + DB_FIELDS + 16))) {
+        say(s, "ERR out of memory\n");
+        return;
+    }
+    while (shown < max && !s->quit) {
+        int n = db_find(t, -1, NULL, ids, max - shown < 32 ? max - shown : 32, before);
+
+        if (n <= 0)
+            break;
+        for (int i = 0; i < n; i++) {
+            int r = db_get(t, ids[i], v, nf, buf, DB_REC_MAX + DB_FIELDS + 16);
+
+            say(s, "%6lu", (unsigned long)ids[i]);
+            for (int j = 0; j < nf && !r; j++) {
+                say(s, " %s=", f[j].name);
+                say_value(s, f[j].type, &v[j]);
+            }
+            if (r)
+                say(s, " ERR %s", db_err(r));
+            say(s, "\n");
+        }
+        shown += n;
+        before = ids[n - 1];
+    }
+    kfree(buf);
+}
+
+static bool db_int(const char *p, int *v)
+{
+    bool neg = *p == '-';
+    uint32_t x;
+
+    if (!parse_num(neg ? p + 1 : p, &x))
+        return false;
+    *v = neg ? -(int)x : (int)x;
+    return true;
+}
+
+static void db_set(sess_t *s, const char *key, const char *value, const char *as)
+{
+    int type = as ? (streq(as, "int") ? DB_INT : streq(as, "bool") ? DB_BOOL :
+                     streq(as, "str") ? DB_STR : DB_NONE) : db_type(key);
+    int v = 0, r;
+
+    if (as && !type) {
+        say(s, "ERR type: int, bool or str\n");
+        return;
+    }
+    if (!type)                          /* new: a number is an int */
+        type = db_int(value, &v) ? DB_INT : DB_STR;
+    if (type == DB_BOOL)
+        r = streq(value, "true") || streq(value, "1") ? db_set_bool(key, true) :
+            streq(value, "false") || streq(value, "0") ? db_set_bool(key, false) : DB_EINVAL;
+    else if (type == DB_INT)
+        r = db_int(value, &v) ? db_set_int(key, v) : DB_EINVAL;
+    else if (type == DB_STR)
+        r = db_set_str(key, value);
+    else
+        r = DB_EINVAL;                  /* bytes: through an import */
+    if (r)
+        say(s, "ERR %s: %s\n", key, db_err(r));
+    else
+        say_key(s, key);
+}
+
+static void c_db(sess_t *s, int argc, char **argv)
+{
+    const char *sub = argc > 1 ? argv[1] : "list";
+    int r, line;
+
+    if (streq(sub, "list")) {
+        db_list(s);
+    } else if (streq(sub, "keys")) {
+        char key[DB_KEY_MAX] = "";
+        const char *prefix = argc > 2 ? argv[2] : "";
+        size_t pl = strlen(prefix);
+
+        while (!s->quit && db_key_next(key, key))
+            if (!memcmp(key, prefix, pl))
+                say_key(s, key);
+    } else if (streq(sub, "get") && argc > 2) {
+        if (db_type(argv[2]))
+            say_key(s, argv[2]);
+        else
+            say(s, "ERR %s: %s\n", argv[2], db_err(DB_ENOENT));
+    } else if (streq(sub, "set") && argc > 3) {
+        db_set(s, argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+    } else if ((streq(sub, "del") || streq(sub, "rm")) && argc > 2) {
+        if ((r = db_delete(argv[2])))
+            say(s, "ERR %s: %s\n", argv[2], db_err(r));
+        else
+            say(s, "OK\n");
+    } else if (streq(sub, "dump") && argc > 2) {
+        uint32_t n = 20;
+
+        if (argc > 3 && !parse_num(argv[3], &n))
+            n = 20;
+        db_dump(s, argv[2], (int)n);
+    } else if (streq(sub, "export") || streq(sub, "import")) {
+        bool out = streq(sub, "export");
+
+        if (!need_card(s) || !resolve(s, argc > 2 ? argv[2] : OS_DIR "/data.txt", s->path))
+            return;
+        if (!out && argc < 3) {
+            say(s, "usage: db import FILE\n");
+            return;
+        }
+        r = out ? db_export(s->path) : db_import(s->path, &line);
+        if (r && !out && r == DB_EINVAL)
+            say(s, "ERR %s: line %d is wrong; nothing changed\n", s->path, line);
+        else if (r)
+            say(s, "ERR %s: %s\n", s->path, db_err(r));
+        else
+            say(s, "OK %s %s\n", out ? "written to" : "read from", s->path);
+        if (!r)
+            klog("shell: db %s %s", sub, s->path);
+    } else if (streq(sub, "compact")) {
+        if ((r = db_compact()))
+            say(s, "ERR %s\n", db_err(r));
+        else
+            db_list(s);
+    } else if (streq(sub, "sync")) {
+        db_sync();
+        say(s, "OK\n");
+    } else {
+        say(s, "usage: db [list] | keys [PREFIX] | get KEY | set KEY VALUE [int|bool|str] |\n"
+               "       del KEY | dump TABLE [N] | export [FILE] | import FILE | compact | sync\n");
+    }
+}
+
 static void c_echo(sess_t *s, int argc, char **argv)
 {
     for (int i = 1; i < argc; i++)
@@ -1760,6 +2004,7 @@ static const cmd_t cmds[] = {
     { "df", "", "card space", c_df },
     { "crc", "FILE", "CRC32 and size", c_crc },
     { "date", "[UNIX]", "the clock, or set it (UTC seconds)", c_date },
+    { "db", "[SUB ...]", "the data store: list keys get set del dump export import compact", c_db },
     { "put", "PATH SIZE", "upload (raw port)", c_put },
     { "get", "PATH", "download (raw port)", c_get },
     { "shot", "", "the screen, RGB565 (raw port)", c_shot },

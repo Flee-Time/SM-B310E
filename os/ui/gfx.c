@@ -273,6 +273,27 @@ int gfx_text_height(int font, int scale)
     return cap_height(pick(font, scale));
 }
 
+/* Text is UTF-8: one character, its bytes passed. Glyphs are found by a code
+ * up to 255 (font_glyph_t); the fonts hold ASCII only today (os/tools/mkfont.py),
+ * so anything else is one '?' (glyph_or), not one a byte. */
+static unsigned char next_char(const char **s)
+{
+    const unsigned char *p = (const unsigned char *)*s;
+    int more = p[0] < 0x80 ? 0 : p[0] >= 0xf0 ? 3 : p[0] >= 0xe0 ? 2 : p[0] >= 0xc0 ? 1 : 0;
+    int i = 1;
+
+    while (i <= more && (p[i] & 0xc0) == 0x80)
+        i++;
+    if (i != more + 1) {                /* a broken sequence: a byte at a time */
+        *s += 1;
+        return '?';
+    }
+    *s += i;
+    if (more == 1 && p[0] <= 0xc3)      /* U+0080..U+00FF: Latin-1's code */
+        return (unsigned char)((p[0] & 0x1f) << 6 | (p[1] & 0x3f));
+    return p[0] < 0x80 ? p[0] : '?';
+}
+
 static int char_width(const font_t *f, unsigned char ch)
 {
     const font_glyph_t *g = glyph_or(&f, ch);
@@ -286,7 +307,7 @@ int gfx_text_width(const char *s, int font, int scale)
     int w = 0;
 
     while (*s)
-        w += char_width(f, (unsigned char)*s++);
+        w += char_width(f, next_char(&s));
     return w;
 }
 
@@ -311,18 +332,20 @@ int gfx_text(int x, int y, const char *s, uint16_t c, int font, int scale,
         int dots = 2 * char_width(f, '.');
 
         while (*s) {
-            int cw = char_width(f, (unsigned char)*s);
+            const char *at = s;
+            unsigned char ch = next_char(&at);
 
-            if (x + cw - x0 > max_w - dots)
+            if (x + char_width(f, ch) - x0 > max_w - dots)
                 break;
-            x += draw_char(x, base, f, (unsigned char)*s++, c);
+            x += draw_char(x, base, f, ch, c);
+            s = at;
         }
         x += draw_char(x, base, f, '.', c);
         x += draw_char(x, base, f, '.', c);
         return x - x0;
     }
     while (*s)
-        x += draw_char(x, base, f, (unsigned char)*s++, c);
+        x += draw_char(x, base, f, next_char(&s), c);
     return x - x0;
 }
 

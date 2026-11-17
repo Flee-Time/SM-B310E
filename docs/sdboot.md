@@ -423,7 +423,8 @@ reboot comes back to the OS instead of the stock firmware; a crash that calls
 `arch_reboot()` directly, or a hung watchdog, still goes to the stock firmware. **Power → Restart to menu** uses 0xb1 (without the loader in NOR
 it says so). **Restart B310E OS** chains `/payloads/b310e-os.bin` without a
 reset (it keeps the clock), and falls back to 0xb2 when that fails. A watchdog reset clears the RTC; the OS
-gets the time back from `clock.txt` and SNTP.
+gets the time back from the time it saved (`clock.saved` in the data store,
+`/b310e-os/data`; `clock.txt` before 2026-11-17) and SNTP.
 
 **A request and a hard reset** failed on the phone up to v1.17, on battery and
 charging (the byte above). v1.18 moves the request to 0x82001148: 0xb2 works on

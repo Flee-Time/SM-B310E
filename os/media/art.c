@@ -1408,7 +1408,9 @@ static struct {
     int state;                          /* 0 none yet, 1 ready, 2 no cover */
 } art;
 
-/* ---- the thumbnail cache: /b310e-os/cache/art/<hash>.bin -------------------- */
+/* ---- the thumbnail cache: /b310e-os/cache/art/<hash> ------------------------ */
+/* (the OS's own files have no extension; <hash>.bin ones from before are left
+ * unused, and Settings -> Storage -> Covers deletes them with the rest) */
 
 #define CACHE_DIR   "/b310e-os/cache/art"
 #define CACHE_MAGIC 0x31545241u         /* "ART1" */
@@ -1435,7 +1437,7 @@ static bool cache_load(uint32_t key, int side, uint16_t *px)
     UINT n = 0;
     bool ok;
 
-    snprintf(path, sizeof(path), CACHE_DIR "/%08lx.bin", (unsigned long)key);
+    snprintf(path, sizeof(path), CACHE_DIR "/%08lx", (unsigned long)key);
     if (f_open(&f, path, FA_READ) != FR_OK)
         return false;
     ok = f_read(&f, hdr, sizeof(hdr), &n) == FR_OK && n == sizeof(hdr) &&
@@ -1454,7 +1456,7 @@ static void cache_save(uint32_t key, int side, const uint16_t *px)
 
     f_mkdir("/b310e-os/cache");
     f_mkdir(CACHE_DIR);
-    snprintf(path, sizeof(path), CACHE_DIR "/%08lx.bin", (unsigned long)key);
+    snprintf(path, sizeof(path), CACHE_DIR "/%08lx", (unsigned long)key);
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
         return;
     f_write(&f, hdr, sizeof(hdr), &n);

@@ -16,8 +16,9 @@ through QTest while the guest runs, and drives it with key presses:
   - the clock governor runs 104 MHz at rest and 26 MHz with the panel
     asleep, and the idle share stays high while dark (the accounting);
   - Power -> Power off -> Yes powers the machine off;
-then checks the card image for the self-test file, the saved setting and
-the card log, and saves a screenshot of every screen.
+then checks the card image for the self-test file, the saved setting (in
+the data store, /b310e-os/data) and the card log (/b310e-os/log), and saves
+a screenshot of every screen.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -85,7 +86,7 @@ def card_list(image, path):
 
 def card_file(image, path, listing=False):
     """The bytes of a file on the FAT32 card image (8.3 or long names; the
-    path like '/b310e-os/log.txt', case-insensitive), or None. Follows the
+    path like '/b310e-os/log', case-insensitive), or None. Follows the
     cluster chain, so a fragmented log reads whole."""
     part = 0
     if image[510:512] == b'\x55\xaa' and image[0x1be + 4] in (0x0b, 0x0c):
@@ -160,6 +161,18 @@ def card_file(image, path, listing=False):
         if i == len(parts) - 1:
             return None if is_dir else chain(c)[:size]
     return None
+
+
+def store(image):
+    """The data store on the card image (/b310e-os/data, os/tools/b310e-db.py's
+    parse): .keys {key: value}, .tables {name: Table with .records {id: [values]}}."""
+    db = runpy.run_path(str(REPO / 'os/tools/b310e-db.py'))
+    return db['parse'](card_file(image, '/b310e-os/data') or b'')
+
+
+def store_keys(image, prefix=''):
+    """The store's keys starting with prefix: {key: value}"""
+    return {k: v for k, v in store(image).keys.items() if k.startswith(prefix)}
 
 
 def status(qt, base):
@@ -410,16 +423,16 @@ def main():
     image = card.read_bytes()
     result['selftest_file'] = FS_PATTERN in image
     result['fsinfo_free_clusters'] = fsinfo_free(image)[1]
-    settings = (card_file(image, '/b310e-os/settings.txt') or b'').decode(errors='replace')
-    result['settings_file'] = settings.splitlines()
-    result['settings_saved'] = ('brightness=80' in result['settings_file'] and
-                                'screen_timeout=15' in result['settings_file'])
-    log_text = (card_file(image, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    settings = store_keys(image, 'ui.')
+    result['settings_store'] = settings
+    result['settings_saved'] = (settings.get('ui.brightness') == 80 and
+                                settings.get('ui.screen_timeout') == 15)
+    log_text = (card_file(image, '/b310e-os/log') or b'').decode(errors='replace')
     result['card_log'] = log_text.splitlines()[:10]
     (out / 'card-log.txt').write_text(log_text)
     assert result['selftest_file'], 'self-test file not on the card image'
     assert result['fsinfo_free_clusters'] != 0xffffffff, 'free count not written back to FSINFO'
-    assert result['settings_saved'], ('brightness and timeout not saved', result['settings_file'])
+    assert result['settings_saved'], ('brightness and timeout not saved', result['settings_store'])
     assert 'self-test card ok' in log_text and 'power off' in log_text, log_text
     assert 'boot: B310E OS built' in log_text and 'counted in' in log_text, log_text
     assert 'app: Stopwatch loaded' in log_text and 'stopwatch: started' in log_text, log_text

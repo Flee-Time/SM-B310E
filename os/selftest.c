@@ -152,7 +152,7 @@ void selftest_kernel(void)
 }
 
 /* Card: write a 32 KB pattern file, read it back, compare. */
-#define FS_TEST_FILE OS_DIR "/selftest.bin"
+#define FS_TEST_FILE OS_DIR "/selftest"  /* the OS's own: no extension */
 #define FS_TEST_SIZE (32u * 1024)
 
 void selftest_card(void)

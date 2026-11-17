@@ -36,6 +36,7 @@
 #include "ff.h"
 #include "os/alarm.h"
 #include "os/audio.h"
+#include "os/db.h"
 #include "os/dsp.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -90,7 +91,10 @@
 /* 2.16 (2026-11-10): app_on_fault, after ui_depth. The NOR window is read-only:
  * a store there (a NULL pointer's) by an app's thread no longer stops the OS;
  * the thread goes to the handler it set, or ends. */
-#define OS_API_MINOR 16
+/* 2.17 (2026-11-17): the data store (os/db.h), after app_on_fault: the app's own
+ * settings and tables, kept under "app/<its name>/" (it reaches no others), and
+ * the UTF-8 helpers. */
+#define OS_API_MINOR 17
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -368,6 +372,31 @@ struct os_api {
      * (read-only), goes on in fn (in that thread, with why for the user) instead
      * of ending; fn must not return (a game's exit). NULL: it just ends. */
     void (*app_on_fault)(void (*fn)(const char *why));
+
+    /* 2.17: the data store (os/db.h). Keys and table names are the app's own:
+     * "volume" is "app/<app name>/volume" in the store. */
+    int (*db_get_int)(const char *key, int def);
+    bool (*db_get_bool)(const char *key, bool def);
+    int (*db_get_str)(const char *key, char *out, size_t n, const char *def);
+    int (*db_get_blob)(const char *key, void *out, size_t n);
+    int (*db_set_int)(const char *key, int v);
+    int (*db_set_bool)(const char *key, bool v);
+    int (*db_set_str)(const char *key, const char *s);
+    int (*db_set_blob)(const char *key, const void *p, size_t n);
+    int (*db_delete)(const char *key);
+    db_table_t *(*db_table_open)(const db_schema_t *schema);
+    uint32_t (*db_insert)(db_table_t *t, const db_value_t *v, int n);
+    int (*db_get)(db_table_t *t, uint32_t id, db_value_t *v, int n, void *buf, size_t size);
+    int (*db_find)(db_table_t *t, int field, const db_value_t *value, uint32_t *ids, int max,
+                   uint32_t before);
+    int (*db_update)(db_table_t *t, uint32_t id, const db_value_t *v, int n);
+    int (*db_update_field)(db_table_t *t, uint32_t id, int field, const db_value_t *v);
+    int (*db_remove)(db_table_t *t, uint32_t id);
+    int (*db_count)(db_table_t *t);
+    uint32_t (*db_table_gen)(db_table_t *t);
+    bool (*utf8_valid)(const char *s, size_t n);
+    size_t (*utf8_cut)(const char *s, size_t n);
+    size_t (*utf8_from_latin1)(const char *in, size_t n, char *out, size_t size);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */

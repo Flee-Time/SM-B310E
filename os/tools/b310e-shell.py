@@ -9,7 +9,9 @@ telnet port (23) does not carry.
   b310e-shell.py                         interactive shell (Ctrl-C or "exit" ends)
   b310e-shell.py cmd ps                  one command, its output
   b310e-shell.py put app.bin /x/app.bin  upload (CRC32 checked)
-  b310e-shell.py get /b310e-os/log.txt   download (to log.txt; CRC32 checked)
+  b310e-shell.py get /b310e-os/log       download (to ./log; CRC32 checked)
+  b310e-shell.py cmd db keys ui.         the data store (db: list, keys, get, set,
+                                         dump, export, import, compact; UTF-8)
   b310e-shell.py run build/os/modules/stopwatch.app [--arg ARG] [--follow]
                                          upload to /b310e-os/apps/ and start it
                                          (with ARG, its app_arg()),
@@ -206,6 +208,8 @@ def main():
     sub.add_parser('log')
     sub.add_parser('time', help="set the phone's clock from this PC's")
     args = parser.parse_args()
+    if hasattr(sys.stdout, 'reconfigure'):  # the store's text is UTF-8, piped too
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
     sh, err = None, None
     for host in [args.host] if args.host else ['192.168.7.1', '169.254.7.1']:

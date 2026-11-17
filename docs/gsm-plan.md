@@ -1370,7 +1370,7 @@ the stock's calibration and its DSP's burst handling, and a hard limit on attemp
   `test-radio.py`.
 - The card loop: copy only `payloads/b310e-os.bin` to `E:\payloads\` and
   `cmp` it. Apps live in category folders on the card, so never copy them
-  flat. Check the `boot: ... built` line in `log.txt` before trusting a
+  flat. Check the `boot: ... built` line in the card log (`/b310e-os/log`) before trusting a
   report: the phone may not have booted the new file.
 - Commits: git has no identity in the agent shell. Pass the user's identity
   per command (`-c user.name=... -c user.email=...`, as in the log); never
@@ -1443,7 +1443,8 @@ loses 15–50%. The earlier failed attempts were all on 1000 (74 good CCCH block
 in 8 s), where a lost IMMEDIATE ASSIGNMENT is a failed attempt. Register now
 probes each home cell's CCCH for 1.5 s and uses the best of up to 3 (one at 90%
 or better is taken at once), skips channels a foreign cell lists in SI 1 / SI 2,
-and keeps the cell it used in `/b310e-os/gsm-home-cell.txt` (`mcc mnc index`,
+and keeps the cell it used in the data store's `gsm.home_cell` (`mcc mnc index gain`;
+`/b310e-os/gsm-home-cell.txt` until 2026-11-17, read in once;
 read before the DSP starts, written after it stops) to try first next time, as
 the stock keeps its last cell.
 

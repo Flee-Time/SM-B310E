@@ -7,7 +7,9 @@
  * the radio to a WAV (32 kHz), the presets, save one, turn the radio off.
  * RSoft goes back and the radio plays on (a recording too).
  *
- * The last frequency and the presets are kept in /b310e-os/radio.txt.
+ * The last frequency, the speaker and the presets are the app's keys in the
+ * store (os/db.h: freq, speaker, p1..p9; "app/FM radio/..."). Until 2026-11-17
+ * they were in /b310e-os/radio.txt, read once into the store.
  *
  * A loadable app (os/modules); it was built into the OS until 2026-11-07.
  *
@@ -16,8 +18,7 @@
 #include "app.h"
 #include "icons.h"
 
-#define OS_DIR      "/b310e-os"
-#define CONF_FILE   OS_DIR "/radio.txt"
+#define OLD_FILE    "/b310e-os/radio.txt"
 #define FM_MIN      87500
 #define FM_MAX      108000
 #define FM_STEP     100
@@ -37,7 +38,7 @@ static const char *preset_names[PRESETS];
 static const char *options[5];
 enum { OPT_REC, OPT_PRESETS, OPT_SAVE, OPT_SPEAKER, OPT_OFF };
 
-/* ---- the file -------------------------------------------------------------------- */
+/* ---- the store ------------------------------------------------------------------- */
 
 static int number(const char **p)
 {
@@ -48,37 +49,51 @@ static int number(const char **p)
     return v;
 }
 
-static void conf_load(void)
+/* radio.txt's "freq=", "speaker=", "pN=" lines into the store, once */
+static void import_file(void)
 {
-    char buf[256];
+    char buf[256], key[4] = "p1";
     FIL f;
     UINT n = 0;
     const char *p;
 
-    saved_freq = 0;
-    memset(presets, 0, sizeof(presets));
-    if (f_open(&f, CONF_FILE, FA_READ) != FR_OK)
-        return;
-    f_read(&f, buf, sizeof(buf) - 1, &n);
-    f_close(&f);
-    buf[n] = 0;
-    for (p = buf; *p; ) {
-        if (!memcmp(p, "freq=", 5)) {
-            p += 5;
-            saved_freq = number(&p);
-        } else if (!memcmp(p, "speaker=", 8)) {
-            p += 8;
-            fm_set_speaker(number(&p) != 0);
-        } else if (p[0] == 'p' && p[1] >= '1' && p[1] <= '9' && p[2] == '=') {
-            int i = p[1] - '1';
-
-            p += 3;
-            presets[i] = number(&p);
+    if (f_open(&f, OLD_FILE, FA_READ) == FR_OK) {
+        f_read(&f, buf, sizeof(buf) - 1, &n);
+        f_close(&f);
+        buf[n] = 0;
+        for (p = buf; *p; ) {
+            if (!memcmp(p, "freq=", 5)) {
+                p += 5;
+                db_set_int("freq", number(&p));
+            } else if (!memcmp(p, "speaker=", 8)) {
+                p += 8;
+                db_set_bool("speaker", number(&p) != 0);
+            } else if (p[0] == 'p' && p[1] >= '1' && p[1] <= '9' && p[2] == '=') {
+                key[1] = p[1];
+                p += 3;
+                db_set_int(key, number(&p));
+            }
+            while (*p && *p != '\n')
+                p++;
+            if (*p)
+                p++;
         }
-        while (*p && *p != '\n')
-            p++;
-        if (*p)
-            p++;
+        klog("radio: %s read into the store", OLD_FILE);
+    }
+    db_set_bool("imported", true);
+}
+
+static void conf_load(void)
+{
+    char key[4] = "p1";
+
+    if (!db_get_bool("imported", false))
+        import_file();
+    saved_freq = db_get_int("freq", 0);
+    fm_set_speaker(db_get_bool("speaker", fm_speaker()));
+    for (int i = 0; i < PRESETS; i++) {
+        key[1] = (char)('1' + i);
+        presets[i] = db_get_int(key, 0);
     }
     if (saved_freq < FM_MIN || saved_freq > FM_MAX)
         saved_freq = 0;
@@ -87,25 +102,22 @@ static void conf_load(void)
             presets[i] = 0;
 }
 
+/* Only what changed is written, with the OS's settings, a second later */
 static void conf_save(void)
 {
-    char buf[256];
-    int len;
-    FIL f;
-    UINT n;
+    char key[4] = "p1";
 
     if (!fm_is_on())
         return;
     saved_freq = fm_frequency();
-    len = snprintf(buf, sizeof(buf), "freq=%d\nspeaker=%d\n", saved_freq,
-                   fm_speaker() ? 1 : 0);
-    for (int i = 0; i < PRESETS; i++)
+    db_set_int("freq", saved_freq);
+    db_set_bool("speaker", fm_speaker());
+    for (int i = 0; i < PRESETS; i++) {
+        key[1] = (char)('1' + i);
         if (presets[i])
-            len += snprintf(buf + len, sizeof(buf) - (size_t)len, "p%d=%d\n", i + 1, presets[i]);
-    f_mkdir(OS_DIR);
-    if (f_open(&f, CONF_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
-        f_write(&f, buf, (UINT)len, &n);
-        f_close(&f);
+            db_set_int(key, presets[i]);
+        else
+            db_delete(key);
     }
 }
 

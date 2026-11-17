@@ -1,6 +1,6 @@
-/* B310E OS — the alarm service: the alarms, kept in /b310e-os/alarms.txt
- * (one line each: on, minute, days, label), checked every second by the
- * UI, and the ringing screen.
+/* B310E OS — the alarm service: the alarms, kept in the store's "alarms"
+ * table (os/db.h: on, minute, days, label; in the order they were added),
+ * checked every second by the UI, and the ringing screen.
  *
  * When an alarm's minute comes (on one of its days, or once) the screen
  * wakes and the ringing screen beeps (a 2 kHz tone at the alarm volume,
@@ -13,12 +13,15 @@
  * power-on path, which are not worked out yet.
  *
  * Until 2026-11-07 there was one alarm, in the settings (alarm_on,
- * alarm_min); a card with no alarms file takes that one over.
+ * alarm_min); a card with no alarms file takes that one over. Until
+ * 2026-11-17 they were lines of /b310e-os/alarms.txt (on, minute, days,
+ * label), read once into the store.
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/alarm.h"
 #include "os/audio.h"
+#include "os/db.h"
 #include "os/drivers.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -28,7 +31,7 @@
 #include "os/ui.h"
 #include "apps/wavio.h"
 
-#define ALARMS_FILE  OS_DIR "/alarms.txt"
+#define OLD_FILE     OS_DIR "/alarms.txt"
 #define SNOOZE_MIN   5
 #define RING_MS      (3 * 60 * 1000)
 #define BEEP_MS      400
@@ -51,24 +54,87 @@ static int pending_min = -1;
 static bool took_music, took_fm, took_volume;
 static int took_cat;
 
-/* ---- the file -------------------------------------------------------------- */
+/* ---- the store ---------------------------------------------------------------- */
 
-static void save(void)
+enum { F_ON, F_MINUTE, F_DAYS, F_LABEL };
+static const db_field_t fields[] = {
+    { "on", DB_BOOL }, { "minute", DB_INT }, { "days", DB_INT }, { "label", DB_STR },
+};
+static const db_schema_t schema = { "alarms", 1, 4, -1, fields, NULL };
+static db_table_t *table;
+static uint32_t ids[ALARM_MAX];         /* each alarm's record, 0 none yet */
+static uint32_t own_gen;                /* the table as we last left it */
+
+static void save(int i)
 {
-    char line[48];
-    FIL f;
-    UINT n;
+    db_value_t v[4] = {
+        DB_INTV(alarms[i].on), DB_INTV(alarms[i].minute), DB_INTV(alarms[i].days),
+        DB_STRV(alarms[i].label),
+    };
 
-    if (f_open(&f, ALARMS_FILE, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
+    if (!table)
+        table = db_table_open(&schema);
+    if (!table)
         return;
-    for (int i = 0; i < count; i++) {
-        int len = snprintf(line, sizeof(line), "%u %u %u %s\n", alarms[i].on,
-                           alarms[i].minute, alarms[i].days, alarms[i].label);
-
-        f_write(&f, line, (UINT)len, &n);
-    }
-    f_close(&f);
+    if (!ids[i] || db_update(table, ids[i], v, 4) == DB_ENOENT)
+        ids[i] = db_insert(table, v, 4);
+    own_gen = db_table_gen(table);
 }
+
+static void unsave(int i)
+{
+    if (table && ids[i])
+        db_remove(table, ids[i]);
+    memmove(&ids[i], &ids[i + 1], sizeof(ids[0]) * (size_t)(ALARM_MAX - i - 1));
+    ids[ALARM_MAX - 1] = 0;
+    if (table)
+        own_gen = db_table_gen(table);
+}
+
+/* The table's records, oldest first: the alarms in the order they were added */
+static void from_table(void)
+{
+    uint32_t found[ALARM_MAX];
+    int n = db_find(table, -1, NULL, found, ALARM_MAX, 0);
+
+    count = 0;
+    while (n-- > 0) {
+        char buf[96];
+        db_value_t v[4];
+        alarm_t *a = &alarms[count];
+        int r = db_get(table, found[n], v, 4, buf, sizeof(buf));
+        size_t len;
+
+        if (r == DB_ETOOBIG) {          /* a label from elsewhere, too long: none */
+            v[F_LABEL].p = "";
+            v[F_LABEL].len = 0;
+        } else if (r) {
+            continue;
+        }
+        if (v[F_MINUTE].i < 0 || v[F_MINUTE].i >= 24 * 60 || v[F_DAYS].i < 0 || v[F_DAYS].i > 127)
+            continue;
+        a->on = v[F_ON].i != 0;
+        a->minute = (uint16_t)v[F_MINUTE].i;
+        a->days = (uint8_t)v[F_DAYS].i;
+        len = v[F_LABEL].len < sizeof(a->label) ? v[F_LABEL].len :
+              utf8_cut(v[F_LABEL].p, sizeof(a->label) - 1);
+        memcpy(a->label, v[F_LABEL].p, len);
+        a->label[len] = 0;
+        ids[count++] = found[n];
+    }
+    for (int i = count; i < ALARM_MAX; i++)
+        ids[i] = 0;
+    own_gen = db_table_gen(table);
+}
+
+/* Changed by someone else (an import, the shell): read again at the next look */
+static void table_changed(void *ctx)
+{
+    if (table && db_table_gen(table) != own_gen)
+        loaded = false;
+}
+
+/* ---- the old file, read once ------------------------------------------------------ */
 
 static int number(const char **p)
 {
@@ -81,15 +147,14 @@ static int number(const char **p)
     return v;
 }
 
-static void load(void)
+static void import_file(void)
 {
     char buf[ALARM_MAX * 48 + 1], *p;
     FIL f;
     UINT n = 0;
 
-    loaded = true;
     count = 0;
-    if (f_open(&f, ALARMS_FILE, FA_READ) != FR_OK) {
+    if (f_open(&f, OLD_FILE, FA_READ) != FR_OK) {
         /* the single alarm of before, from the settings */
         if (ui_settings.alarm_on || ui_settings.alarm_min != 7 * 60) {
             alarms[0].on = (uint8_t)ui_settings.alarm_on;
@@ -97,7 +162,6 @@ static void load(void)
             alarms[0].days = ALARM_ONCE;
             alarms[0].label[0] = 0;
             count = 1;
-            save();
         }
         return;
     }
@@ -118,9 +182,10 @@ static void load(void)
         days = number(&q);
         if (*q == ' ')
             q++;
-        while (*q && *q != '\r' && k < (int)sizeof(a->label) - 1)
-            a->label[k++] = *q++;
-        a->label[k] = 0;
+        while (q[k] && q[k] != '\r')
+            k++;
+        /* UTF-8 now: a byte that is not (a PC's Latin-1) taken as one, never cut mid-way */
+        utf8_from_latin1(q, (size_t)k, a->label, sizeof(a->label));
         if (minute >= 24 * 60 || days > 127)
             continue;
         a->on = on != 0;
@@ -128,6 +193,30 @@ static void load(void)
         a->days = (uint8_t)days;
         count++;
     }
+    klog("alarm: %s read into the store, %d alarms", OLD_FILE, count);
+}
+
+static void load(void)
+{
+    static bool watching;
+
+    loaded = true;
+    if (!watching)
+        watching = db_watch("alarms", true, table_changed, NULL);
+    if (!table)
+        table = db_table_open(&schema);
+    if (!db_get_bool("import.alarms", false)) {
+        import_file();
+        for (int i = 0; i < ALARM_MAX; i++)
+            ids[i] = 0;
+        for (int i = 0; i < count; i++)
+            save(i);
+        db_set_bool("import.alarms", true);
+        return;
+    }
+    count = 0;
+    if (table)
+        from_table();
 }
 
 static void ensure(void)
@@ -160,12 +249,21 @@ int alarm_set(int i, const alarm_t *a)
         return -1;
     alarms[i] = *a;
     alarms[i].label[sizeof(alarms[i].label) - 1] = 0;
+    {                                   /* UTF-8 the store takes: whole characters */
+        char *l = alarms[i].label, t[sizeof(alarms[i].label)];
+
+        l[utf8_cut(l, strlen(l))] = 0;
+        if (!utf8_valid(l, strlen(l))) {
+            utf8_from_latin1(l, strlen(l), t, sizeof(t));
+            memcpy(l, t, sizeof(t));
+        }
+    }
     alarms[i].days &= 0x7f;
     if (i == count)
         count++;
     snoozed[i] = false;                 /* changed: its snooze no longer means it */
     pending &= ~(1u << i);
-    save();
+    save(i);
     return i;
 }
 
@@ -184,7 +282,7 @@ bool alarm_delete(int i)
     pending = (pending & ((1u << i) - 1)) | (pending >> (i + 1) << i);
     memmove(&alarms[i], &alarms[i + 1], sizeof(alarm_t) * (size_t)(count - i - 1));
     count--;
-    save();
+    unsave(i);
     return true;
 }
 
@@ -402,7 +500,7 @@ static void ring_alarm(int i, int now)
 {
     if (!alarms[i].days) {
         alarms[i].on = 0;               /* once: done */
-        save();
+        save(i);
     }
     ring(i, now);
 }

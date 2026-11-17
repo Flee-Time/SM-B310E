@@ -176,7 +176,13 @@ license either way.
 - QEMU runs it like Rockbox (`boot-mode=rockbox` loads a raw image at the
   PSRAM base); every driver gets a QEMU test where the model allows. The
   DSP is not emulated, so layer-1 radio work is tested on the phone.
-- A card log, as in Rockbox, for hardware runs.
+- A card log, as in Rockbox, for hardware runs (`/b310e-os/log`).
+- The OS's settings and small data in one file, the data store
+  (`/b310e-os/data`, os/fs/db.c, 2026-11-17): typed settings in RAM, written
+  in batches; tables of records with a 12-byte index entry each in RAM and
+  their fields on the card; append-only with a CRC per record, compacted by
+  writing a new file. No SQL engine (SQLite is too big for this phone). See
+  os/README.md, "The data store".
 
 ## Milestones
 

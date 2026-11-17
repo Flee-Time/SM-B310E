@@ -20,7 +20,7 @@ typedef struct {
     uint8_t on;
     uint8_t days;                       /* bit n: weekday n (0 Sunday .. 6 Saturday) */
     uint16_t minute;                    /* after midnight */
-    char label[20];
+    char label[20];                     /* UTF-8 (alarm_set cuts it at a character) */
 } alarm_t;
 
 int alarm_count(void);

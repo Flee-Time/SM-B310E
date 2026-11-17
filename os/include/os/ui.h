@@ -146,7 +146,8 @@ const char *ui_chain(const char *path, const char *what);
  * app (app_current), so what it pushes and allocates is that app's. */
 bool ui_call(void (*fn)(void *arg), void *arg, uint32_t timeout_ms);
 
-/* settings, kept in /b310e-os/settings.txt */
+/* settings, kept in the store as "ui.<name>" (os/db.h); ui_settings_save
+ * marks what changed, written a second or two later */
 typedef struct {
     int brightness;                 /* percent */
     int screen_timeout_s;           /* 0: never */

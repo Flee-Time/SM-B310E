@@ -1053,7 +1053,7 @@ def main():
                 process.wait(timeout=10)
 
     if args.background:
-        log_text = (BOOT['card_file'](card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+        log_text = (BOOT['card_file'](card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
         result['card_log'] = [l for l in log_text.splitlines() if 'usb:' in l and 'cmd' not in l]
         assert any('connecting again' in l for l in result['card_log']), result['card_log']
         bench = [l for l in log_text.splitlines() if 'bench: 4 s' in l or 'bench: 3 s' in l or 'bench: 5 s' in l]
@@ -1068,7 +1068,7 @@ def main():
     assert BOOT['card_file'](img, '/nettest/gone.txt') is None
     assert BOOT['card_file'](img, '/b310e-os/apps/net.app') == app_bytes
     assert BOOT['card_file'](img, '/nettest/helper.bin') == blob
-    log_text = (BOOT['card_file'](img, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log_text = (BOOT['card_file'](img, '/b310e-os/log') or b'').decode(errors='replace')
     (out / 'card-log.txt').write_text(log_text)
     result['card_log'] = [l for l in log_text.splitlines() if 'net:' in l or 'usb: network' in l]
     assert 'usb: network session 1 ended (unplugged)' in log_text, result['card_log']

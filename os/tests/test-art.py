@@ -248,7 +248,7 @@ def main():
         if p.poll() is None:
             p.terminate()
             p.wait()
-    log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in log.splitlines() if 'art:' in l]
     (out / 'result.json').write_text(json.dumps(result, indent=2))
     want = {t: not t.startswith('y/') for t in tracks}

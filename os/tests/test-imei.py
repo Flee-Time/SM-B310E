@@ -132,7 +132,7 @@ def run(args, name, items, want):
             if process.poll() is None:
                 process.terminate()
                 process.wait(timeout=10)
-    log_text = card_file(card.read_bytes(), '/b310e-os/log.txt') or b''
+    log_text = card_file(card.read_bytes(), '/b310e-os/log') or b''
     assert log_text, 'no log on the card'
     assert IMEI.encode() not in log_text, 'the IMEI reached the log'
     print(f'PASS {name}: shown {text!r}', flush=True)

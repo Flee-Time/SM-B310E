@@ -19,7 +19,7 @@
 
 #define OS_DIR     "/b310e-os"
 #define REC_DIR    OS_DIR "/rec"
-#define CONF_FILE  OS_DIR "/recorder.txt"
+#define OLD_FILE   OS_DIR "/recorder.txt"   /* the mic gain until 2026-11-17: now "gain" */
 #define REC_RATE   16000
 #define MAX_RECS   64
 #define GAIN_MAX   15
@@ -134,28 +134,21 @@ static void load(void)
         rlist.sel = n_recs ? n_recs - 1 : 0;
 }
 
+/* The app's key in the store: written a second later, so Left/Right held is one write */
 static void save_gain(void)
 {
-    char buf[16];
-    FIL f;
-    UINT n;
-    int len = snprintf(buf, sizeof(buf), "gain=%d\n", audio_get_mic_gain());
-
-    f_mkdir(OS_DIR);
-    if (f_open(&f, CONF_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
-        f_write(&f, buf, (UINT)len, &n);
-        f_close(&f);
-    }
+    db_set_int("gain", audio_get_mic_gain());
 }
 
-static void load_gain(void)
+static void import_gain(void)
 {
     char buf[16];
     FIL f;
     UINT n = 0;
     int v = 0;
 
-    if (f_open(&f, CONF_FILE, FA_READ) != FR_OK)
+    db_set_bool("imported", true);
+    if (f_open(&f, OLD_FILE, FA_READ) != FR_OK)
         return;
     f_read(&f, buf, sizeof(buf) - 1, &n);
     f_close(&f);
@@ -165,6 +158,17 @@ static void load_gain(void)
     for (const char *p = buf + 5; *p >= '0' && *p <= '9'; p++)
         v = v * 10 + *p - '0';
     if (v <= GAIN_MAX)
+        db_set_int("gain", v);
+}
+
+static void load_gain(void)
+{
+    int v;
+
+    if (!db_get_bool("imported", false))
+        import_gain();
+    v = db_get_int("gain", -1);
+    if (v >= 0 && v <= GAIN_MAX)
         audio_set_mic_gain(v);
 }
 

@@ -13,6 +13,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include "os/db.h"
 #include "os/dsp.h"
 #include "os/fs.h"                       /* klog */
 #include "os/gsm_lu.h"
@@ -48,13 +49,15 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 #define CCCH_PROBE_MS   1500u
 #define GOOD_CCCH_PCT   90
 #define MAX_HOMES       3
-#define IMEI_FILE       OS_DIR "/gsm-imei.txt"          /* IMEI override: one 15-digit
-                                                         * IMEI per line, line N for SIM
-                                                         * slot N (a single line = both);
-                                                         * absent -> the phone's NV IMEI */
-#define HOME_CELL_FILE  OS_DIR "/gsm-home-cell.txt"     /* "mcc mnc index": the last home
-                                         * cell found, tried first next time (the stock
-                                         * keeps its last cell the same way) */
+/* In the store (os/db.h); until 2026-11-17 files of these names, read once.
+ * gsm.imei: the IMEI override, 15-digit IMEIs, the Nth for SIM slot N (a single
+ * one = both); absent -> the phone's NV IMEI (db set gsm.imei "..." in the shell).
+ * gsm.home_cell: "mcc mnc index gain", the last home cell found, tried first
+ * next time (the stock keeps its last cell the same way). */
+#define IMEI_KEY        "gsm.imei"
+#define IMEI_FILE       OS_DIR "/gsm-imei.txt"
+#define HOME_CELL_KEY   "gsm.home_cell"
+#define HOME_CELL_FILE  OS_DIR "/gsm-home-cell.txt"
 /* A home BCCH can be a weak carrier buried under stronger traffic (e.g. a
  * roaming-partner / less-dense operator), so sweep many channels in signal order,
  * not just the top few. l1_cell_sync fails a non-BCCH fast (one FCCH window), so
@@ -114,7 +117,7 @@ static l1_cell_t best_cell;             /* the best home cell so far (find phase
 static reg_lu_progress_t reg_prog;      /* how far the last/current attempt got */
 static int sweep_synced;                /* cells that synced in the find sweep (diag) */
 static int sweep_pruned;                /* candidates skipped as another operator's */
-static uint16_t stored_index = L1_NO_INDEX;     /* from HOME_CELL_FILE, if its PLMN fits */
+static uint16_t stored_index = L1_NO_INDEX;     /* from gsm.home_cell, if its PLMN fits */
 static uint8_t stored_gain;             /* the gain it synced at, 0 unknown */
 static uint8_t foreign[(IDX_MAX + 7) / 8];      /* channels another operator's cell lists */
 
@@ -371,25 +374,48 @@ static int parse_uint(const char **p)
     return v;
 }
 
+/* An old file's text into a key of the store, once ("import.<key>" says it was done) */
+static void import_text(const char *key, const char *path)
+{
+    char flag[40], buf[80];
+    FIL *f;
+    UINT got = 0;
+
+    snprintf(flag, sizeof flag, "import.%s", key);
+    if (db_get_bool(flag, false))
+        return;
+    f = kmalloc(sizeof(FIL));
+    if (f && f_open(f, path, FA_READ) == FR_OK) {
+        if (f_read(f, buf, sizeof buf - 1, &got) == FR_OK && got) {
+            char text[sizeof buf];
+
+            buf[got] = 0;
+            utf8_from_latin1(buf, strlen(buf), text, sizeof text);
+            db_set_str(key, text);
+        }
+        f_close(f);
+    }
+    kfree(f);
+    db_set_bool(flag, true);
+}
+
 /* The IMEI to present on IDENTITY REQUEST for SIM slot `slot`: an override from
- * IMEI_FILE (the slot-th 15-digit token, or the first if the slot has none), else
+ * gsm.imei (the slot-th 15-digit token, or the first if the slot has none), else
  * the phone's own IMEI from NV. Writes digit bytes to out, returns the count (0 =
  * none, then registration falls back to the IMSI). from_file set when it came from
- * the override file. */
+ * the override. */
 static int load_imei(int slot, uint8_t out[16], int *from_file)
 {
-    FIL *f = kmalloc(sizeof(FIL));
     char buf[80], first[16];
-    UINT got = 0;
     int n = 0, have_first = 0;
 
     *from_file = 0;
-    if (f && f_open(f, IMEI_FILE, FA_READ) == FR_OK) {
-        if (f_read(f, buf, sizeof buf - 1, &got) == FR_OK) {
+    import_text(IMEI_KEY, IMEI_FILE);
+    if (db_get_str(IMEI_KEY, buf, sizeof buf, "") > 0) {
+        {
             const char *p = buf;
             int tok = 0;
 
-            buf[got] = 0;
             while (*p && !n) {
                 char d[16];
                 int k = 0;
@@ -416,10 +442,7 @@ static int load_imei(int slot, uint8_t out[16], int *from_file)
                 for (int i = 0; i < 15; i++, n = 15)
                     out[i] = (uint8_t)(first[i] - '0');
         }
-        f_close(f);
     }
-    if (f)
-        kfree(f);
     if (n) {
         *from_file = 1;
         return n;
@@ -436,20 +459,16 @@ static int load_imei(int slot, uint8_t out[16], int *from_file)
 
 static void load_home_cell(void)
 {
-    FIL *f = kmalloc(sizeof(FIL));
     char buf[32];
-    UINT got = 0;
 
     stored_index = L1_NO_INDEX;
     stored_gain = 0;
-    if (!f)
-        return;
-    if (f_open(f, HOME_CELL_FILE, FA_READ) == FR_OK) {
-        if (f_read(f, buf, sizeof buf - 1, &got) == FR_OK) {
+    import_text(HOME_CELL_KEY, HOME_CELL_FILE);
+    if (db_get_str(HOME_CELL_KEY, buf, sizeof buf, "") > 0) {
+        {
             const char *p = buf;
             int mcc, mnc, idx, gain;
 
-            buf[got] = 0;
             mcc = parse_uint(&p);
             mnc = parse_uint(&p);
             idx = parse_uint(&p);
@@ -459,26 +478,15 @@ static void load_home_cell(void)
                 stored_gain = (uint8_t)(gain > 0 && gain <= 45 ? gain : 0);
             }
         }
-        f_close(f);
     }
-    kfree(f);
 }
 
 static void save_home_cell(uint16_t index, uint8_t gain)
 {
-    FIL *f = kmalloc(sizeof(FIL));
     char buf[32];
-    UINT w;
-    int n;
 
-    if (!f)
-        return;
-    n = snprintf(buf, sizeof buf, "%u %u %u %u\n", home_mcc, home_mnc, index, gain);
-    if (f_open(f, HOME_CELL_FILE, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK) {
-        f_write(f, buf, (UINT)n, &w);
-        f_close(f);
-    }
-    kfree(f);
+    snprintf(buf, sizeof buf, "%u %u %u %u", home_mcc, home_mnc, index, gain);
+    db_set_str(HOME_CELL_KEY, buf);
 }
 
 /* A foreign operator's cell: its own channels (SI 1) and neighbours (SI 2) are
@@ -733,7 +741,7 @@ static void worker(void *arg)
         klog("register: no valid stored LAI - IMSI attach, old LAI LAC 0xfffe");
     }
     /* Present an IMEI on IDENTITY REQUEST (an EIR check can gate the LU). Override
-     * from IMEI_FILE per SIM slot, else the phone's own NV IMEI. */
+     * from gsm.imei per SIM slot, else the phone's own NV IMEI. */
     {
         uint8_t imei[16];
         int from_file = 0;
@@ -747,7 +755,7 @@ static void worker(void *arg)
                 s[i] = (char)('0' + imei[i]);
             s[in] = 0;
             klog("register: IMEI %s (slot %u, %s)", s, SIM_SLOT,
-                 from_file ? "override file" : "NV");
+                 from_file ? "override, gsm.imei" : "NV");
         } else {
             klog("register: no IMEI (slot %u) - will answer IDENTITY with IMSI", SIM_SLOT);
         }

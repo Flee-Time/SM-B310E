@@ -208,9 +208,9 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
   the start or names it itself; FM radio uses it. A tag works in
   `volume_level`, `volume_set` and `volume_use`, and `VOL_APP` from an app
   means its own. There is still one level at a time: the codec's, for whoever
-  last started a sound; there is no mixer. `/b310e-os/volumes.txt` keeps the
-  tags ("level icon name" a line, 24 at most, then new apps share "Other
-  apps"). LSoft on the page resets: every level back to its default and the
+  last started a sound; there is no mixer. The data store's `volumes` table keeps the
+  tags (name, level, icon; 24 at most, then new apps share "Other
+  apps"; `/b310e-os/volumes.txt` until 2026-11-17). LSoft on the page resets: every level back to its default and the
   app rows cleared, but for what is playing; an app comes back when it next
   plays, at the "Other apps" level.
 - **The clock** (2026-11-07, in QEMU; not yet on the phone): the phone's
@@ -223,7 +223,8 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
     network. The PC must answer NTP: on Windows the Windows Time service's
     NTP server (off by default), or `python os/tools/b310e-shell.py time`
     sets the phone's clock from the PC's through the shell (`date`);
-  - **the clock on the card** (`/b310e-os/clock.txt`, at power-off, before
+  - **the clock on the card** (`clock.saved` in the data store, `clock.txt`
+    until 2026-11-17; at power-off, before
     a restart, every 10 minutes): a clock behind it at boot was cleared
     and gets the saved time back (the time it was off is lost);
   - the battery reads once at boot on the charger (it showed -1 until
@@ -380,7 +381,7 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 | USB storage | the card as a USB mass storage device (1209:0001): our own small stack on the Rockbox port's controller driver, all PIO (DMA once wrote stale FIFO words into the card's root directory); Bulk-Only Transport, the SCSI commands Windows and Linux use, two 16 KB buffers; the OS lets go of the card meanwhile (`fs_suspend`) (`drivers/usb.c`, `usb_msc.c`, `apps/usb.c`) |
 | USB network | the other USB function (one at a time): an RNDIS network adapter (1209:0001 rev 2.00), MS OS 1.0 descriptors and class E0/01/03 so Windows and Linux bind their own drivers; IPv4, ARP, ICMP echo, UDP, a DHCP server, TCP (`drivers/usb_rndis.c`, `net/ip.c`, `net/tcp.c`); the development shell (`net/shell.c`, `tools/b310e-shell.py`) |
 | FM radio | RTC6211N on I2C 1, tune, seek, RSSI, stereo, mute, the stock bank tables read from the phone's own NOR when their CRC matches (`drivers/fm.c`) |
-| Storage | FatFs R0.15a on the card: long names, UTF-8, thread-safe; a card log in `/b310e-os/log.txt` (`fs/`) |
+| Storage | FatFs R0.15a on the card: long names, UTF-8, thread-safe; a card log in `/b310e-os/log`; the data store, one file `/b310e-os/data` for the settings and the OS's small data (`fs/`, see "The data store") |
 | UI | screen stack with status, title and soft-key bars; card lists with icons, switches and details, floating dialogs, text view, a multi-tap text editor (`ui/textedit.c`), key repeat, screen timeout: dim, then LEDs off and panel asleep; drawing with alpha blending, anti-aliased text (Montserrat 9/10/12/24 px) and rounded shapes (`ui/`) |
 | Apps | built in: Home (clock, date), Menu (Apps, Files, Tools, System, Settings, Power), Files (rename, delete, copy and paste; music and .m3u open the Music app), Tools (torch, SIM cards, USB: storage or network, DSP boot), System (pages with graphs), Settings (categories: Display, Sound & touch, Power, Date & time, USB, Storage, About; option pickers), Power (`apps/`) |
 | Playback engine | a decoder thread below the UI (priority 11) runs a codec module per format and fills a 64K-frame PCM ring (1.49 s at 44.1 kHz) that the audio DMA interrupt plays; play, stop, pause, seek, position, duration, tags; format by extension, or by the first bytes; rates without a codec clock (88.2, 64 kHz ...) resampled linearly to 44.1 or 48 kHz; 16-bit stereo out, no DSP (`media/`, `include/os/media.h`) |
@@ -400,10 +401,16 @@ buzz). The first key after the screen went dark only wakes it. A 4-pole
 headset's buttons arrive as KEY_HS_CENTER, KEY_HS_PLUS, KEY_HS_MINUS
 (Music, Recorder and FM radio: start/stop or mute, volume).
 
-**On the card** the OS writes only into `/b310e-os/`: `log.txt` (rotated
-to `log-old.txt` past 256 KB), `settings.txt`, `alarms.txt`, the album
-art cache in `cache/art/` and `selftest.bin` (32 KB, rewritten at every
-boot). It loads apps from `/b310e-os/apps/` and codec modules from
+**On the card** the OS writes only into `/b310e-os/`; its own files have no
+extension: `log` (rotated to `log-old` past 256 KB), `data` (the data store:
+settings, alarms, volumes, the apps' keys and tables such as Notes'; `data-new`
+for a moment while it is written anew, `data-bad` if one was found damaged), the
+album art cache in `cache/art/` and `selftest` (32 KB, rewritten at every boot).
+The files of before 2026-11-17 (`log.txt`, `settings.txt`, `volumes.txt`,
+`alarms.txt`, `clock.txt`, `radio.txt`, `recorder.txt`, `gsm-*.txt`,
+`notes/NOTE*.TXT`) are read into the store once and then left alone. Reports for
+the PC keep `.txt` (`dsp-report.txt`, `radio-report.txt`, `radiolab.txt`, `db
+export`'s `data.txt`). It loads apps from `/b310e-os/apps/` and codec modules from
 `/b310e-os/codecs/`;
 recordings go to `/b310e-os/rec/RECnnnn.WAV` (16 kHz mono from the mic,
 32 kHz from the radio).
@@ -454,6 +461,8 @@ the only one that carries binary transfers. Three sessions at a time.
 | `bench SECONDS [dark] [nosleep]` | USB off that long with the cable in, so the phone can reach dark idle (USB holds the clock up); `dark` darkens the screen at once, `nosleep` turns chip sleep off for the run, to compare. This connection ends; USB comes back by itself. The log gets a `bench:` line: time at each clock speed, sleeps, PLL starts, interrupts |
 | `prof SECONDS [FILE]` | where the CPU is at each 1 ms tick, that long (1-60 s; 8 bytes a sample from the OS heap, so a game that leaves little gets a few seconds), to FILE (`/prof.bin`); `get` it, then `python os/tools/prof-report.py prof.bin build/os/ports/GAME.elf` lists the functions (`--callers`, `--lines`) |
 | `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
+| `db [list]`, `db keys [PREFIX]`, `db get KEY`, `db set KEY VALUE [int\|bool\|str]`, `db del KEY` | the data store: its tables with records and bytes; settings keys (UTF-8, quote values with spaces); a set is written a second later |
+| `db dump TABLE [N]`, `db export [FILE]`, `db import FILE`, `db compact`, `db sync` | the newest N records; the whole store as text (`/b310e-os/data.txt`), and back (it replaces the store, and changes nothing when a line is wrong); the file written anew now; everything written now |
 | `reboot [soft\|menu\|os\|stock]` | a hard reset; `menu`, `os`, `stock`: with that request to the boot loader; `soft`: `/payloads/b310e-os.bin` again with no reset, which keeps the clock. Plain `reboot` comes back to this OS through the loader |
 | `echo`, `exit` | |
 
@@ -476,7 +485,8 @@ address is `--host` or `B310E_HOST`):
 python os/tools/b310e-shell.py                      interactive
 python os/tools/b310e-shell.py cmd ps               one command
 python os/tools/b310e-shell.py put notes.txt /notes.txt
-python os/tools/b310e-shell.py get /b310e-os/log.txt
+python os/tools/b310e-shell.py get /b310e-os/log
+python os/tools/b310e-shell.py cmd db keys ui.
 python os/tools/b310e-shell.py run build/os/modules/stopwatch.app --follow
 python os/tools/b310e-shell.py shot screen.png
 python os/tools/b310e-shell.py log
@@ -521,6 +531,52 @@ FONT_LARGE, FONT_HUGE; 1.x apps are refused, rebuild them). A screen
 with `tick_ms` set gets `tick()` that often (the stopwatch uses 100 ms).
 Close your files before your last screen goes; memory from `malloc` is
 freed for you, also what a thread of the app's (`thread_create`) took.
+
+## The data store
+
+One file, `/b310e-os/data` (`fs/db.c`, `include/os/db.h`), in place of a text
+file for each thing the OS keeps (2026-11-17, in QEMU; not yet on the phone).
+No SQL: typed settings and small tables, all text UTF-8 with its length.
+
+- **The file** is a header and then records, only appended, each with a CRC-32:
+  a setting, a delete, a table's layout, a record, a record removed. A power cut
+  loses at most the write it cut; at boot a torn or damaged tail is logged and
+  left out, the file is written anew without it and the damaged one kept as
+  `data-bad`. Once more than half of it (and 16 KB) is old values the log
+  thread writes it anew (`data-new`, then renamed); nothing is rewritten in place.
+- **Settings** (`db_get_int/bool/str/blob`, `db_set_...`, `db_delete`) are all in
+  RAM: a get never reads the card. Sets are written a second after the last one
+  (at most 5 s after the first), at once by `db_sync` (power-off, restart) and
+  before USB storage takes the card (`fs_suspend`): a volume slider is one write.
+  Without the card, sets wait in RAM. The OS's keys are `<area>.<name>`
+  (`ui.brightness`, `clock.saved`, `gsm.imei`); `import.*` says an old file was
+  read in.
+- **Tables** (`db_table_open` with a schema: fields of int, bool, string or
+  bytes, a version, an index field, an upgrade hook; `db_insert` → id,
+  `db_get`, `db_find` newest first with one field-equals filter, a limit and
+  "older than", `db_update`, `db_update_field`, `db_remove`, `db_count`). RAM
+  holds 12 bytes a record (id, file offset, the index field's value or hash);
+  a record's fields are read from the card when asked for. Records change on the
+  card at once. Fields are only added at the end with a higher version: older
+  records read them as 0 / empty, and the hook runs once. Meant for thousands
+  of records (call history, SMS, contacts later).
+- **Changes**: `db_watch(prefix or table, fn)` calls fn on the UI thread
+  (Settings follow `db set ui.brightness 30` from the shell at once);
+  `db_table_gen` is a number that changes with the table.
+- **Apps** (API 2.17) get the same calls, everything under `app/<app name>/`:
+  an app reaches only its own keys and tables.
+- **The shell's `db`** lists, reads, sets, dumps, exports to text and imports it
+  back (the backup, and the way to change it on the PC); `os/tools/b310e-db.py`
+  reads the file itself on the PC. `os/tests/test-db.py` tests it all.
+
+```c
+static const db_field_t fields[] = { { "text", DB_STR }, { "time", DB_INT } };
+static const db_schema_t schema = { "notes", 1, 2, -1, fields, NULL };
+db_table_t *t = db_table_open(&schema);           /* app/<name>/notes */
+db_value_t v[2] = { DB_STRV("Merhaba"), DB_INTV(0) };
+uint32_t id = db_insert(t, v, 2);
+db_set_int("volume", 5);                           /* app/<name>/volume */
+```
 
 ## Codec modules
 
@@ -1101,7 +1157,7 @@ main.c          start-up; selftest.c: the boot self-test
   keep it at 104 MHz or more. Switch order and register meaning are from
   the stock firmware (`arch/sc6530c/clock.c`). If the boot clock is not
   one of the three levels, scaling stays off. If Auto ever misbehaves on
-  the phone, `cpu_max=1` in `/b310e-os/settings.txt` pins 208 MHz.
+  the phone, `db set ui.cpu_max 1` in the shell pins 208 MHz.
 - RTC (from the stock rtc_phy_v5 driver, NOR 0x35dac..0x363d0, and the
   time manager at 0x19594..0x19b9e): seconds, minutes, hours and a 16-bit
   day counter at 0x82001600..0c, day 0 = 1980-01-01; new values go to

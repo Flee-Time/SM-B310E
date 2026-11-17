@@ -38,11 +38,19 @@ typedef struct {
     char text[];                        /* max + 1 */
 } edit_t;
 
+/* The text is UTF-8 (the keys type ASCII; a note from elsewhere may have more):
+ * a character's width falls on its first byte, the cursor and Del step over
+ * whole characters. */
+static bool tail(char c)
+{
+    return ((uint8_t)c & 0xc0) == 0x80;
+}
+
 static int char_w(char c)
 {
-    char s[2] = { c, 0 };
+    char s[2] = { (uint8_t)c >= 0x80 ? '?' : c, 0 };
 
-    return gfx_text_width(s, FONT_BODY, 1);
+    return tail(c) ? 0 : gfx_text_width(s, FONT_BODY, 1);
 }
 
 /* Lines as they wrap: at a '\n', or at the last space before the width
@@ -236,11 +244,13 @@ static void key(screen_t *s, const key_event_t *ev)
             insert(e, '\n');
         break;
     case KEY_LEFT:
-        if (e->cur > 0)
-            e->cur--;
+        while (e->cur > 0 && tail(e->text[--e->cur]))
+            ;
         break;
     case KEY_RIGHT:
         if (e->cur < e->len)
+            e->cur++;
+        while (e->cur < e->len && tail(e->text[e->cur]))
             e->cur++;
         break;
     case KEY_UP:
@@ -251,9 +261,13 @@ static void key(screen_t *s, const key_event_t *ev)
         break;
     case KEY_LSOFT:
         if (e->cur > 0) {
-            memmove(e->text + e->cur - 1, e->text + e->cur, (size_t)(e->len - e->cur + 1));
-            e->cur--;
-            e->len--;
+            int from = e->cur - 1;
+
+            while (from > 0 && tail(e->text[from]))
+                from--;
+            memmove(e->text + from, e->text + e->cur, (size_t)(e->len - e->cur + 1));
+            e->len -= e->cur - from;
+            e->cur = from;
         }
         break;
     case KEY_CENTER:
@@ -290,8 +304,11 @@ void ui_text_edit(const char *title, const char *initial, int max, bool multilin
 
     if (!e)
         return;
-    if (n > max)
+    if (n > max) {                      /* cut on a character, not inside one */
         n = max;
+        while (n > 0 && tail(initial[n]))
+            n--;
+    }
     memcpy(e->text, initial ? initial : "", (size_t)n);
     e->text[n] = 0;
     e->len = e->cur = n;

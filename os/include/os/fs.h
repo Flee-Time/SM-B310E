@@ -19,9 +19,11 @@ void disk_suspend(bool on);                             /* fs/diskio.c */
 void ff_volume_lock(int vol);                           /* fs/ffsystem.c */
 void ff_volume_unlock(int vol);
 
+/* The OS's own files have no extension: the log, its rotated copy, the data
+ * store (os/db.h). What it makes for the user (recordings ...) keeps one. */
 #define OS_DIR      "/b310e-os"
-#define OS_LOG      OS_DIR "/log.txt"
-#define OS_LOG_OLD  OS_DIR "/log-old.txt"
+#define OS_LOG      OS_DIR "/log"
+#define OS_LOG_OLD  OS_DIR "/log-old"
 
 typedef struct {
     bool mounted;
@@ -40,8 +42,8 @@ typedef struct {
  * has no valid free count, the log thread counts the FAT after boot. */
 int fs_init(void);
 const fs_info_t *fs_info(void);
-void fs_sync(void);             /* flush the log; before power-off */
-void fs_suspend(void);          /* flush, stop the log, unmount (for USB) */
+void fs_sync(void);             /* write the store and the log; before power-off */
+void fs_suspend(void);          /* write, stop the log, unmount (for USB) */
 int fs_resume(void);            /* mount again; 0 when mounted */
 
 /* The card log: lines with uptime, buffered in RAM, written once a

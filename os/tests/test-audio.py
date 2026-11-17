@@ -18,7 +18,8 @@ sc6530_adi.headset-mic) and the audio written to a WAV by QEMU:
     92.3, 100.0 MHz), saves it as preset 1 and tunes back to it with the
     1 key; * lowers the music volume; the radio plays on after Back and
     Options -> Turn off ends it;
-then reads the card log, the settings and the radio's file.
+then reads the card log and, from the data store, the settings, the volume
+tags and the radio's keys.
 
 SPDX-License-Identifier: GPL-2.0-or-later
 """
@@ -363,7 +364,7 @@ def main():
 
     # the card log
     # read through the FAT: the recording folder fragments the log
-    log_text = (card_file(image, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log_text = (card_file(image, '/b310e-os/log') or b'').decode(errors='replace')
     (out / 'card-log.txt').write_text(log_text)
     result['log'] = [l for l in log_text.splitlines()
                      if 'audio:' in l or 'fm:' in l or 'recorder:' in l or 'radio:' in l]
@@ -381,15 +382,16 @@ def main():
 
     # the radio's own volume one down (from the Apps level, 6), the music's
     # left alone, the Recorder's tag as well; the preset kept
-    settings = (card_file(image, '/b310e-os/settings.txt') or b'').decode().splitlines()
-    result['vol_music'] = [l for l in settings if l.startswith('vol_music')]
-    assert result['vol_music'] in ([], ['vol_music=7']), result     # no change: no file
-    tags = (card_file(image, '/b310e-os/volumes.txt') or b'').decode().splitlines()
-    result['volumes'] = [(l.split(' ', 2)[0], l.split(' ', 2)[2]) for l in tags]
-    assert ('5', 'FM radio') in result['volumes'] and ('6', 'Recorder') in result['volumes'], result
-    radio = (card_file(image, '/b310e-os/radio.txt') or b'').decode().splitlines()
-    result['radio_file'] = radio
-    assert f'p1={result["station_khz"]}' in radio and f'freq={result["station_khz"]}' in radio, result
+    # (all in the data store, /b310e-os/data)
+    db = boot['store'](image)
+    result['vol_music'] = db.keys.get('ui.vol_music')
+    assert result['vol_music'] == 7, result
+    tags = db.tables.get('volumes')
+    result['volumes'] = [(r[1], r[0]) for r in tags.records.values()] if tags else []
+    assert (5, 'FM radio') in result['volumes'] and (6, 'Recorder') in result['volumes'], result
+    result['radio_keys'] = {k: v for k, v in db.keys.items() if k.startswith('app/FM radio/')}
+    assert result['radio_keys'].get('app/FM radio/p1') == result['station_khz'] and \
+        result['radio_keys'].get('app/FM radio/freq') == result['station_khz'], result
 
     # FM trace: the tuner was started and tuned
     trace = (out / 'qemu.log').read_text(errors='replace')

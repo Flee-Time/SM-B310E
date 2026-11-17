@@ -3,6 +3,7 @@
  */
 #include "os/app.h"
 #include "os/arch.h"
+#include "os/db.h"
 #include "os/drivers.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -28,7 +29,7 @@
 #define MUSIC_MS       50                /* the music player's refill */
 #define DIM_PERCENT    8
 #define DARK_AFTER_MS  10000            /* after dimming */
-#define SETTINGS_FILE  OS_DIR "/settings.txt"
+#define OLD_SETTINGS   OS_DIR "/settings.txt"   /* before the store: read once */
 
 ui_settings_t ui_settings = {
     60, 30, 0, 1, 0, 7 * 60,
@@ -76,9 +77,11 @@ static int charging;                    /* CHARGE_* */
 
 /* ---- settings ------------------------------------------------------------ */
 
-/* The settings file: one "name=value" line each, every name in this table.
- * A name the file lacks keeps its default; one the table lacks is ignored,
- * so files written by older and newer builds both load. */
+/* The settings are "ui.<name>" in the store (os/db.h), every name in this
+ * table. A name the store lacks keeps its default; one the table lacks is
+ * ignored, so stores written by older and newer builds both load. Until
+ * 2026-11-17 they were "name=value" lines in settings.txt, read once into the
+ * store on the first boot with it (the file stays on the card). */
 static const struct {
     const char *name;
     int *v;
@@ -105,13 +108,13 @@ static const struct {
     { "dev_mode", &ui_settings.dev_mode, 0, 1 },
 };
 
-static void settings_load(void)
+static void settings_import(void)
 {
     char buf[512], *p;
     FIL f;
     UINT n = 0;
 
-    if (f_open(&f, SETTINGS_FILE, FA_READ) != FR_OK)
+    if (f_open(&f, OLD_SETTINGS, FA_READ) != FR_OK)
         return;
     f_read(&f, buf, sizeof(buf) - 1, &n);
     f_close(&f);
@@ -141,22 +144,62 @@ static void settings_load(void)
                 v <= setting_table[i].max)
                 *setting_table[i].v = v;
     }
+    klog("settings: %s read into the store", OLD_SETTINGS);
 }
 
+static void settings_from_db(void)
+{
+    char key[32];
+
+    for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++) {
+        int v;
+
+        snprintf(key, sizeof(key), "ui.%s", setting_table[i].name);
+        v = db_get_int(key, *setting_table[i].v);
+        if (v >= setting_table[i].min && v <= setting_table[i].max)
+            *setting_table[i].v = v;
+    }
+}
+
+/* Only what changed is written, a second or two later (the store batches). */
 void ui_settings_save(void)
 {
-    char buf[512];
-    FIL f;
-    UINT n;
-    int len = 0;
+    char key[32];
 
-    for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++)
-        len += snprintf(buf + len, sizeof(buf) - (size_t)len, "%s=%d\n",
-                        setting_table[i].name, *setting_table[i].v);
-    if (f_open(&f, SETTINGS_FILE, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK) {
-        f_write(&f, buf, (UINT)len, &n);
-        f_close(&f);
+    for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++) {
+        snprintf(key, sizeof(key), "ui.%s", setting_table[i].name);
+        db_set_int(key, *setting_table[i].v);
     }
+}
+
+static void settings_load(void)
+{
+    if (!db_get_bool("import.settings", false)) {
+        settings_import();
+        ui_settings_save();
+        db_set_bool("import.settings", true);
+    }
+    settings_from_db();
+}
+
+/* "ui." changed in the store, maybe not by us (the shell's db set, an import):
+ * what the screen and the clock use is taken up. */
+static void settings_changed(void *ctx)
+{
+    ui_settings_t was = ui_settings;
+
+    settings_from_db();
+    if (ui_settings.brightness != was.brightness && light == 0)
+        ui_apply_brightness();
+    if (ui_settings.keylight != was.keylight && light == 0)
+        keylight_set(ui_settings.keylight);
+    if (ui_settings.cpu_max != was.cpu_max)
+        cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
+    if (ui_settings.deep_idle != was.deep_idle)
+        kernel_set_tickless(ui_settings.deep_idle);
+    if (ui_settings.chip_sleep != was.chip_sleep)
+        sleep_idle_enable(ui_settings.chip_sleep);
+    dirty = true;
 }
 
 void ui_apply_brightness(void)
@@ -1064,6 +1107,7 @@ void ui_run(screen_t *home)
     thread_owned_exit = app_thread_ended;
 
     settings_load();
+    db_watch("ui.", false, settings_changed, NULL);
     volume_load();
     rtc_restore();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
@@ -1105,6 +1149,7 @@ void ui_run(screen_t *home)
             on_key(&ev, kernel_ticks());
         if (call_fn)
             serve_call();
+        db_dispatch();                  /* the store's watchers: here, on this thread */
         now = kernel_ticks();
         if (background_audio() && (int32_t)(now - next_music) >= 0) {
             next_music = now + MUSIC_MS;    /* on any screen: the play queue, */

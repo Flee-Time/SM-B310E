@@ -4,13 +4,14 @@
   - the panel has Sound, Brightness, Torch; Left/Right on Sound changes what
     is playing (with nothing playing, the music's); Center opens the page;
   - the page changes any one level (the alarm's here);
-  - volumes.txt on the card is read at boot: a tag for an app not loaded;
+  - an old volumes.txt on the card is read into the store at the first boot: a
+    tag for an app not loaded;
   - the Recorder plays with no change of its own: it gets a tag under its name
     at the Apps level, and the codec takes that level;
   - over the playing app the panel's row and the page change that tag, heard
     at once in the codec's volume, and the page opens on its row;
   - * + # closes the page and the panel together;
-  - the card has the tag and its icon after power-off, and a second boot lists
+  - the store (its volumes table) has the tag and its icon after power-off, and a second boot lists
     the same tags at the same levels;
   - Reset puts every level back and clears the app rows, but for what is
     playing; a loaded app that plays again is listed again; the card agrees.
@@ -35,10 +36,17 @@ QT, capture = boot['QT'], boot['capture']
 symbol, status, string, wait_for, free_port, card_file = (
     boot[n] for n in ('symbol', 'status', 'string', 'wait_for', 'free_port', 'card_file'))
 MENU, MAGIC = boot['MENU'], boot['MAGIC']
+store, store_keys = boot['store'], boot['store_keys']
 VOL_OFFSET = 24                         # ui_settings.vol: after six ints
 MUSIC, APPS, ALARM = 0, 1, 2
 TAG_SIZE = 95                           # tag_t: name[20], level, has_icon, hidden, icon_t
 DB10 = [-1000, -400, -340, -280, -230, -180, -140, -100, -60, -30, 0]
+
+
+def volume_records(img):
+    """[(level, icon bytes, name)] of the store's volumes table, oldest first"""
+    t = store(img).tables.get('volumes')
+    return [(r[1], len(r[2]), r[0]) for _, r in sorted(t.records.items())] if t else []
 
 
 def tone_wav(path, seconds):
@@ -231,14 +239,12 @@ def main():
     finally:
         ph.close()
 
-    # The card after power-off
+    # The card after power-off: the store's volumes table (name, level, icon)
     img = card.read_bytes()
-    text = (card_file(img, '/b310e-os/volumes.txt') or b'').decode()
-    lines = text.splitlines()
-    result['file'] = [(x.split(' ', 2)[0], len(x.split(' ', 2)[1]), x.split(' ', 2)[2]) for x in lines]
-    assert result['file'] == [('4', 1, 'Old game'), (str(apps - 2), 144, 'Recorder')], result
-    settings = (card_file(img, '/b310e-os/settings.txt') or b'').decode().splitlines()
-    assert f'vol_music={music + 1}' in settings and f'vol_alarm={alarm - 1}' in settings, settings
+    result['file'] = volume_records(img)
+    assert result['file'] == [(4, 0, 'Old game'), (apps - 2, 72, 'Recorder')], result
+    settings = store_keys(img, 'ui.')
+    assert settings['ui.vol_music'] == music + 1 and settings['ui.vol_alarm'] == alarm - 1, settings
 
     # And a second boot: the same tags, the icon read back
     ph = Phone(args.qemu, elf, image, card)
@@ -300,11 +306,10 @@ def main():
     finally:
         ph.close()
     img = card.read_bytes()
-    lines = (card_file(img, '/b310e-os/volumes.txt') or b'').decode().splitlines()
-    result['file_after_reset'] = [(x.split(' ', 2)[0], x.split(' ', 2)[2]) for x in lines]
-    assert result['file_after_reset'] == [(str(apps), 'Recorder')], result
-    settings = (card_file(img, '/b310e-os/settings.txt') or b'').decode().splitlines()
-    assert f'vol_music={music}' in settings and f'vol_alarm={alarm}' in settings, settings
+    result['file_after_reset'] = [(level, name) for level, _, name in volume_records(img)]
+    assert result['file_after_reset'] == [(apps, 'Recorder')], result
+    settings = store_keys(img, 'ui.')
+    assert settings['ui.vol_music'] == music and settings['ui.vol_alarm'] == alarm, settings
     print('PASS ' + json.dumps(result))
 
 

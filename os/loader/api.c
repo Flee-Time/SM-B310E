@@ -73,6 +73,140 @@ static bool card_mounted(void)
     return fs_info()->mounted;
 }
 
+/* ---- the store for apps (2.17): everything under "app/<the app's name>/" ---- */
+
+static int ns(const char *name, char *out, size_t n)
+{
+    app_t *a = app_self();
+
+    if (!a || !name || (size_t)snprintf(out, n, "app/%s/%s", app_name(a), name) >= n)
+        return 0;
+    return 1;
+}
+
+static bool own(db_table_t *t)
+{
+    char prefix[DB_NAME_MAX];
+    const char *name = db_table_name(t);
+    size_t n;
+
+    if (!ns("", prefix, sizeof(prefix)))
+        return false;
+    n = strlen(prefix);
+    return strlen(name) > n && !memcmp(name, prefix, n);
+}
+
+static int app_db_get_int(const char *key, int def)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_get_int(k, def) : def;
+}
+
+static bool app_db_get_bool(const char *key, bool def)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_get_bool(k, def) : def;
+}
+
+static int app_db_get_str(const char *key, char *out, size_t n, const char *def)
+{
+    char k[DB_KEY_MAX];
+
+    return db_get_str(ns(key, k, sizeof(k)) ? k : NULL, out, n, def);
+}
+
+static int app_db_get_blob(const char *key, void *out, size_t n)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_get_blob(k, out, n) : DB_EINVAL;
+}
+
+static int app_db_set_int(const char *key, int v)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_set_int(k, v) : DB_EINVAL;
+}
+
+static int app_db_set_bool(const char *key, bool v)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_set_bool(k, v) : DB_EINVAL;
+}
+
+static int app_db_set_str(const char *key, const char *s)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_set_str(k, s) : DB_EINVAL;
+}
+
+static int app_db_set_blob(const char *key, const void *p, size_t n)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_set_blob(k, p, n) : DB_EINVAL;
+}
+
+static int app_db_delete(const char *key)
+{
+    char k[DB_KEY_MAX];
+
+    return ns(key, k, sizeof(k)) ? db_delete(k) : DB_EINVAL;
+}
+
+static db_table_t *app_db_table_open(const db_schema_t *s)
+{
+    char name[DB_NAME_MAX];
+    db_schema_t mine;
+
+    if (!s || !ns(s->name, name, sizeof(name)))
+        return NULL;
+    mine = *s;
+    mine.name = name;                   /* copied by the store */
+    return db_table_open(&mine);
+}
+
+static uint32_t app_db_insert(db_table_t *t, const db_value_t *v, int n)
+{
+    return own(t) ? db_insert(t, v, n) : 0;
+}
+
+static int app_db_get(db_table_t *t, uint32_t id, db_value_t *v, int n, void *buf, size_t size)
+{
+    return own(t) ? db_get(t, id, v, n, buf, size) : DB_ENOENT;
+}
+
+static int app_db_find(db_table_t *t, int field, const db_value_t *value, uint32_t *ids, int max,
+                       uint32_t before)
+{
+    return own(t) ? db_find(t, field, value, ids, max, before) : 0;
+}
+
+static int app_db_update(db_table_t *t, uint32_t id, const db_value_t *v, int n)
+{
+    return own(t) ? db_update(t, id, v, n) : DB_ENOENT;
+}
+
+static int app_db_update_field(db_table_t *t, uint32_t id, int field, const db_value_t *v)
+{
+    return own(t) ? db_update_field(t, id, field, v) : DB_ENOENT;
+}
+
+static int app_db_remove(db_table_t *t, uint32_t id)
+{
+    return own(t) ? db_remove(t, id) : DB_ENOENT;
+}
+
+static int app_db_count(db_table_t *t)
+{
+    return own(t) ? db_count(t) : 0;
+}
+
 const os_api_t os_api = {
     .major = OS_API_MAJOR, .minor = OS_API_MINOR, .size = sizeof(os_api_t),
 
@@ -238,4 +372,25 @@ const os_api_t os_api = {
     .ui_is_dark = ui_is_dark,
     .ui_depth = ui_depth,
     .app_on_fault = app_on_fault,
+    .db_get_int = app_db_get_int,
+    .db_get_bool = app_db_get_bool,
+    .db_get_str = app_db_get_str,
+    .db_get_blob = app_db_get_blob,
+    .db_set_int = app_db_set_int,
+    .db_set_bool = app_db_set_bool,
+    .db_set_str = app_db_set_str,
+    .db_set_blob = app_db_set_blob,
+    .db_delete = app_db_delete,
+    .db_table_open = app_db_table_open,
+    .db_insert = app_db_insert,
+    .db_get = app_db_get,
+    .db_find = app_db_find,
+    .db_update = app_db_update,
+    .db_update_field = app_db_update_field,
+    .db_remove = app_db_remove,
+    .db_count = app_db_count,
+    .db_table_gen = db_table_gen,
+    .utf8_valid = utf8_valid,
+    .utf8_cut = utf8_cut,
+    .utf8_from_latin1 = utf8_from_latin1,
 };

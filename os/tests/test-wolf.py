@@ -168,7 +168,7 @@ def main():
             p.wait()
 
     img = card.read_bytes()
-    text = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    text = (card_file(img, '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in text.splitlines() if 'wolf3d:' in l][-30:]
     result['config'] = bool(card_file(img, f'{FOLDER}/config.wl6'))
     print(json.dumps(result, indent=2))

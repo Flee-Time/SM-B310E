@@ -3,11 +3,13 @@
  * sound. The category that last started a sound owns the codec volume, so
  * changing its level is heard at once.
  *
- * The OS's levels live in the settings. The tags are in /b310e-os/volumes.txt,
- * one a line: the level, the icon in hex or "-", the name. The name and icon
+ * The OS's levels live in the settings. The tags are records of the store's
+ * "volumes" table (os/db.h): name, level, icon (none: empty). The name and icon
  * are copied: the app they came from may be unloaded, and the page lists them
  * all the same. Saved within the second (volume_save), never from the caller:
- * a tag can appear on a game's thread, at its first sound.
+ * a tag can appear on a game's thread, at its first sound. Until 2026-11-17
+ * they were lines of /b310e-os/volumes.txt (the level, the icon in hex or "-",
+ * the name), read once into the store.
  *
  * A reset hides tags and leaves their slots: an app that is loaded still holds
  * its number. Hidden ones are not saved, so a boot frees the slots, and playing
@@ -17,12 +19,13 @@
  */
 #include "os/arch.h"
 #include "os/audio.h"
+#include "os/db.h"
 #include "os/fs.h"
 #include "os/lib.h"
 #include "os/ui.h"
 
 #define VOL_TAGS   24
-#define TAGS_FILE  OS_DIR "/volumes.txt"
+#define OLD_FILE   OS_DIR "/volumes.txt"
 
 typedef struct {
     char name[20];                      /* an app's name fits (app_file_t) */
@@ -51,7 +54,15 @@ static const struct {
 static tag_t tags[VOL_TAGS];
 static volatile int n_tags;
 static volatile bool tags_changed;
+static volatile uint32_t tags_dirty;    /* a bit a tag: to write */
+static uint32_t tag_id[VOL_TAGS];       /* its record, 0 none */
 static int active = VOL_MUSIC;
+
+static void changed(int i)
+{
+    tags_dirty |= 1u << i;
+    tags_changed = true;
+}
 
 static tag_t *tag_of(int cat)
 {
@@ -84,7 +95,7 @@ void volume_use(int cat)
     active = cat;
     if (cat >= VOL_COUNT && tag_of(cat)->hidden) {
         tag_of(cat)->hidden = false;
-        tags_changed = true;
+        changed(cat - VOL_COUNT);
     }
     audio_set_volume(volume_db10(volume_level(cat)));
 }
@@ -114,7 +125,7 @@ void volume_set(int cat, int level)
         audio_set_volume(volume_db10(level));
     if (t) {
         t->level = (uint8_t)level;
-        tags_changed = true;
+        changed(cat - VOL_COUNT);
     } else {
         ui_settings.vol[cat] = level;
         ui_settings_save();
@@ -141,16 +152,16 @@ int volume_tag(const char *name, const void *icon)
         t->level = (uint8_t)ui_settings.vol[VOL_APP];
         cat = VOL_COUNT + n_tags;
         n_tags++;
-        tags_changed = true;
+        changed(cat - VOL_COUNT);
     }
     if (cat != VOL_APP && tags[cat - VOL_COUNT].hidden) {
         tags[cat - VOL_COUNT].hidden = false;
-        tags_changed = true;
+        changed(cat - VOL_COUNT);
     }
     if (cat != VOL_APP && icon && memcmp(&tags[cat - VOL_COUNT].icon, icon, sizeof(icon_t))) {
         memcpy(&tags[cat - VOL_COUNT].icon, icon, sizeof(icon_t));
         tags[cat - VOL_COUNT].has_icon = true;
-        tags_changed = true;
+        changed(cat - VOL_COUNT);
     }
     arch_irq_restore(s);
     if (cat == VOL_APP)
@@ -188,6 +199,7 @@ void volume_reset(void)
         tags[i].level = (uint8_t)defaults[VOL_APP];
         tags[i].hidden = VOL_COUNT + i != playing;
     }
+    tags_dirty = (1u << VOL_TAGS) - 1;
     tags_changed = true;
     arch_irq_restore(s);
     audio_set_volume(volume_db10(volume_level(active)));
@@ -213,7 +225,7 @@ const void *volume_icon(int cat)
     return cat >= 0 && cat < VOL_COUNT ? fixed[cat].icon : &icon_apps;
 }
 
-/* ---- the file ------------------------------------------------------------ */
+/* ---- the old file, read once ------------------------------------------------ */
 #define ICON_HEX   ((int)sizeof(icon_t) * 2)
 #define LINE_MAX_  (4 + ICON_HEX + 1 + (int)sizeof(((tag_t *)0)->name) + 2)
 
@@ -252,14 +264,14 @@ static void parse_line(char *line)
     n_tags++;
 }
 
-void volume_load(void)
+static void import_file(void)
 {
     char line[LINE_MAX_], c;
     int len = 0;
     FIL f;
     UINT n;
 
-    if (f_open(&f, TAGS_FILE, FA_READ) != FR_OK)
+    if (f_open(&f, OLD_FILE, FA_READ) != FR_OK)
         return;
     while (f_read(&f, &c, 1, &n) == FR_OK && n == 1) {
         if (c == '\n') {
@@ -271,37 +283,129 @@ void volume_load(void)
         }
     }
     f_close(&f);
+    for (int i = 0; i < n_tags; i++)
+        changed(i);
+    klog("volume: %s read into the store, %d tags", OLD_FILE, n_tags);
 }
 
+/* ---- the store ------------------------------------------------------------- */
+enum { F_NAME, F_LEVEL, F_ICON };
+static const db_field_t fields[] = {
+    { "name", DB_STR }, { "level", DB_INT }, { "icon", DB_BLOB },
+};
+static const db_schema_t schema = { "volumes", 1, 3, F_NAME, fields, NULL };
+static db_table_t *table;
+static uint32_t own_gen;                /* the table as we last left it */
+
+/* The records into the tags, by name: a loaded app keeps its slot (its category).
+ * Tags with no record are hidden. */
+static void from_table(void)
+{
+    uint32_t ids[VOL_TAGS], s;
+    int n = db_find(table, -1, NULL, ids, VOL_TAGS, 0);
+
+    s = arch_irq_save();
+    for (int i = 0; i < n_tags; i++) {
+        tags[i].hidden = true;
+        tag_id[i] = 0;
+    }
+    arch_irq_restore(s);
+    while (n-- > 0) {                   /* oldest first: the order they came in */
+        uint8_t buf[sizeof(tag_t) + 8];
+        db_value_t v[3];
+        char name[sizeof(tags[0].name)];
+        int at = -1;
+
+        if (db_get(table, ids[n], v, 3, buf, sizeof(buf)) != DB_OK || !v[F_NAME].len)
+            continue;
+        snprintf(name, sizeof(name), "%s", (const char *)v[F_NAME].p);
+        s = arch_irq_save();
+        for (int i = 0; i < n_tags && at < 0; i++)
+            if (!strcmp(tags[i].name, name))
+                at = i;
+        if (at < 0 && n_tags < VOL_TAGS) {
+            at = n_tags++;
+            memset(&tags[at], 0, sizeof(tags[at]));
+            memcpy(tags[at].name, name, sizeof(name));
+        }
+        if (at >= 0) {
+            tags[at].level = (uint8_t)(v[F_LEVEL].i > VOL_LEVELS ? VOL_LEVELS : v[F_LEVEL].i);
+            tags[at].has_icon = v[F_ICON].len == sizeof(icon_t);
+            if (tags[at].has_icon)
+                memcpy(&tags[at].icon, v[F_ICON].p, sizeof(icon_t));
+            tags[at].hidden = false;
+            tag_id[at] = ids[n];
+        }
+        arch_irq_restore(s);
+    }
+    own_gen = db_table_gen(table);
+}
+
+/* Changed by someone else (an import): taken up */
+static void table_changed(void *ctx)
+{
+    if (table && db_table_gen(table) != own_gen)
+        from_table();
+}
+
+void volume_load(void)
+{
+    table = db_table_open(&schema);
+    if (!db_get_bool("import.volumes", false)) {
+        import_file();
+        db_set_bool("import.volumes", true);
+        volume_save();
+    } else if (table) {
+        from_table();
+    }
+    db_watch("volumes", true, table_changed, NULL);
+}
+
+/* The tags that changed, each its record; a hidden one's goes. What fails
+ * (no card) is tried again the next second. */
 void volume_save(void)
 {
-    static const char digits[] = "0123456789abcdef";
-    char line[LINE_MAX_];
-    FIL f;
-    UINT w;
+    uint32_t dirty, s;
 
-    if (!tags_changed || !fs_info()->mounted)
+    if (!tags_changed || (!table && !(table = db_table_open(&schema))))
         return;
-    if (f_open(&f, TAGS_FILE, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK)
-        return;                         /* again in a second */
+    s = arch_irq_save();
+    dirty = tags_dirty;
+    tags_dirty = 0;
     tags_changed = false;               /* before: one that comes now is saved next */
+    arch_irq_restore(s);
     for (int i = 0; i < n_tags; i++) {
-        const tag_t *t = &tags[i];
-        int len;
+        tag_t t;
+        int r = DB_OK;
 
-        if (t->hidden)
+        if (!(dirty & 1u << i))
             continue;
-        len = snprintf(line, sizeof(line), "%d ", t->level);
-        if (t->has_icon) {
-            for (unsigned b = 0; b < sizeof(t->icon); b++) {
-                line[len++] = digits[t->icon.a[b] >> 4];
-                line[len++] = digits[t->icon.a[b] & 15];
-            }
+        s = arch_irq_save();
+        t = tags[i];
+        arch_irq_restore(s);
+        if (t.hidden) {
+            if (tag_id[i] && (r = db_remove(table, tag_id[i])) == DB_ENOENT)
+                r = DB_OK;
+            if (!r)
+                tag_id[i] = 0;
         } else {
-            line[len++] = '-';
+            db_value_t v[3] = {
+                DB_STRV(t.name), DB_INTV(t.level),
+                { .p = &t.icon, .len = t.has_icon ? sizeof(icon_t) : 0 },
+            };
+
+            if (tag_id[i])
+                r = db_update(table, tag_id[i], v, 3);
+            else if (!(tag_id[i] = db_insert(table, v, 3)))
+                r = DB_EIO;
         }
-        len += snprintf(line + len, sizeof(line) - (size_t)len, " %s\n", t->name);
-        f_write(&f, line, (UINT)len, &w);
+        if (r) {                        /* this one and those after it: next time */
+            s = arch_irq_save();
+            tags_dirty |= dirty & ~((1u << i) - 1);
+            tags_changed = true;
+            arch_irq_restore(s);
+            break;
+        }
     }
-    f_close(&f);
+    own_gen = db_table_gen(table);
 }

@@ -224,7 +224,7 @@ def main():
             p.terminate()
             p.wait()
 
-    text = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    text = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in text.splitlines() if 'duke:' in l][-30:]
     print(json.dumps(result, indent=2))
     assert text.count('duke: ended (0)') == 3, (text.count('duke: ended (0)'), result)

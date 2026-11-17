@@ -201,7 +201,7 @@ def main():
             p.wait()
 
     img = card.read_bytes()
-    text = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
+    text = (card_file(img, '/b310e-os/log') or b'').decode(errors='replace')
     result['log'] = [l.strip() for l in text.splitlines() if f'{log}:' in l or 'app:' in l][-30:]
     opt = card_file(img, f'{folder}/{rom_name}.opt')
     result['options'] = opt.decode(errors='replace').split('\n')[0] if opt else None

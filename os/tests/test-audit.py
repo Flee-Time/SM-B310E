@@ -268,7 +268,7 @@ def main():
         if p.poll() is None:
             p.terminate()
             p.wait()
-    log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     result['alarm_lines'] = [x.strip() for x in log.splitlines() if 'alarm: ringing' in x]
     result['art_lines'] = [x.strip()[:90] for x in log.splitlines() if ' art: ' in x][:6]
     assert len(result['alarm_lines']) >= 4, result

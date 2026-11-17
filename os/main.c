@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
+#include "os/db.h"
 #include "os/dsp.h"
 #include "os/drivers.h"
 #include "os/fs.h"
@@ -27,6 +28,7 @@ static void main_thread(void *arg)
     console_printf("built %s\n", BUILD_DATE);
     console_flush();
     fs_init();
+    db_init();                          /* the settings, before the UI reads them */
     {
         uint32_t us = lcd_measure();
 

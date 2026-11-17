@@ -7,10 +7,11 @@ Alarm (the Alarm app, os/modules/alarm): Add alarm, the time editor from
 its page every day of the week switched on and the label "A" by
 multi-tap; wait for the OS to ring it (the screen wakes, the ringing
 screen is on top, the log says so), Snooze, and check the snooze time,
-that it stays on (it repeats) and that /b310e-os/alarms.txt has it.
+that it stays on (it repeats) and that the data store's alarms table has it.
 Calculator: 12 + 30 = 42; 7.5 x 2 = 15; 1 / 0 is an error; Del clears it.
 The result and state are read from the calculator's variables (calc_*).
-Notes: "Hi" by multi-tap. Music (music.app): two short tones in /music;
+Notes: "Hi" by multi-tap, a record of the store's app/Notes/notes table.
+Music (music.app): two short tones in /music;
 Apps -> Music plays the first and goes on to the second by itself, Center
 pauses it (the WAV codec module is on the card); closing the app keeps
 the queue playing; Center on b.wav in Files opens Music with its path:
@@ -38,7 +39,13 @@ boot = runpy.run_path(str(Path(__file__).with_name('test-boot.py')))
 QT, capture = boot['QT'], boot['capture']
 symbol, status, string, wait_for, free_port, card_file = (
     boot[n] for n in ('symbol', 'status', 'string', 'wait_for', 'free_port', 'card_file'))
-card_list = boot['card_list']
+card_list, store, store_keys = boot['card_list'], boot['store'], boot['store_keys']
+
+
+def alarm_records(img):
+    """the store's alarms, oldest first, as alarms.txt lines: on, minute, days, label"""
+    t = store(img).tables.get('alarms')
+    return [f'{int(r[0])} {r[1]} {r[2]} {r[3]}' for _, r in sorted(t.records.items())] if t else []
 
 
 def tone_wav(path, hz, seconds):
@@ -134,10 +141,9 @@ def main():
             qmp.command('screendump', {'filename': str(out / f'{name}.png'), 'format': 'png'})
 
         def alarm_lines():
-            """/b310e-os/alarms.txt in the card image as it is now (the
-            service writes it at every change)."""
-            return ((card_file(card.read_bytes(), '/b310e-os/alarms.txt') or b'')
-                    .decode(errors='replace').splitlines())
+            """the store's alarms table in the card image as it is now (the
+            service writes it at every change), as alarms.txt had it"""
+            return alarm_records(card.read_bytes())
 
         wait_for(qt, base, lambda s: s['magic'] == MAGIC, 10, 'OS never started')
         wait_for(qt, base, lambda s: s['ui_depth'] == 1, 60, 'no UI')
@@ -367,18 +373,17 @@ def main():
             p.terminate()
             p.wait()
     img = card.read_bytes()
-    settings = (card_file(img, '/b310e-os/settings.txt') or b'').decode()
-    log = (card_file(img, '/b310e-os/log.txt') or b'').decode(errors='replace')
-    result['settings'] = [l for l in settings.splitlines() if l.startswith('alarm')]
-    result['alarms'] = ((card_file(img, '/b310e-os/alarms.txt') or b'')
-                        .decode(errors='replace').splitlines())
+    log = (card_file(img, '/b310e-os/log') or b'').decode(errors='replace')
+    result['settings'] = store_keys(img, 'ui.alarm')
+    result['alarms'] = alarm_records(img)
     result['log'] = [l.strip() for l in log.splitlines() if 'alarm' in l]
     # on, 00:01, every day (bits 0..6), "A"
     assert result['alarms'] == ['1 1 127 A'], result
     assert any('alarm app: added 00:01' in l for l in result['log']), result
     assert any('alarm: ringing at 00:01' in l for l in result['log']), result
-    result['note'] = (card_file(img, '/b310e-os/notes/NOTE0001.TXT') or b'').decode(errors='replace')
-    assert result['note'] == 'Hi', result
+    notes = store(img).tables.get('app/Notes/notes')
+    result['note'] = [r[0] for _, r in sorted(notes.records.items())] if notes else None
+    assert result['note'] == ['Hi'], result
     copy = card_file(img, '/music/Copy of a.wav')
     result['copy_bytes'] = len(copy) if copy else None
     assert copy and copy == card_file(img, '/music/a.wav'), result

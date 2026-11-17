@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <stdarg.h>
+#include "os/db.h"
 #include "os/drivers.h"
 #include "os/fs.h"
 #include "os/kernel.h"
@@ -170,6 +171,7 @@ static void log_main(void *arg)
         count_free();
     for (;;) {
         sem_wait(&log_kick, 1000);
+        db_tick();                      /* the store's settings, a second after a change */
         if (!log_retry_at || (int32_t)(kernel_ticks() - log_retry_at) >= 0)
             log_flush();
     }
@@ -177,16 +179,18 @@ static void log_main(void *arg)
 
 void fs_sync(void)
 {
+    db_sync();
     log_flush();
 }
 
-/* Hand the card to someone else (USB mass storage): flush the log, stop
- * writing, unmount. Files must be closed first. fs_resume() mounts again;
- * the free count is read again from FSINFO (or counted on the next boot). */
+/* Hand the card to someone else (USB mass storage): write the store and the
+ * log, stop writing, unmount. Files must be closed first. fs_resume() mounts
+ * again; the free count is read again from FSINFO (or counted on the next boot). */
 void fs_suspend(void)
 {
     if (!info.mounted)
         return;
+    db_suspend();
     log_flush();
     mutex_lock(&flush_lock, WAIT_FOREVER);
     mutex_lock(&log_lock, WAIT_FOREVER);
@@ -213,6 +217,7 @@ int fs_resume(void)
         if (fat.free_clst <= fat.n_fatent - 2)
             set_free(fat.free_clst);
     }
+    db_resume();                        /* away no more (or still: no card) */
     return info.mounted ? 0 : -1;
 }
 
@@ -238,6 +243,6 @@ int fs_init(void)
         f_mkdir(OS_DIR);
     }
     info.mount_ms = kernel_ticks() - t;
-    thread_create("log", PRIO_LOW + 1, 2048, log_main, NULL);
+    thread_create("log", PRIO_LOW + 1, 4096, log_main, NULL);   /* the store's FIL too */
     return info.mounted ? 0 : -1;
 }

@@ -161,7 +161,7 @@ def main():
         if p.poll() is None:
             p.terminate()
             p.wait()
-    log = (card_file(card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+    log = (card_file(card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
     lines = [x for x in log.splitlines() if 'sleep test' in x]
     (out / 'sleep-log.txt').write_text('\n'.join(lines))
     result['log_lines'] = len(lines)

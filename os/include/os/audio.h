@@ -62,7 +62,7 @@ void audio_headset_idle(bool idle);     /* dark: no codec just for its buttons *
  * VOL_COUNT that works in all the calls below. An app gets one under its own
  * name the first time it plays (so one that makes no sound is not listed),
  * or sooner, or under a name of its choice, with volume_register (app API
- * 2.10). Tags are kept in /b310e-os/volumes.txt with the app's icon, so they
+ * 2.10). Tags are kept in the store's "volumes" table with the app's icon, so they
  * stay listed while the app is not loaded. A new one starts at VOL_APP's
  * level, which is also what plays when the OS itself plays for no app. */
 enum { VOL_MUSIC, VOL_APP, VOL_ALARM, VOL_CALL, VOL_TACTILE, VOL_COUNT };

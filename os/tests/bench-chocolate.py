@@ -150,7 +150,7 @@ def main():
         key('ret', 'Power off')
         qmp.hmp('sendkey f1 100')
         p.wait(timeout=60)
-        log = (boot['card_file'](card.read_bytes(), '/b310e-os/log.txt') or b'').decode(errors='replace')
+        log = (boot['card_file'](card.read_bytes(), '/b310e-os/log') or b'').decode(errors='replace')
         m = re.search(rf'{args.game}: first frame after (\d+) ms', log)
         result['start_ms'] = int(m[1]) if m else None      # the kit's: launch to first frame
         result['log'] = [l.strip() for l in log.splitlines() if f'{args.game}:' in l][-40:]
