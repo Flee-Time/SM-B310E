@@ -676,6 +676,22 @@ static void note_fi_out(void)
 }
 
 /* ARM->DSP command (FUN_0005f474): 8-slot ring, then the doorbell. */
+uint16_t l1_dm_rxgain = 0x3f;            /* dedicated RX FI word-6 gain seed. Stock uses 0x3f
+                                         * (max) so the DSP closed-loop AGC rides it; our low
+                                         * rxlev/2 seed (~1) makes the RX fight the AGC (FI-field
+                                         * diff vs stock, 2026-11-12). 0 = old rxlev-based. */
+uint16_t l1_dm_rxflag = 0x0010;          /* stock sets FI word-5 = 0x0010 on EVERY dedicated
+                                         * type-2 RX burst (v6: 67/67; w5 bit4 -> DSP 0xeca1, a
+                                         * dedicated-RX AFC reinit that clears the AFC accumulator
+                                         * 0xecb9). We omitted it; re-match on SDCCH/SACCH RX. */
+uint8_t l1_dm_burst0_sync = 1;           /* A2 (stock FUN_000533a2): set FI word-4 bit12 (0x1000)
+                                          * for a DSP window/AFC re-init. ONE-SHOT per establish
+                                          * (stock gates it on a one-shot flag it clears after) -
+                                          * armed by l1_dm_est_tail, fired on the FIRST dedicated
+                                          * read's burst 0. Firing it EVERY block (the first cut)
+                                          * re-inited the AFC continuously so it never settled and
+                                          * decode fell 43/45 -> ~20%; one-shot lets it lock. */
+static uint8_t dm_burst0_armed = 0;      /* A2 one-shot: set at establish, cleared after it fires */
 uint8_t l1_calllog = 0;                  /* 1 = log every DSP call (~C/~T/~F) to klog for a
                                          * 1:1 diff vs the stock logger; Kc + L3 payload redacted */
 
@@ -1148,6 +1164,12 @@ static int post_fi(const uint16_t fi[11], const uint16_t ext[3])
     for (int i = 0; i < 11; i++)
         sm_w16(FI_BASE + next * FI_SIZE + i * 2, fi[i]);
     sm_w16(FI_IN, (uint16_t)next);
+    /* Call-stream log: all 11 FI words + 3 ext, raw as posted (for the stock FI-field diff).
+     * FI words carry no SIM-derived data (the block bytes are in the TXBUFQ, logged by ~T). */
+    if (l1_calllog)
+        klog("~F %08lx %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x %04x",
+             (unsigned long)frame_number, fi[0], fi[1], fi[2], fi[3], fi[4], fi[5], fi[6],
+             fi[7], fi[8], fi[9], fi[10], ext[0], ext[1], ext[2]);
     dsp_info.frames_posted++;
     frame_number = (frame_number + 1) % FN_MOD;
     note_fi_out();
@@ -1157,15 +1179,26 @@ static int post_fi(const uint16_t fi[11], const uint16_t ext[3])
 /* The frame instruction skeleton (FUN_0004f5fc / FUN_0004f628): bytes
  * 0..11 zero, 12..21 and the extension 0xff; the frame number in word 1
  * bits 15:9 (high 7 bits) and word 2. */
+/* Offset added to frame_number for the FI frame stamp (NOT the scheduling). Stock stamps every
+ * dedicated FI with the cell's ABSOLUTE GSM FN (= the A5/3 cipher COUNT); we stamped the LOCAL
+ * frame_number (0 at boot), which gives a correct Kc but a wrong keystream. Set this to the
+ * cell's fn_offset at dedicated establish (so stamp = frame_number + fn_offset = absolute FN) and
+ * 0 otherwise. Both peer sessions, 2026-11-13; needs a good-signal HW run to confirm. */
+uint32_t l1_fi_fn_offset = 0;
+uint8_t  l1_dm_absfn = 1;                /* 1 = stamp dedicated FIs with the absolute FN (the
+                                          * A5/3-COUNT fix); 0 = old local stamps (bisect knob) */
+
 static void fi_init(uint16_t fi[11], uint16_t ext[3], unsigned type)
 {
+    uint32_t sfn = (frame_number + l1_fi_fn_offset) % FN_MOD;
+
     for (int i = 0; i < 11; i++)
         fi[i] = i < 6 ? 0 : 0xffffu;
     for (int i = 0; i < 3; i++)
         ext[i] = 0xffffu;
     fi[0] = (uint16_t)(type & 0x1f);
-    fi[1] = (uint16_t)(((frame_number >> 16) & 0x7f) << 9);
-    fi[2] = (uint16_t)frame_number;
+    fi[1] = (uint16_t)(((sfn >> 16) & 0x7f) << 9);
+    fi[2] = (uint16_t)sfn;
     /* A5 COUNT. The DSP copies share +0x3f0 into its cipher frame-number register
      * when word-1 bit 8 is 0, and advances it per frame when bit 8 is 1. So, once
      * ciphering is on, seed the register with the cell's absolute FN on the first
@@ -1250,13 +1283,21 @@ int l1_burst_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell)
     uint16_t g = cell >= 0 && cell < CELL_SLOTS && (cell_gain[cell] & 0x80u) ?
                  (uint16_t)(cell_gain[cell] & 0x3fu) : 25u;
 
+    if ((tag == 5 || tag == 3) && l1_dm_rxgain)   /* dedicated RX: stock's max gain seed (0x3f) */
+        g = l1_dm_rxgain;
     fi_init(fi, ext, FI_BLOCK);
     fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
     fi[3] = (uint16_t)((tn & 7) << 8);
     fi[4] = (uint16_t)((tsc & 7) << 8);
+    if ((tag == 5 || tag == 3) && burst == 0 && l1_dm_burst0_sync && dm_burst0_armed) {
+        fi[4] |= 0x1000u;                /* A2: one-shot burst-0 AFC re-init after establish */
+        dm_burst0_armed = 0;
+    }
     fi[6] = (uint16_t)(g << 10 | (index & 0x3ffu));
     fi[5] = cipher_w5;                   /* decipher the downlink once ciphering is on */
-    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x100u | 1u);
+    if (tag == 5 || tag == 3)            /* dedicated SDCCH/SACCH RX: stock's w5 bit4 AFC-reinit */
+        fi[5] |= l1_dm_rxflag;
+    fi[10] = (uint16_t)((cell & 0x3f) << 10 | 0x1ffu);   /* A5: w10 measure mask 0x1ff (was 0x101) */
     return post_fi(fi, ext);
 }
 
@@ -1428,10 +1469,14 @@ uint16_t l1_ul_block_type = 2;          /* 2 = SDCCH, 1 = SACCH (stock TXBUFQ ty
  * (no per-burst control words), the DSP building the 4 bursts. l1_ul_fi_type sets the FI
  * f0 (3 = stock dedicated, 7 = old 0xa007); l1_ul_perblock=1 collapses to one block+PA-key
  * per block and drops the per-burst control words. Knobs so a broken uplink can be bisected. */
-uint16_t l1_ul_fi_type  = 7;            /* uplink FI f0: 3 (stock per-block, but it over-transmits
-                                         * - ul=318, needs a pacing fix) or 7 (old 0xa007, works).
-                                         * Back to 7 to isolate + verify the cipher fixes. */
-uint8_t  l1_ul_perblock = 0;            /* 0 = working per-burst uplink (per-block has a bug) */
+uint16_t l1_ul_fi_type  = 5;            /* stock dedicated SDCCH uplink FI type (f1 00/04/08/0c);
+                                         * 7 = old 0xa007 per-burst CCCH primitive. The ul=310-322
+                                         * flood seen at 11:55 was NOT the FI type - it was the SDCCH
+                                         * keepalive firing every window (gsm_lu) once stuck
+                                         * established; fixed to ack-driven, so the uplink is paced
+                                         * to L3 + acks like stock, with SACCH carrying link upkeep. */
+uint8_t  l1_ul_perblock = 1;            /* 1 = stock per-block (one 23B block + one PA-key/block, DSP
+                                         * builds the 4 bursts); paired with the ack-driven pacing. */
 
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,
                    uint8_t bsic, const uint8_t block[23])
@@ -1454,8 +1499,10 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     uint32_t need = l1_ul_perblock ? (burst == 0 ? 1u : 0u) : (burst == 0 ? 2u : 1u);
     if ((uint32_t)txbuf_free() < need || l1_fi_free() < 1)
         return DSP_EFULL;
+    /* TX block tag == type (stock: ~T 0002 0002 SDCCH / 0001 0001 SACCH), not TAG_DCH=9.
+     * The 1:1 diff found we passed the RX tag 9 as the TXBUFQ tag; stock uses the block type. */
     if (burst == 0 &&
-        (rc = tx_desc_post((uint16_t)(tag & 0xf), l1_ul_block_type, block, 23)) != DSP_OK)
+        (rc = tx_desc_post(l1_ul_block_type, l1_ul_block_type, block, 23)) != DSP_OK)
         return rc;
     fi_init(fi, ext, FI_BLOCK);
     fi[1] |= (uint16_t)((tag & 0xf) << 4 | (burst & 3));
@@ -1469,6 +1516,15 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
     fi[7] = (uint16_t)(index & 0x3ffu);             /* word7 = ARFCN index */
     fi[10] = (uint16_t)((fi[10] & 0x3ffu) | (uint16_t)(cell & 0x3f) << 10);
     fi[3] = (uint16_t)(fi[3] & 0x0fffu);            /* clear word3 bits 15:12 */
+    /* UPLINK cipher-COUNT diagnostic: the FN we stamp into this uplink burst's FI is the COUNT
+     * the DSP uses to encipher our CIPHERING MODE COMPLETE (A5/3 f8, DIRECTION=1). It must be the
+     * UPLINK frame's FN (SDCCH UL = DL+15), not the downlink/current FN. Log burst-0's stamp +
+     * type so it can be compared to the surrounding rxblk DL FNs. (l1_fnlog) */
+    if (l1_fnlog && burst == 0)
+        klog("lu: TXFN stamp=%lu fn%%51=%lu type=%x ciph=%x",
+             (unsigned long)((frame_number + l1_fi_fn_offset) % FN_MOD),
+             (unsigned long)((frame_number + l1_fi_fn_offset) % FN_MOD % 51),
+             l1_ul_block_type, cipher_w5);
     if ((rc = post_fi(fi, ext)) != DSP_OK)
         return rc;
     /* Old per-burst model only: a TXBUFQ control word per burst. Stock's dedicated path
@@ -1508,22 +1564,35 @@ int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell
  * commanding stock A5/3 (CIPHER MODE setting 0x05) and stock DECIPHERING the downlink (a valid
  * MM LU ACCEPT comes back in plaintext) - so the DSP has A5/3, reached only via this command
  * path, not the FI word-5 engine (which is A5/1-only). l1_cipher_cmdpath selects it (default). */
-uint8_t l1_cipher_cmdpath = 1;          /* 1 = stock cmd 5 + cmd 0x1e (does A5/3); 0 = FI w5 */
+uint8_t l1_cipher_cmdpath = 2;          /* engine select: 2 = AUTO by alg (A5/3 -> cmd5+0x1e,
+                                         * A5/1 -> FI word-5), 1 = force cmd path, 0 = force w5.
+                                         * Finding 1 (ARM-DSP RE of dsp-blob-CC874.dis, 2026-11-13):
+                                         * A5/1 runs ONLY on the FI word-5 engine - its selector
+                                         * [0xfbf2] is written solely by the FI w5 decoder (0x8457);
+                                         * cmd5+0x1e arms the SEPARATE A5/3 unit ([0xec83]) and can
+                                         * NOT turn A5/1 on. So an A5/1 session on the cmd path never
+                                         * deciphers -> every block bfi=1 (what we saw). Pick by alg. */
+uint8_t l1_cipher_reseed  = 0;          /* 1 = also reseed the A5/1 COUNT at share +0x3f0 (a
+                                         * no-op for the A5/3 cmd path per RE; 0 = leave it) */
 
 void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
 {
+    /* Finding 1: select the cipher engine by algorithm. A5/3 (alg 2) -> cmd5+0x1e A5/3 unit;
+     * A5/1 (alg 0) -> FI word-5 engine. l1_cipher_cmdpath 2=auto, 1=force cmd, 0=force w5. */
+    int use_cmd = l1_cipher_cmdpath == 2 ? (alg == 2) : (l1_cipher_cmdpath != 0);
+
     if (alg == 0xff) {
         cipher_w5 = 0;
         cipher_active = false;
         cipher_count_load = false;
-        if (l1_cipher_cmdpath) {
-            const uint16_t off[5] = { 5, 0, 0, 0, 0 };   /* stock cipher-off */
+        {
+            const uint16_t off[5] = { 5, 0, 0, 0, 0 };   /* stock cipher-off (harmless on w5 path) */
             post_cmd(off);
         }
         klog("dsp: cipher off");
         return;
     }
-    if (l1_cipher_cmdpath) {
+    if (use_cmd) {
         /* alg is the L3 algorithm id (0=A5/1, 1=A5/2, 2=A5/3), exactly the DSP cmd-5 arg. */
         const uint16_t c5[5] = { 5, 1, alg, 0, 0 };
         const uint16_t ck[5] = { 0x1e,
@@ -1532,14 +1601,16 @@ void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
 
         post_cmd(c5);
         post_cmd(ck);                    /* loads Kc into the DSP; never logged */
-        cipher_w5 = 0x0010;              /* stock sets FI word-5 = 0x0010 on every frame once
-                                          * ciphering is on (logger v6); match it (test knob) */
-        /* The A5 COUNT (GSM FN) is still seeded via share +0x3f0 / FI word-1 bit 8 - that is
-         * independent of the key path. Without it the DSP ciphers with the wrong frame number
-         * and both our COMPLETE and TT's reply are unreadable. Seed the cell's absolute FN. */
+        cipher_w5 = 0;                   /* stock keeps FI word-5 = 0 during cipher (v6 + ARM-DSP
+                                          * session RE) - the A5/3 unit is separate from the FI
+                                          * word-5 A5/1 engine. (0x0010 was a mis-read rare value.) */
+        /* The share +0x3f0 -> 0xec4c COUNT feeds the A5/1 engine ONLY (ARM-DSP session RE:
+         * 0xec4c referenced only in the A5/1 setup block, never in the A5/3 region), so our
+         * reseed is a NO-OP for the A5/3 cmd path - the A5/3 unit uses the DSP's own cell-synced
+         * counter. Default OFF (don't touch the share COUNT); l1_cipher_reseed=1 re-enables it. */
         cipher_fn_offset = fn_offset % FN_MOD;
-        cipher_count_load = true;
-        cipher_active = true;
+        cipher_count_load = l1_cipher_reseed;
+        cipher_active = l1_cipher_reseed;
         klog("dsp: cipher A5/%u via cmd5+0x1e", alg + 1);
         return;
     }
@@ -1655,14 +1726,14 @@ int l1_cell_track(int cell, uint8_t rxlev)
 int l1_dm_est_tail(void)
 {
     const uint16_t a[5] = { 0x1a, 0, 0, 0, 0 };
-    const uint16_t b[5] = { 0x1f, 3, 0, 1, 0 };
-    int rc;
 
     if (dsp_info.state != DSP_RUNNING)
         return DSP_ENOTRUN;
-    if ((rc = post_cmd(a)) != DSP_OK)
-        return rc;
-    return post_cmd(b);
+    dm_burst0_armed = 1;              /* A2 one-shot: arm the burst-0 AFC re-init for this establish */
+    /* B2 (v6 LU capture): stock's dedicated establish posts ONLY command 0x1a - 0x1f appears
+     * NOWHERE in the LU (only in camped/power-scan startup). The 0x1f we used to send here was a
+     * camped-startup command mis-placed into establish; dropped to match stock. */
+    return post_cmd(a);
 }
 
 uint16_t l1_dm_refresh_w1 = 1;          /* command-0x0d word 1 (stock = 1; test knob) */

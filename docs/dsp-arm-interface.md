@@ -528,30 +528,34 @@ Once a CIPHERING MODE COMMAND is honoured, both RX (`l1_burst_post`) and TX
   0xec4d`, engine dis `0x1645`). `fi_init` seeds it with the cell's absolute FN
   (`frame_number + fn_offset`) on the first ciphered frame (**word-1 bit 8 = 0**),
   then sets **bit 8 = 1** so the DSP advances its own counter. A wrong COUNT =
-  wrong keystream = no ACCEPT. A5/3 (`e000`) cannot activate on this DSP path.
+  wrong keystream = no ACCEPT. This FI word-5 engine is A5/1 only; **A5/3 uses a
+  separate command path** (§7.1), not these bits.
 
-### 7.1 There is no A5/3 (KASUMI) engine — only A5/1 [C, exhaustively checked 2026-11-11]
-The DSP blob (and the whole firmware) implements **only A5/1**. Checked three
-independent ways:
-- **Engine select** (dis `0x8640`): `0xfbf4 = ([0xfbf2] == 1) ? 1 : 0` — a single
-  comparison against algorithm-field value **1**, with **no branch for 2 or 3**. A5/2
-  and A5/3 both fall through to "cipher off". A5/1 is the only algorithm the engine
-  can turn on.
-- **No KASUMI S-boxes:** the fixed S7 (128-entry) and S9 (512-entry 9-bit) tables
-  that any KASUMI must contain are **absent from every firmware image** (60 `.bin`
-  files — DSP blobs, flash dumps, the ARM `dump_firmware.bin`, `user_raw`), in every
-  byte/word/endian layout. KASUMI cannot be computed without them (the boolean-ANF
-  form would still need the key-schedule constants below).
-- **No key-schedule constants:** KASUMI's fixed `C1..C8` = `0123 4567 89AB CDEF FEDC
-  BA98 7654 3210` never appear as an array, and 4 of the 8 words (`4567 89AB BA98
-  3210`) do not occur **at all** in the decoded blob.
+### 7.1 A5/3 IS supported — via cmd 5 + cmd 0x1e, not the FI engine [CORRECTED 2026-11-12]
+**Earlier this section claimed "no A5/3, A5/1-only." That was wrong.** A v6
+both-directions on-phone capture (peer, commit `77337d0`) shows stock, commanded A5/3
+by TT (CIPHER MODE setting 0x05), **deciphering the downlink** to a valid plaintext MM
+LU ACCEPT. The handset does A5/3. The mistake was concluding "no A5/3 anywhere" from
+"the FI word-5 engine is A5/1-only" — A5/3 rides a **different path**:
 
-**Consequence for registration:** the stock phone itself cannot do A5/3, so a live
-network that completes a call with this handset must accept **A5/1** for it — the
-"TT might require A5/3, a hard wall" worry (project memory) is unfounded. The right
-and only strategy is to advertise **A5/1-only** in the MS classmark so the network
-never challenges A5/3; there is no hidden A5/3 engine to enable. (`e000`/A5/3 in a
-CIPHER MODE COMMAND means *we* advertised A5/3 — fix the classmark, not the DSP.)
+- **cmd 5** `{5, enable, alg}` (builder `FUN_0004b4b4`) — enable + algorithm; `alg`
+  0=A5/1, 1=A5/2, **2=A5/3**.
+- **cmd 0x1e** `{0x1e, Kc0:Kc1, Kc2:Kc3, Kc4:Kc5, Kc6:Kc7, 0}` (builder `FUN_0004b828`,
+  RE 2026-11-12) — raw **64-bit Kc**, two bytes/word high-byte-first; **no `Kc‖Kc`
+  expansion and no COUNT in the command**. The DSP keeps the COUNT itself in working
+  regs `0xec4c..0xec50`, seeded from share `+0x3f0`.
+
+What still holds: the FI word-5 engine (dis `0x8640`, `alg==1`) really is A5/1-only;
+and the KASUMI S7/S9 S-boxes and `C1..C8` key-schedule constants are absent from all
+60 firmware images. The correct reading of the absent tables is that the KASUMI core
+is a **hardware crypto block** the DSP drives (or table-free), **not** that A5/3 is
+absent. The HW/SW mechanism is unresolved and irrelevant to the ARM interface.
+
+**Consequence for registration (corrected):** do not force A5/1 via the classmark as
+"the fix" — the phone supports A5/3 and TT may legitimately command it; matching stock
+means *implementing* cmd 5 + cmd 0x1e for A5/3. Open item: the DSP-side A5/3
+COUNT/DIRECTION format (Kc packing is confirmed correct). "TT requires A5/3" is a path
+to complete, not a hard wall.
 
 ---
 

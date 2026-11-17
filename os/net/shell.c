@@ -554,7 +554,6 @@ static void c_trackmode(sess_t *s, int argc, char **argv)
 
 static void c_reg(sess_t *s, int argc, char **argv)
 {
-    (void)argc; (void)argv;
     if (reg_is_busy()) {
         say(s, "reg: already running\n");
         return;
@@ -563,8 +562,12 @@ static void c_reg(sess_t *s, int argc, char **argv)
         say(s, "reg: the DSP is busy\n");
         return;
     }
+    /* "reg log" turns on the DSP call-stream log (~C/~T/~F) for this run; it floods
+     * (~F is per-frame), so it is off by default. Kc and L3 payload are redacted. */
+    l1_calllog = (uint8_t)(argc > 1 && (argv[1][0] == 'l' || argv[1][0] == '1'));
     reg_trigger();
-    say(s, "reg: started - watch the log (register: prog ...)\n");
+    say(s, "reg: started%s - watch the log (register: prog ...)\n",
+        l1_calllog ? " +calllog(~C/~T/~F)" : "");
 }
 
 static void c_nvband(sess_t *s, int argc, char **argv)
@@ -1640,7 +1643,7 @@ static const cmd_t cmds[] = {
     { "simauth", "", "RUN GSM ALGORITHM on slot 0 (auth self-test)", c_simauth },
     { "txburst", "BAND ARFCN COUNT [norm]", "fire a TX burst train (0=900 1=1800)", c_txburst },
     { "trackmode", "[MODE] [FLAGS]", "command-3 mode/flags for dedicated tracking", c_trackmode },
-    { "reg", "", "run a registration attempt (TX, owner-cleared)", c_reg },
+    { "reg", "[log]", "run a registration attempt (TX, owner-cleared); 'log' = DSP call log", c_reg },
     { "nvband", "", "NV per-band TX enable bytes", c_nvband },
     { "rxcell", "BAND ARFCN [GAIN] [CCH_S] [TRACK]", "sync+read a cell, RX only (0=900 1=1800)", c_rxcell },
     { "ps", "", "threads: priority, state, CPU over 0.5 s, stack", c_ps },

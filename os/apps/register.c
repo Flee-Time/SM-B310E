@@ -74,6 +74,23 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 #define CLASSMARK1      0x33
 #define SIM_SLOT        0               /* which SIM reader: 0 = first slot, 1 = second.
                                          * The SIM is back in the first slot and connecting. */
+#define REG_CELL_SLOT   0x12            /* DSP cell slot the serving cell is synced / tracked /
+                                         * ciphered under during the whole registration. The DSP
+                                         * keeps one timing/AFC/FN context PER CELL SLOT, and the
+                                         * A5 cipher COUNT (the GSM frame number the keystream runs
+                                         * on) is part of that per-slot context. Stock registers on
+                                         * a NONZERO slot (0x12 / 0x1f in the v6 on-phone capture);
+                                         * its DSP then reports the cell's ABSOLUTE FN (~1.5M) and
+                                         * the keystream COUNT matches the network. We always synced
+                                         * on slot 0, where the DSP reported a LOCAL (boot-relative)
+                                         * FN and every ciphered LU ACCEPT failed CRC - keystream
+                                         * COUNT mismatch, the "silent after CIPHER COMPLETE" wall
+                                         * (b310e-a5-trigger, 2026-11-13). Using a real slot pairs
+                                         * with the absolute-FN FI stamp (l1_fi_fn_offset, dsp.c) to
+                                         * put the DSP on the cell's absolute FN. 0x12 mirrors a
+                                         * stock observation; any valid nonzero slot (1..0x3f) that
+                                         * our OS does not otherwise use should do. BISECT: set this
+                                         * to 0 to restore the old slot-0 behaviour. */
 
 enum { P_IDLE, P_SIM, P_DSP, P_SCAN, P_FIND, P_TX, P_DONE };
 enum { RES_NONE, RES_NO_SIM, RES_RADIO_FAIL, RES_NO_CELL, RES_ACCEPTED,
@@ -505,7 +522,7 @@ static bool try_cell(uint16_t index, int rxlev)
         rxlev = m;
     gain = l1_gain_for_rxlev(rxlev);
 
-    if (l1_cell_sync(&cell, index, gain, 0, SYNC_BUDGET_MS) != 1)
+    if (l1_cell_sync(&cell, index, gain, REG_CELL_SLOT, SYNC_BUDGET_MS) != 1)
         return false;                   /* not a BCCH (fast fail) */
     sweep_synced++;
     l1_cell_read(&cell, 24, L1_SI2 | L1_SI3, READ_BUDGET_MS);
@@ -648,9 +665,11 @@ static void worker(void *arg)
          sweep_pruned, (unsigned long)(kernel_ticks() - find_t0));
     if (best_q >= 0) {
         /* the best one synced again if another was synced after it: the DSP keeps
-         * one timing per cell slot, and the last sync took slot 0 */
+         * one timing per cell slot, and the last sync took REG_CELL_SLOT for a
+         * different cell, so re-sync the chosen one under REG_CELL_SLOT. */
         if (best_cell.index != cell.index) {
-            if (l1_cell_sync(&cell, best_cell.index, best_cell.gain, 0, SYNC_BUDGET_MS) == 1) {
+            if (l1_cell_sync(&cell, best_cell.index, best_cell.gain, REG_CELL_SLOT,
+                             SYNC_BUDGET_MS) == 1) {
                 best_cell.bsic = cell.bsic;
                 best_cell.fn_offset = cell.fn_offset;
                 cell = best_cell;
@@ -687,25 +706,31 @@ static void worker(void *arg)
         klog("register: camped (command 3: %d), CCCH %d%% decoded tracked", trc,
              cch_quality(&cell));
     }
-    /* a synced home cell (P-GSM or E-GSM): build the LU request and run it */
+    /* a synced home cell (P-GSM or E-GSM): build the LU request and run it.
+     * The LU REQUEST's LAI is the OLD LAI - where we were last registered - NOT the
+     * serving cell. Sending the serving cell's LAC as the old LAI on an inter-LA IMSI
+     * attach (no TMSI backing a registration here) reads to the VLR as a subscriber
+     * with no context in this LA -> LU REJECT cause 12/13 (location/roaming not
+     * allowed), observed on TT 2026-11-13. Send the SIM's stored LAI (EF_LOCI, a genuine
+     * prior registration: loci_valid requires LU status "updated") when we have one, or
+     * the "no valid LAI" sentinel (LAC 0xfffe, TS 24.008 10.5.1.3) when the SIM has none.
+     * Identify by the stored TMSI only in the LAI-match case (a known sub here, stock's
+     * path - the network reuses the cached A5/1 capability instead of the cold-IMSI path
+     * that draws A5/3). TMSI is a temporary id - safe to log; the IMSI is not. */
+    int tmsi_here = loci_valid && loci_mcc == cell.mcc && loci_mnc == cell.mnc &&
+                    loci_lac == cell.lac;
+    uint16_t old_lac = tmsi_here ? cell.lac : loci_valid ? loci_lac : 0xfffeu;
     reg_init(&reg, imsi_digits, imsi_n, cell.mcc, cell.mnc, cell.mnc_digits == 3,
-             cell.lac, CLASSMARK1);
-    /* Identify by the stored TMSI when it is valid AND was assigned in this LAI (so
-     * the network's VLR has our context here): a known subscriber, which is how
-     * stock presents - the network then does not challenge identity and reuses the
-     * cached capability (A5/1), instead of the cold-IMSI path that draws A5/3. The
-     * LU LAI is the serving cell's, which equals the stored LAI in the match case.
-     * TMSI is a temporary id - safe to log; the IMSI is not. */
-    if (loci_valid && loci_mcc == cell.mcc && loci_mnc == cell.mnc &&
-        loci_lac == cell.lac) {
+             old_lac, CLASSMARK1);
+    if (tmsi_here) {
         reg_set_tmsi(&reg, loci_tmsi);
         klog("register: TMSI %08lx (LAI %u-%u/%u matches) - attaching as known sub",
              (unsigned long)loci_tmsi, loci_mcc, loci_mnc, loci_lac);
     } else if (loci_valid) {
-        klog("register: stored TMSI LAI %u-%u/%u != cell %u-%u/%u - IMSI attach",
-             loci_mcc, loci_mnc, loci_lac, cell.mcc, cell.mnc, cell.lac);
+        klog("register: stored LAI %u-%u/%u != cell %u-%u/%u - IMSI attach, old LAI LAC %u",
+             loci_mcc, loci_mnc, loci_lac, cell.mcc, cell.mnc, cell.lac, loci_lac);
     } else {
-        klog("register: no valid stored TMSI - IMSI attach");
+        klog("register: no valid stored LAI - IMSI attach, old LAI LAC 0xfffe");
     }
     /* Present an IMEI on IDENTITY REQUEST (an EIR check can gate the LU). Override
      * from IMEI_FILE per SIM slot, else the phone's own NV IMEI. */
@@ -742,7 +767,7 @@ static void worker(void *arg)
     }
     klog("register: RACH to idx %u, BSIC %u (NCC %u BCC %u)", cell.index, cell.bsic,
          cell.bsic >> 3, cell.bsic & 7);
-    rc = reg_lu_run(&reg, &cell, 0, SIM_SLOT, (uint8_t)(kernel_ticks() & 0x0f),
+    rc = reg_lu_run(&reg, &cell, cell.slot, SIM_SLOT, (uint8_t)(kernel_ticks() & 0x0f),
                     TX_BUDGET_MS, &reg_prog);
     klog("register: prog rach=%u cch=%u imm=%u rahit=%u refd=%d assign=%u est=%u auth=%u"
          " sim=%u dl=%u/%u ul=%u sabm=%u", reg_prog.rach_sent, reg_prog.cch_blocks,

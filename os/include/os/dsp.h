@@ -282,6 +282,11 @@ extern uint16_t l1_dm_refresh_w1;       /* command-0x0d word 1 (test knob, stock
 extern uint8_t  l1_dm_reposts;          /* 1 = also re-post command 3 per block (old) */
 extern uint16_t l1_ul_block_type;       /* dedicated uplink TXBUFQ type: 2 SDCCH / 1 SACCH */
 extern uint8_t  l1_calllog;              /* 1 = log every DSP call to klog (1:1 diff vs stock) */
+extern uint8_t  l1_rxhdrlog;             /* 1 = log raw SNR/BFI per RX block (cipher diagnostic) */
+extern uint8_t  l1_fnlog;                /* 1 = log SCH sync FN anchor (cipher COUNT diagnostic) */
+extern uint32_t l1_fi_fn_offset;         /* FI frame-stamp offset: cell fn_offset in dedicated,
+                                          * 0 else, so stamps carry the absolute FN (A5/3 COUNT) */
+extern uint8_t  l1_dm_absfn;             /* 1 = stamp dedicated FIs with the absolute FN (fix) */
 
 /* Layer 1 for loadable apps (os_api_t.l1, API 2.11). Members only append. */
 typedef struct l1_api {

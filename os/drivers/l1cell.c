@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/dsp.h"
+#include "os/fs.h"                       /* klog (RX SNR/BFI cipher diagnostic) */
 #include "os/kernel.h"
 #include "os/l1cell.h"
 #include "os/lib.h"
@@ -295,6 +296,10 @@ int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t 
     c->index = index;
     c->gain = gain;
     c->slot = (uint8_t)slot;
+    l1_fi_fn_offset = 0;                 /* local FI stamps for the search: a stale absolute
+                                         * offset from a prior dedicated phase makes FCCH/SCH
+                                         * FIs point at the wrong frames -> cell never found.
+                                         * The dedicated establish re-sets it after this. */
     l1_cell_gain_set(slot, gain);       /* its BCCH/CCCH/SDCCH reads run at it too */
     while (queued() > 2 && kernel_ticks() - t0 < 200) {     /* nearly drained */
         l1_poll();
@@ -330,6 +335,14 @@ int l1_cell_sync(l1_cell_t *c, uint16_t index, uint8_t gain, int slot, uint32_t 
             c->bsic = (uint8_t)bsic;
             c->fn_offset = (fn + FN_MOD - local % FN_MOD) % FN_MOD;
             c->synced = true;
+            /* FN-anchor diagnostic (cipher COUNT): sch_fn = true network FN of the SCH frame;
+             * local = DSP rawfn for it; fn_off maps rawfn->true FN. Cross-check vs a ciphered
+             * rxblk's rawfn + wall-clock to catch a constant (51*k) absolute-FN error that decode
+             * (FN%51 only) can't see but the cipher COUNT can. klog timestamp = sync wall-clock. */
+            if (l1_fnlog)
+                klog("lu: SYNC sch_fn=%lu local=%lu fn_off=%lu back=%d",
+                     (unsigned long)fn, (unsigned long)(local % FN_MOD),
+                     (unsigned long)c->fn_offset, back);
             return 1;
         }
         if (rc < 0)
@@ -545,6 +558,10 @@ int l1_cch_read(l1_cell_t *c, uint32_t ms, l1_cch_t *st)
 #define TAG_SACCH_DL 3                  /* dedicated SACCH downlink RX decode mode (stock) */
 uint8_t l1_dm_pmfill = 1;               /* 1 = power-measure (0x0b) fill dedicated gaps (stock)
                                          * so the AFC keeps tracking; 0 = old idle fill (test) */
+uint8_t l1_rxhdrlog = 0;                /* 1 = log raw SNR/BFI per RX block (set at cipher-on to
+                                         * diagnose keystream-vs-decode on the ciphered ACCEPT) */
+uint8_t l1_fnlog = 1;                   /* 1 = log SCH sync FN anchor (sch_fn/local/fn_off) to
+                                         * measure a constant absolute-FN error in the cipher COUNT */
 
 /* SDCCH/8 schedule (GSM 05.02): subchannel k's downlink block occupies FN mod 51
  * in [k*4, k*4+3]; the uplink is the same pattern offset by 15 frames. SACCH/C8
@@ -654,6 +671,7 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                 if (rc == DSP_OK)
                     st->dl_bursts++;
             } else if (want_ul) {
+                l1_ul_block_type = 2;       /* C2: SDCCH block (PA-key w1=2, TXBUFQ type 2) */
                 rc = l1_uplink_post(c->index, TAG_DCH, ub, tn, tsc, c->slot, bsic, ul);
                 if (rc == DSP_OK) {
                     st->ul_bursts++;
@@ -664,6 +682,7 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
                     ul_posted = 0;
                 }
             } else if (want_sacch) {
+                l1_ul_block_type = 1;       /* C2: SACCH block (PA-key w1=1, TXBUFQ type 1) */
                 rc = l1_uplink_post(c->index, TAG_DCH, sb, tn, tsc, c->slot, bsic, dm_sacch);
                 if (rc == DSP_OK) {
                     st->sacch_bursts++;
@@ -697,6 +716,21 @@ int l1_dm_sched(l1_cell_t *c, int subch, int tn, int tsc, uint8_t bsic,
             while (l1_rx_read(&rx) == 1) {
                 st->dl_seen++;
                 st->dl_hdr0 = (uint8_t)rx.hdr[0];
+                /* Diagnostic (l1_rxhdrlog, set by the LU once ciphering is on): the RAW burst
+                 * SNR hdr[7] is measured BEFORE decipher, so it discriminates a ciphered block
+                 * lost to RF (poor SNR + bfi) from a keystream mismatch (good SNR, like the
+                 * plaintext blocks, + bfi). Log tag/bfi/snr/fn per post-cipher block. */
+                if (l1_rxhdrlog)
+                    /* COUNT check (Stock-OS session, 2026-11-13): the A5/3 COUNT is the cell's
+                     * ABSOLUTE GSM FN, which the DSP adopts at command 3 keyed by the cell index.
+                     * Log the raw FN the DSP reports (hdr[2]|hdr[3]<<16) and the cell index it
+                     * carries (hdr[3] bits 12:8). If rawfn is small (local) / cell=0, the DSP is
+                     * NOT on the cell's absolute FN -> wrong keystream. Stock: rawfn ~1.5M, cell 0x12. */
+                    klog("lu: rxblk tag=%x bfi=%x cell=%x rawfn=%lu fn%%51=%lu",
+                         rx.hdr[0], rx.hdr[1], (rx.hdr[3] >> 8) & 0x1f,
+                         (unsigned long)(rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16),
+                         (unsigned long)(((rx.hdr[2] | (uint32_t)(rx.hdr[3] & 0xff) << 16)
+                         + c->fn_offset) % FN_MOD % 51));
                 /* A dedicated block comes back tagged with the DECODE MODE the DSP used:
                  * the SDCCH downlink is tag 5 (TAG_SDCCH), SACCH tag 3 - NOT the camped 9.
                  * Accept 5/3 (and keep 7/8/9 for the camped/CCCH reads), or every dedicated

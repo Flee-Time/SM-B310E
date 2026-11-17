@@ -100,21 +100,119 @@ byte order / packing of Kc in share.
 - Risk: a wrong key/mode/count corrupts every ciphered burst — verify on-air at the
   cleared TT registration, watching for the ACCEPT after CIPHER COMPLETE.
 
-## DEFINITIVE: no A5/3 (KASUMI) engine exists — only A5/1 (2026-11-11)
-Searched for a KASUMI/A5/3 engine in the DSP blob and the whole firmware (headless
-Ghidra + direct binary search of the TeakLite image). **A5/3 is genuinely absent**,
-not merely un-triggered:
-1. **Engine (dis 0x8640):** `0xfbf4 = ([0xfbf2]==1) ? 1 : 0` — one comparison against
-   algorithm value 1, no `==2`/`==3` branch. Only A5/1 can be enabled; A5/2 and A5/3
-   fall through to off.
-2. **No KASUMI S-boxes** S7 (128) / S9 (512×9-bit) in ANY of 60 firmware images
-   (DSP blobs, flash dumps, ARM `dump_firmware.bin`, `user_raw`), any layout/endian.
-3. **No KASUMI key-schedule constants** `C1..C8 = 0123 4567 89AB CDEF FEDC BA98 7654
-   3210`: not contiguous anywhere, and `4567/89AB/BA98/3210` do not occur at all in
-   the decoded blob.
+## CORRECTED: A5/3 IS present — via a separate command path, not the FI engine (2026-11-12)
+**The earlier "no A5/3, A5/1-only" conclusion below was WRONG** — refuted by a v6
+both-directions on-phone capture (peer session, commit `77337d0`): stock, commanded
+A5/3 by TT (CIPHER MODE setting 0x05), **deciphers the downlink** (a valid plaintext
+MM LU ACCEPT comes back). So the handset does A5/3. My error was extrapolating from
+"the FI word-5 cipher engine is A5/1-only" to "the DSP has no A5/3 at all," without
+tracing the **separate cipher command path** that actually carries A5/3:
 
-**Implication:** the stock phone can only do A5/1, so TT must accept A5/1 for this
-handset — forcing A5/1 via the MS classmark (A5/2=A5/3=0, done in rr_encode_classmark_change)
-is the correct and sufficient path. A CIPHER MODE COMMAND asking for A5/3 (`w5 e000`)
-means we advertised A5/3; the fix is the classmark, never the DSP. There is no A5/3
-engine to enable, so stop treating "TT requires A5/3" as a possible hard wall.
+- **cmd 5** `{5, enable, alg}` — enable ciphering + select algorithm (`alg` 0=A5/1,
+  1=A5/2, 2=A5/3). Builder `FUN_0004b4b4`.
+- **cmd 0x1e** `{0x1e, Kc0:Kc1, Kc2:Kc3, Kc4:Kc5, Kc6:Kc7, 0}` — loads the raw 64-bit
+  Kc, two bytes per word high-byte-first (**no `Kc‖Kc` expansion, no COUNT in the
+  command**). Builder `FUN_0004b828` (verified 2026-11-12).
+
+Stock drives ciphering through **these commands**, NOT the FI word-5 bits. The FI
+word-5 engine (0x8640, `alg==1`→A5/1 only) is real and A5/1-only, but it is **not the
+only cipher path** — that was the whole mistake. The DSP keeps the A5 COUNT itself in
+working regs ~`0xec4c..0xec50` (multi-word COUNT arithmetic at dis `0x15A2..0x16BC`),
+seeded from the share COUNT window (ARM `+0x3f0`).
+
+The old "no KASUMI S-boxes / no key-schedule constants in 60 images" search results
+still stand as *searches* — their correct reading is that the KASUMI core is most
+likely a **hardware crypto block** the DSP drives (or computed without lookup tables),
+**not** that A5/3 is absent. Mechanism (HW accel vs DSP code) is unresolved and does
+not matter to the ARM interface: cmd 5 + cmd 0x1e is the path.
+
+**DSP-side structure (RE 2026-11-12, two clean facts):**
+1. The algorithm field `0xfbf2` that the A5/1 engine `0x8640` gates on (`==1`) is
+   written at **exactly one site, `0x8457`, inside the FI word-5 decoder** — never
+   from a command. So cmd 5's `alg` does not reach the `0x8640` engine; the **A5/3
+   unit is separate** and the `0x8640` engine is bypassed for A5/3 (matches stock
+   keeping FI w5 = 0).
+2. The A5/1 COUNT reg `0xec4c` is referenced at **only 3 sites (`0x15A2`/`0x1645`/
+   `0x16A0`), all in the FI-w5/A5/1 setup**, and nowhere in the `0xA000–0xA400` cipher
+   region. So `0xec4c` (fed by share `+0x3f0`) is **bound to the A5/1 engine**.
+
+Consequence: a per-frame `+0x3f0` COUNT reseed is a **no-op for the A5/3 cmd path** (it
+feeds the A5/1 COUNT the A5/3 unit doesn't read) — consistent with the COUNT-seed
+experiments not helping.
+
+**Stock A5/3 transaction, from the on-phone v6 log (ground truth, 2026-11-12)** —
+`build/stocklog/capture/v6-boot.dsp.log`, the stock DSP-call capture:
+- RX **CIPHER MODE COMMAND** (`~R`, RR 0x35) at frame `0x2f408` → **same frame**
+  `0x2f409`: `~C 0005 0001 0002` (**cmd 5 {enable=1, alg=2=A5/3}**) then
+  `~C 001e <Kc>` (**cmd 0x1e**, Kc 2 bytes/word high-byte-first) — enable FIRST, key
+  second.
+- ~1.7 s ciphered window: normal FIs (types 0xb/5/3/2), **FI word5 = 0 the whole time**
+  (the only non-zero w5 is `0x0010` on type-2 RX bursts — a non-cipher bit, not bits
+  14:13), PA keys (`~C 0004`) per uplink burst, and the plaintext uplink block handed to
+  the DSP in `~T` (the DSP enciphers it). **No COUNT command and no per-frame cipher FI
+  bit anywhere.**
+- cipher off: `~C 0005 0000` (**cmd 5 {enable=0}**) at frame `0x2fa79`.
+
+Full cipher-window command diff (2026-11-12): the ONLY `~C` commands stock posts in the
+window are cmd 5 + cmd 0x1e (setup), cmd 4 (PA key, per uplink burst), and the teardown
+(cmd 0x21 {0xf} / cmd 0x0d {0} / cmd 5 {0}) — no cmd 0 parameter record, no other cipher
+command. One FI divergence worth noting: stock sets **FI word5 = `0x0010` on every
+type-2 (RX) burst in the dedicated phase** (67/67, both pre-cipher and during cipher;
+idle/uplink FIs stay 0). That is w5 bit4 → DSP reg `0xeca1`, read at `0xC804` in a
+dedicated-channel reset/AFC-reinit routine (it also clears the AFC accumulator
+`0xecb9`) — a dedicated-RX flag, **not** the cipher enable (it is on pre-cipher too),
+but a stock behaviour to match on the dedicated RX path. The cmd-5/0x1e DSP handler
+bodies are unreachable from our artifacts: the dispatch table is in DSP **data** space
+(`[0x10fd+id]`), absent from the extracted code-only images.
+
+So the ARM→DSP A5/3 setup is exactly **cmd 5 {1,2} + cmd 0x1e {Kc}, once, right after
+the CIPHER MODE COMMAND, w5=0, no COUNT** — which the peer's path already matches. A
+tested word5-bits14:13=3 hypothesis is **refuted by this log** (w5 is 0 throughout).
+The DSP sources the A5/3 COUNT internally (its own cell-synced TDMA FN). Since the
+whole ARM boundary now matches stock, a ciphered exchange that still fails points to
+**decode reliability** (the ciphered LU ACCEPT lost to the dedicated-RX AFC ceiling) or
+a **frame-count/sync offset**, not the cipher commands. The cmd-5/0x1e DSP handlers sit
+behind a data table `[0x10fd+id]` (cmd5=`[0x1102]`, cmd0x1e=`[0x111b]`; dispatcher
+`0x9F64`) not in the program `.dis`.
+
+**Implication (corrected):** do NOT force A5/1 via the classmark as "the fix" — the
+phone genuinely supports A5/3 and TT can legitimately command it; matching stock means
+*implementing* A5/3 via cmd 5 + cmd 0x1e, which the peer does and the v6 log confirms
+is the exact stock sequence. Open item (peer): with the ARM boundary matching stock,
+the ciphered exchange still not completing is most likely **decode reliability** (the
+ciphered LU ACCEPT lost to the dedicated-RX AFC ceiling) or a **frame-count/sync
+offset** — not the cmd 5/0x1e sequence, and not the Kc (packing confirmed correct).
+"TT requires A5/3" is a real path to complete, not a hard wall and not merely a
+classmark bug.
+
+**Keystream verdict — HW, good-signal run (2026-11-13):** logged RX headers across the
+dedicated phase. Pre-cipher (plaintext) blocks `bfi=0` at `fn%51=27`; post-cipher
+(ciphered) blocks `bfi=1` at the **same** `fn%51=27`, same signal, identical other
+header fields. Since decode succeeds on the plaintext blocks at the same position, the
+failure is **not** the RF/decode ceiling — it is the **A5/3 keystream** (our decipher
+produces garbage → CRC fail → silent). (Note: on our DSP `hdr[4..8]` are constant/zero,
+so `hdr[7]` is not a usable SNR field — the same-position pre/post-BFI comparison is the
+discriminator instead.)
+
+So the blocker is now narrowed to the DSP-side A5/3 keystream: **COUNT, direction, or
+whether cmd 5 arms the unit** — Kc is confirmed correct and the ARM sequence matches
+stock. Caution: "silent after COMPLETE" does **not** on its own separate a *symmetric*
+fault (wrong COUNT, or unit not armed → TT can't read our COMPLETE → no ACCEPT) from a
+*direction* fault (uplink enciphered right → TT sends the ACCEPT → we fail to decipher
+the downlink). **Discriminator:** gr-gsm our own downlink and watch our SDCCH subchannel
+after CIPHER COMPLETE — downlink turning ciphered/undecodable = TT accepted our COMPLETE
+= uplink keystream right = *direction* (downlink-only); downlink staying plaintext
+(re-CIPHER MODE COMMAND / RELEASE) = TT rejected it = *symmetric* = COUNT/arming. If
+symmetric/COUNT, the fix is likely **not a missing cipher command** (stock sends none —
+its DSP already holds the cell's absolute FN from continuous sync); it means getting our
+DSP to hold the true absolute FN (T1/T2/T3), the same reason A5/1 needed the `+0x3f0`
+absolute-FN injection.
+
+<details><summary>Original (wrong) 2026-11-11 claim, kept for the record</summary>
+
+> Searched for a KASUMI/A5/3 engine… **A5/3 is genuinely absent** — engine 0x8640 has
+> no `==2`/`==3` branch; no S7/S9 S-boxes in 60 images; no `C1..C8` key-schedule
+> constants. Implication: stock can only do A5/1, force A5/1 via the classmark. —
+> *Refuted: the FI engine being A5/1-only does not mean the DSP has no A5/3; the
+> cmd-5/0x1e path does A5/3, HW-proven.*
+</details>

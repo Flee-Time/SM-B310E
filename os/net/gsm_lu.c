@@ -211,10 +211,17 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
     int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0;
+    uint8_t last_acked_vr = 0;           /* V(R) at our last uplink: send an SDCCH RR keepalive only
+                                          * when a new downlink I-frame has advanced V(R) past it,
+                                          * not every window (that flooded ul to 310+; SACCH now
+                                          * carries the steady link upkeep, the stock model) */
     uint8_t sabm[LAPDM_BLOCK];           /* the SABM, kept for retransmission */
     uint8_t sacch[LAPDM_BLOCK];          /* the uplink SACCH keep-alive, armed for the run */
     uint32_t last_ul = 0, last_refresh = 0;
     int dm_dbg = 0;
+
+    l1_rxhdrlog = 0;                     /* off until ciphering turns on (post-cipher diagnostic) */
+    l1_fi_fn_offset = 0;                 /* local FI stamps until the dedicated establish sets it */
     uint32_t t0;
 
     if (prog)
@@ -280,8 +287,9 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * retunes the DSP to tn0 for FCCH/SCH, which disturbs the tn1 dedicated lock, the
      * same failure as the deleted FCCH-interleave but one-shot. Enter dedicated mode
      * straight from the camp's established tracking. */
-    l1_track_mode = 2;
-    /* Enter dedicated tracked mode ONCE (command 3, mode 2). CORRECTED model (RE
+    l1_track_mode = 0;    /* stock's value (1:1 diff) - HW-verified 2026-11-13: mode 0 reaches
+                           * auth + cipher fine (the old "mode 2 reaches auth" was pre-decode-fix). */
+    /* Enter dedicated tracked mode ONCE (command 3). CORRECTED model (RE
      * 2026-11-11, ARM-DSP session, supersedes the 2026-11-10 "AFC free-runs, add
      * FCCH-interleave" note): command 3 puts the DSP in the tracked state (flag DSP
      * 0xff72 bit 3), after which EVERY received dedicated burst steers the synth
@@ -292,17 +300,31 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * coasts ~5 blocks then loses lock on the sparse SDCCH + our TX), so command 3 is
      * re-posted in the loop below - which is SAFE (RE 2026-11-12: command 3 does not
      * reset the tracked flag; it only re-selects cell/channel/gain). */
-    l1_cell_track(c->slot, (uint8_t)(2 * c->gain));
-    l1_dm_est_tail();                 /* stock establish tail: command 0x1a + 0x1f{3,0,1,0} */
+    /* B3: stock's establish command-3 rxlev = 0x11 (17), not our near-zero 2*gain (~2) which
+     * seeds the DSP AGC far below stock's. Pass the stock value so the AGC starts from a sane
+     * level (v6 capture: 0003 {cell,0,0x11,0x0101}). */
+    l1_cell_track(c->slot, 0x11);
+    l1_dm_est_tail();                 /* B2: stock establish tail is command 0x1a ONLY (no 0x1f) */
     l1_dm_refresh();                  /* stock dedicated-hold command 0x0d at dedicated entry */
+    l1_fi_fn_offset = l1_dm_absfn ? c->fn_offset : 0;  /* stamp dedicated FIs with the cell's
+                                       * ABSOLUTE FN (= the A5/3 cipher COUNT), matching stock,
+                                       * instead of our local frame_number. c->fn_offset is the
+                                       * true absolute-FN offset (from the SCH decode). */
+    l1_rxhdrlog = 1;                  /* log RX hdr fields for the WHOLE dedicated phase, so the
+                                       * post-cipher ciphered blocks can be compared to the clean
+                                       * plaintext pre-cipher ones (keystream-vs-decode verdict) */
     last_refresh = kernel_ticks();
     /* Apply the grant's timing advance. NOTE: this sets the TX TA (TXTA_SHARE); the
      * RX burst window TA (stock pushes it via the RF shadow at command 3) may also be
      * needed if per-burst equalizer failures persist after removing the re-track. */
     l1_tx_ta_set(ch.ta);
     klog("lu: retrack + TA %u", ch.ta);
-    if (reg_begin(r, ul) < 0)
+    if (reg_begin(r, ul) < 0) {
+        l1_fi_fn_offset = 0;          /* post-establish early-out: clear the dedicated offset
+                                       * so the resumed camp/scan stamps local FIs again */
+        l1_rxhdrlog = 0;
         return REG_ERROR;
+    }
     /* Log the LU REQUEST's old-LAI + classmark we send (non-SIM fields only - no IMSI).
      * A wrong PLMN here (esp. mnc3 digit-count: TT 286-03 is a 2-digit MNC) makes the
      * network read us as a disallowed roamer -> LU REJECT cause 13. */
@@ -323,14 +345,12 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * grant's timing advance; the stock reports its used power + TA in the L1
      * header. Disarmed after the loop (sacch is on this stack frame). */
     build_sacch(sacch, c->ms_txpwr_max_cch, ch.ta, c->rxlev);
-    (void)sacch;
-    /* SACCH left DISARMED. HW-tested 2026-11-11: arming continuous SACCH made the
-     * dedicated exchange denser (sa=4, no queue jam - the l1cell.c scheduler rework
-     * fixed the old ahead-of-SABM freeze) BUT the extra PA keying worsened our AFC
-     * drift and the downlink decode collapsed (dl ~8/81, stalled before auth) - our
-     * radio cannot sustain stock's density without stock's continuous AFC/equaliser.
-     * Re-arm only once the downlink decode is robust under the added uplink. */
-    /* l1_sacch_set(sacch); */
+    /* SACCH armed (stock model): SACCH carries the radio-link upkeep so the SDCCH need not. Paired
+     * with the ack-driven SDCCH keepalive below - the 11:55 decode collapse under SACCH was driven
+     * mainly by the SDCCH flood (ul=310-322, keepalive every window) churning the AFC, not SACCH's
+     * own ~1/102 keying. With the flood paced down, SACCH's small contribution should be sustainable
+     * (HW to confirm). Knob: comment this out to disarm SACCH if the decode still collapses. */
+    l1_sacch_set(sacch);
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
      * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
@@ -356,6 +376,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                         have_ul ? ul : (const uint8_t *)0, &st);
         if (have_ul && st.ul_done) {
             last_ul = kernel_ticks();
+            last_acked_vr = r->dl.vr;     /* the frame we just sent carried N(R)=V(R) */
             if (!p.established)
                 p.sabm_sent++;
             /* NOTE: stock does NOT re-post 0x0d after every uplink - the 1:1 call-stream
@@ -423,8 +444,11 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                  * deciphers + completes (a valid MM LU ACCEPT comes back). So honour whatever
                  * algorithm is commanded: enable the cipher (l1_cipher_set posts cmd 5+0x1e),
                  * then send CIPHERING MODE COMPLETE enciphered (the DSP ciphers TX from here). */
-                if (r->ciph_sc)
+                if (r->ciph_sc) {
                     l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
+                    l1_rxhdrlog = 1;    /* from here, log raw SNR/BFI per block: diagnose whether
+                                         * the ciphered LU ACCEPT is lost to RF or keystream */
+                }
                 {
                     int cc = reg_cipher_complete(r, ul);
 
@@ -473,14 +497,16 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 ul[i] = sabm[i];
             have_ul = 1;
         } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED &&
-                   reg_keepalive(r, ul) > 0) {
-            have_ul = 1;        /* every spare multiframe, not every other one:
-                                 * gating this on LU_FILL_MS after last_ul (which
-                                 * updates on each send) made us skip the very next
-                                 * window, so blocks went out at 470 ms - half the
-                                 * SDCCH rate - and the exchange faded. One block per
-                                 * ~235 ms window is the SDCCH maximum; stock's extra
-                                 * density is the SACCH on top. */
+                   r->dl.vr != last_acked_vr && reg_keepalive(r, ul) > 0) {
+            have_ul = 1;        /* ACK-DRIVEN keepalive: send an SDCCH RR only to acknowledge a
+                                 * downlink I-frame that advanced V(R) since our last uplink - NOT
+                                 * every spare window. The every-window RR (prior behaviour) flooded
+                                 * the uplink (ul=310-322 once stuck established) and churned the AFC
+                                 * -> decode collapse (HW 2026-11-13). Now SACCH carries the steady
+                                 * link upkeep and the SDCCH carries L3 + prompt acks, matching stock
+                                 * (~a handful of SDCCH blocks per LU). Acks are still immediate:
+                                 * V(R) advances the moment an I-frame arrives, firing the RR next
+                                 * window - faster than the old time-gated attempt that faded. */
         }
         if (sim_pending && sim_job.done) {
             if (sim_job.done == 1) {
@@ -510,6 +536,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             *prog = p;
     }
     l1_sacch_set(0);                     /* disarm: sacch[] leaves scope on return */
+    l1_fi_fn_offset = 0;                  /* back to local FI stamps: camp resumes without a
+                                          * fresh l1_cell_sync, so clear the dedicated absolute
+                                          * offset here too or camp FIs point at wrong frames. */
+    l1_rxhdrlog = 0;                      /* dedicated-phase diagnostic off */
     /* let the SIM thread finish before its job is reused or the SIM is freed;
      * bounded, since sim_run_gsm_algo self-times-out (SIM_ETIMEOUT) anyway */
     for (int w = 0; sim_pending && !sim_job.done && w < 600; w++)
