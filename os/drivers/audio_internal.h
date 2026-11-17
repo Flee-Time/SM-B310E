@@ -16,6 +16,10 @@
 #define VBC_DP_CTL      REG32(0x8a00200c)
 #define CODEC_MUTE      0xc000u
 
+/* audio.c: the codec's mutex (owner-recursive), for pcm.c's starts */
+void audio_lock(void);
+void audio_unlock(void);
+
 /* pcm.c */
 void pcm_set_attenuation(int db10);     /* 0 or below, -1000 mutes */
 bool pcm_busy(void);                    /* playing or recording */

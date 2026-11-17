@@ -50,7 +50,11 @@ class Shell:
         self.read_until(PROMPT)                 # the banner
 
     def _fill(self):
-        chunk = self.sock.recv(65536)
+        try:
+            chunk = self.sock.recv(65536)
+        except socket.timeout:
+            # an ordinary error, not a traceback: the phone sent no reply in time
+            raise ShellError('no reply from the phone (timed out)') from None
         if not chunk:
             raise ShellError('the phone closed the connection')
         self.buf += chunk
@@ -247,8 +251,8 @@ def main():
         elif args.what == 'time':
             import time
             sys.stdout.write(sh.cmd(f'date {int(time.time() + 0.5)}'))
-    except ShellError as e:
-        sys.exit(f'error: {e}')
+    except (ShellError, socket.timeout) as e:      # a send can time out too
+        sys.exit(f'error: {str(e) or "timed out"}')
     finally:
         try:
             sh.send(b'exit\n')

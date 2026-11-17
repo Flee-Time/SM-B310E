@@ -84,10 +84,7 @@ def store(s, ranges):
     print('stored:', ranges)
 
 
-def measure(s, ohms, seconds, csv_path=None):
-    s.write(f'range 0 {USE_MUX} {USE_GAIN}\n'.encode())
-    time.sleep(0.1)
-    s.reset_input_buffer()
+def read_gains(s):
     s.write(b'ranges\n')
     gains = {}
     for line in read_lines(s, 3):
@@ -96,6 +93,16 @@ def measure(s, ohms, seconds, csv_path=None):
             gains[int(p[1])] = int(p[3])
         if p[0] == 'ranges':
             break
+    return gains
+
+
+def measure(s, ohms, seconds, csv_path=None):
+    gains = read_gains(s)
+    if not gains:                       # only then: "range" is saved to EEPROM
+        s.write(f'range 0 {USE_MUX} {USE_GAIN}\n'.encode())
+        time.sleep(0.1)
+        s.reset_input_buffer()
+        gains = read_gains(s)
     if not gains:
         raise SystemExit('the Leonardo has no ranges: --scan, then --range')
     s.write(b'go\n')

@@ -97,7 +97,7 @@ class Wire:
     def feed(self, text):
         """The finished lines this wire line gives: none, one or two."""
         parts = text.split()
-        if len(parts) >= 3 and parts[0] == '~F' and text.endswith('*'):
+        if len(parts) >= 2 and parts[0] == '~F' and text.endswith('*'):     # '~F tick*': all ffff
             words = text[:-1].split()
             return [' '.join(words + ['ffff'] * (16 - len(words)))]
         if len(parts) == 5 and parts[0] == '~R':

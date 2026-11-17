@@ -329,7 +329,7 @@ static void view_key(screen_t *s, const key_event_t *ev)
 void ui_text_view(const char *title, const char *text)
 {
     size_t n = strlen(text) + 1;
-    view_t *v = kzalloc(sizeof(*v) + n);
+    view_t *v = kzalloc(sizeof(*v) + n + 4);    /* + room for the "..." of a cut */
     const char *starts[MAX_LINES];
     int lens[MAX_LINES];
 
@@ -337,6 +337,14 @@ void ui_text_view(const char *title, const char *text)
         return;
     memcpy(v->text, text, n);
     v->lines = wrap(v->text, FONT_BODY, VIEW_W, starts, lens, MAX_LINES);
+    if (v->lines == MAX_LINES) {        /* more than it wraps: the last line says so */
+        const char *rest = starts[MAX_LINES - 1] + lens[MAX_LINES - 1];
+
+        if (*rest == '\n' || *rest == ' ')
+            rest++;
+        if (*rest)
+            memcpy((char *)starts[MAX_LINES - 1], "...", 4);
+    }
     v->s.title = title;
     v->s.right = "Back";
     v->s.draw = view_draw;

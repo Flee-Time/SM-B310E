@@ -207,8 +207,13 @@ static void capture_matrix_edges(void)
     if (raw != 0)
         kpd->int_clr = KEYPAD_INT_ALL;  /* ack + re-arm */
 
-    if (status & 8u)
-        return;                        /* fpdoom: status bit 3 = bad frame */
+    if (status & 8u) {                 /* fpdoom: status bit 3 = bad frame */
+        /* The edges are acked: a release lost here would leave its key
+         * held for good. The codes cannot be trusted, so drop them all. */
+        if (event & 0xf0u)
+            held_mask = 0;
+        return;
+    }
 
     for (i = 0; i < 8; i++) {
         uint32_t byte, k;

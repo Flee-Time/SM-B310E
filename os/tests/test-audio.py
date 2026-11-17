@@ -224,21 +224,21 @@ def main():
             result['playback_stopped_on_leave'] = flag(s_playing) == 0
             assert result['playback_playing'] == 1 and result['playback_stopped_on_leave'], result
 
-            # a recording goes on with the app closed
+            # leaving while recording asks; No stays and records, Yes stops and leaves
             app('Recorder')
             press('ret', 'Recorder')            # Rec: REC0002.WAV
-            press('f2', 'Apps')
+            press('f2', 'Recording')            # Back: the dialog
+            shot('leave-dialog')
+            press('f2', 'Recorder')             # No
+            time.sleep(3.5)
+            result['recording_after_no'] = flag(s_recording)
+            press('f2', 'Recording')
+            press('f1', 'Apps')                 # Yes
+            time.sleep(0.5)
+            result['recording_after_yes'] = flag(s_recording)
+            assert result['recording_after_no'] == 1 and result['recording_after_yes'] == 0, result
             press('esc', 'B310E OS')
             wait_for(qt, base, lambda s: s['apps_loaded'] == 0, 5, 'Recorder not freed')
-            time.sleep(3)
-            result['recording_while_closed'] = flag(s_recording)
-            assert result['recording_while_closed'] == 1, result
-            app('Recorder')
-            time.sleep(0.5)
-            shot('recorder-back')
-            result['recording_on_return'] = flag(s_recording)
-            press('ret', 'Recorder')            # Stop
-            assert result['recording_on_return'] == 1 and flag(s_recording) == 0, result
 
             # FM
             app('FM radio')
@@ -247,6 +247,10 @@ def main():
             assert result['fm_on'] == 1, result
             radio_option('Record')              # record the radio: REC0003.WAV
             assert flag(s_recording) == 1, 'the radio is not recording'
+            press('f2', 'Recording')            # Back asks here too
+            press('f2', 'FM radio')             # No
+            result['fm_recording_after_no'] = flag(s_recording)
+            assert result['fm_recording_after_no'] == 1, result
             time.sleep(1)
             # Seeking while recording once blocked the UI for minutes on the
             # phone: the UI must keep taking keys during a seek.
@@ -367,7 +371,7 @@ def main():
     assert 'audio: recording /b310e-os/rec/REC0001.WAV' in log_text, log_text
     assert 'audio: recorded' in log_text, log_text
     assert 'audio: playing /b310e-os/rec/REC0001.WAV' in log_text, log_text
-    assert 'recorder: back, /b310e-os/rec/REC0002.WAV still recording' in log_text, log_text
+    assert 'to /b310e-os/rec/REC0002.WAV' in log_text, log_text     # stopped and saved on Yes
     assert 'audio: recording /b310e-os/rec/REC0003.WAV, 32000 Hz, FM' in log_text, log_text
     assert 'radio: turned off' in log_text, log_text
     fm_lines = [l.split(' fm: ', 1)[1] for l in log_text.splitlines() if ' fm: id 1688' in l]

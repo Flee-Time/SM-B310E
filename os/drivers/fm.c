@@ -67,7 +67,12 @@ static void i2c_hw_init(void)
     I2C_CTL &= ~0x38u;
     I2C_CLKD0 = 26000000 / (4 * 100000) - 1;    /* 100 kHz */
     I2C_CLKD1 = 0;
-    REG32(0x8b0001e0) |= 2;             /* APB_PIN_CTL0: I2C1 pad select */
+    {
+        uint32_t s = arch_irq_save();   /* sim.c changes bits 3:2 under its own lock */
+
+        REG32(0x8b0001e0) |= 2;         /* APB_PIN_CTL0: I2C1 pad select */
+        arch_irq_restore(s);
+    }
     I2C_CTL |= 0x18;
     I2C_CMD |= CMD_INT_ACK;
 }

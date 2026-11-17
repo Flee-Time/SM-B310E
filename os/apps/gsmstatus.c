@@ -50,7 +50,9 @@ screen_t *app_radio_status(void);
 
 #define SYNC_CELLS      3               /* the strongest 900 channels tried */
 #define SYNC_BUDGET_MS  1500u
-#define BAND900_END     174u            /* arfcn indexes 0..173 are GSM 900 */
+/* GSM 900 arfcn indexes in the [C] order (l1_arfcn_index, dsp.c): 0..124 P-GSM,
+ * 499..547 E-GSM */
+#define BAND900(i)      ((i) <= 124u || ((i) >= 499u && (i) <= 547u))
 
 enum { R_IDLE, R_SIM, R_DSP, R_L1, R_CLOCK, R_SCAN, R_SYNC, R_BCCH, R_SAVE, R_DONE };
 enum { SIM_NONE, SIM_READY, SIM_PIN, SIM_ERROR };
@@ -119,19 +121,20 @@ typedef struct {
 
 static chan_t *chan;
 
-/* The inverse of l1_arfcn_index(): the same [G] band order. */
+/* The inverse of l1_arfcn_index(): the same [C] band order (0-124 P-GSM,
+ * 125-498 DCS, 499-547 E-GSM, 548-671 GSM850, 672-970 PCS). */
 static const char *band_of(uint32_t idx, int *arfcn)
 {
     if (idx < 125)
         return *arfcn = (int)idx, "900";
-    if (idx < 174)
-        return *arfcn = (int)(975 + idx - 125), "900";
+    if (idx < 499)
+        return *arfcn = (int)(512 + idx - 125), "1800";
     if (idx < 548)
-        return *arfcn = (int)(512 + idx - 174), "1800";
-    if (idx < 847)
-        return *arfcn = (int)(512 + idx - 548), "1900";
+        return *arfcn = (int)(975 + idx - 499), "900";
+    if (idx < 672)
+        return *arfcn = (int)(128 + idx - 548), "850";
     if (idx < CHANNELS)
-        return *arfcn = (int)(128 + idx - 847), "850";
+        return *arfcn = (int)(512 + idx - 672), "1900";
     return *arfcn = -1, "?";
 }
 
@@ -360,9 +363,11 @@ static void sync(void)
     for (int k = 0; k < SYNC_CELLS; k++) {
         uint32_t best = 0, bi = L1_NO_INDEX;
 
-        for (uint32_t i = 0; i < BAND900_END; i++) {
+        for (uint32_t i = 0; i < CHANNELS; i++) {
             bool taken = false;
 
+            if (!BAND900(i))
+                continue;
             for (int j = 0; j < k; j++)
                 taken |= radio_status.sync_index[j] == i;
             if (chan[i].valid && !taken && (bi == L1_NO_INDEX || chan[i].best > best))

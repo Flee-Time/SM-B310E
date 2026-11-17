@@ -441,10 +441,12 @@ void lcd_update(void)
     const uint16_t *frame = (const uint16_t *)FRAME_ADDR;
     int y0 = 0, y1 = LCD_HEIGHT;
 
-    if (presented) {
+    /* Not from the fault screen (abort mode): its one update must show. */
+    if (presented && !arch_in_irq()) {
         presented = false;
         return;
     }
+    presented = false;
     if (sent_px) {                      /* back from a game's frames */
         lc->img.y_base_addr = FRAME_ADDR >> 2;
         sent_px = NULL;

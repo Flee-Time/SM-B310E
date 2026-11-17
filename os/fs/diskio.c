@@ -43,19 +43,29 @@ static DRESULT read_ahead(BYTE *buff, LBA_t sector)
     return RES_OK;
 }
 
+/* While USB has the card (fs_suspend), FatFs sees no disk: a call that was
+ * waiting for the volume lock through the unmount does not touch the card
+ * (FatFs does not check the unmount again once it has the lock). */
+static volatile bool suspended;
+
+void disk_suspend(bool on)
+{
+    suspended = on;
+}
+
 DSTATUS disk_initialize(BYTE pdrv)
 {
-    return pdrv == 0 && sd_present() ? 0 : STA_NOINIT;
+    return pdrv == 0 && !suspended && sd_present() ? 0 : STA_NOINIT;
 }
 
 DSTATUS disk_status(BYTE pdrv)
 {
-    return pdrv == 0 && sd_present() ? 0 : STA_NOINIT;
+    return pdrv == 0 && !suspended && sd_present() ? 0 : STA_NOINIT;
 }
 
 DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 {
-    if (pdrv != 0 || !sd_present())
+    if (pdrv != 0 || suspended || !sd_present())
         return RES_NOTRDY;
     if (count == 1 && sector >= ra_lo && sector < ra_hi)
         return read_ahead(buff, sector);
@@ -64,7 +74,7 @@ DRESULT disk_read(BYTE pdrv, BYTE *buff, LBA_t sector, UINT count)
 
 DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 {
-    if (pdrv != 0 || !sd_present())
+    if (pdrv != 0 || suspended || !sd_present())
         return RES_NOTRDY;
     if (ra_count && sector < ra_first + ra_count && sector + count > ra_first) {
         LBA_t lo = sector > ra_first ? sector : ra_first;
@@ -83,7 +93,7 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
-    if (pdrv != 0 || !sd_present())
+    if (pdrv != 0 || suspended || !sd_present())
         return RES_NOTRDY;
     switch (cmd) {
     case CTRL_SYNC:             /* writes are synchronous */

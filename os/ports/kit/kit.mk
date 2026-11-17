@@ -20,6 +20,9 @@ KIT_LDFLAGS := $(ARCH_FLAGS) --specs=nano.specs -mthumb -nostartfiles -T sdk/app
 	-Wl,--pic-veneer -Wl,--no-warn-rwx-segments \
 	-Wl,--defsym=__exidx_start=0 -Wl,--defsym=__exidx_end=0 -Wl,--wrap=fopen -Wl,--wrap=fread
 KIT_LIBS := -Wl,--start-group -lc_nano -lm -lgcc -Wl,--end-group
+# newlib-nano prints %f %g %e as nothing unless this is linked (about 10-20 KB): for the
+# ports where a float printed matters (Quake's Cvar_SetValue, the Build games' menus and config)
+KIT_PRINTF_FLOAT := -Wl,-u,_printf_float
 
 KIT_OBJS := $(KIT_OUT)/kit_os.o $(KIT_OUT)/kit_menu.o $(KIT_OUT)/kit_sys.o $(KIT_OUT)/kit_malloc.o $(KIT_OUT)/kit_asm.o \
 	$(KIT_OUT)/b310e-mixer.o $(KIT_OUT)/b310e-music.o

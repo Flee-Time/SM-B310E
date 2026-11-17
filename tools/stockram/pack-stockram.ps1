@@ -41,6 +41,14 @@ if ($shimBytes.Length -gt $SHIM_PAD) {
     throw "shim.bin is $($shimBytes.Length) bytes, larger than the $SHIM_PAD-byte image offset"
 }
 
+# 1b. the shim ends with `bx 0x100`: aliastest.s at image offset 0x100 (the
+# dead PBL region) jumps on to the boot vector at 0x10000
+& arm-none-eabi-gcc.exe -c -march=armv5te -o (Join-Path $PSScriptRoot 'aliastest.o') (Join-Path $PSScriptRoot 'aliastest.s')
+if ($LASTEXITCODE -ne 0) { throw 'aliastest.s assembly failed' }
+& arm-none-eabi-objcopy.exe -O binary -j .text (Join-Path $PSScriptRoot 'aliastest.o') (Join-Path $PSScriptRoot 'aliastest.bin')
+if ($LASTEXITCODE -ne 0) { throw 'aliastest objcopy failed' }
+$aliastBytes = [System.IO.File]::ReadAllBytes((Join-Path $PSScriptRoot 'aliastest.bin'))
+
 # 2. slice the stock image (first 1MB of the dump)
 $dumpBytes = [System.IO.File]::ReadAllBytes($dump)
 if ($dumpBytes.Length -lt $IMAGE_LEN) { throw "dump_firmware.bin smaller than $IMAGE_LEN" }
@@ -51,6 +59,7 @@ $image = New-Object byte[] $IMAGE_LEN
 $outBytes = New-Object byte[] ($SHIM_PAD + $IMAGE_LEN)
 [System.Array]::Copy($shimBytes, 0, $outBytes, 0, $shimBytes.Length)
 [System.Array]::Copy($image, 0, $outBytes, $SHIM_PAD, $IMAGE_LEN)
+[System.Array]::Copy($aliastBytes, 0, $outBytes, $SHIM_PAD + 0x100, $aliastBytes.Length)
 [System.IO.File]::WriteAllBytes($out, $outBytes)
 
 Write-Host ("==> wrote {0} ({1} bytes: {2} shim + {3} image)" -f $out, $outBytes.Length, $SHIM_PAD, $IMAGE_LEN)

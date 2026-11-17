@@ -83,10 +83,16 @@ bool timer_set(long cycles, bool start)
 
         oldlevel = disable_irq_save();
 
+        /* timer_set_period() re-sets a running timer with no timer_start()
+         * after it: keep its line enabled then */
+        bool running = !start && (REG32(INT_ENABLE_REG) & TIMER0_IRQ_MASK);
+
         stop_timer();
         REG32(TIMER0_LOAD) = (uint32_t)cycles;
         REG32(TIMER0_INT)  = 1;             /* int enable */
         REG32(TIMER0_CTL)  = 0xc0;          /* ctl: enable */
+        if (running)
+            REG32(INT_ENABLE_REG) |= TIMER0_IRQ_MASK;
 
         restore_irq(oldlevel);
 

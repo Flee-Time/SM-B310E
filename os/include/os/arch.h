@@ -51,7 +51,7 @@ extern volatile uint32_t prof_n, prof_cap;
 /* ---- CPU (arch/sc6530c/cpu.S) ------------------------------------------ */
 uint32_t arch_irq_save(void);       /* masks IRQ, returns the old CPSR */
 void arch_irq_restore(uint32_t cpsr);
-bool arch_in_irq(void);             /* IRQ or SVC (scheduler) context */
+bool arch_in_irq(void);             /* not a thread's mode: IRQ, SVC, aborts, FIQ */
 void arch_yield(void);              /* svc: run the scheduler */
 void arch_start_first(void) __attribute__((noreturn));
 void arch_wait_for_irq(void);       /* CP15 wait-for-interrupt */

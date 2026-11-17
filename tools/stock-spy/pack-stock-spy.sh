@@ -20,6 +20,15 @@
 
 set -euo pipefail
 
+# REFUSED: the 6-byte hook patch below is known to be wrong. The sites are
+# Thumb code and '00 4f' is Thumb 'ldr r7,[pc,#0]' (Thumb-1 has no
+# 'ldr pc,[pc]'): the hook is never reached, r7 (the value) is clobbered and
+# the literal is executed as code. Do not pack this image until the patch is
+# replaced by a sequence that reaches the Thumb hook (and the hook is changed
+# to match).
+echo "pack-stock-spy: refused: the hook patch ('00 4f' + literal) is Thumb 'ldr r7,[pc,#0]', not a jump; the image would not reach the hook and would crash the stock OS" >&2
+exit 1
+
 scriptdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$scriptdir/../.." && pwd)"
 
@@ -111,9 +120,9 @@ fi
 printf '\x00\x4f\x00\x00\x2f\x04' | dd of="$tmpdir/image.bin" bs=1 seek="$PATCH_OFF" conv=notrunc status=none
 
 # 3c. apply the UART-putc patch at 0x38416 (store str r5,[r4]): verify + patch
-usite=$(dd if="$tmpdir/image.bin" bs=1 skip="$UPATCH" count=2 2>/dev/null | od -An -tx1 -v | tr -d '[:space:]')
-if [ "$usite" != "2560" ]; then
-    echo "unexpected bytes at 0x38416: $usite (expected 2560 = 0x6025 str r5,[r4])" >&2
+usite=$(dd if="$tmpdir/image.bin" bs=1 skip="$UPATCH" count=6 2>/dev/null | od -An -tx1 -v | tr -d '[:space:]')
+if [ "$usite" != "256010bd10b5" ]; then
+    echo "unexpected bytes at 0x38416: $usite (expected 256010bd10b5 = 0x6025 str r5,[r4] / 0xBD10 pop {r4,pc} / 0xB510 push {r4,lr})" >&2
     exit 1
 fi
 printf '\x00\x4f\x00\x1c\x2f\x04' | dd of="$tmpdir/image.bin" bs=1 seek="$UPATCH" conv=notrunc status=none

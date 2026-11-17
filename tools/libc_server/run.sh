@@ -6,10 +6,11 @@ set -euo pipefail
 scriptDir=$(cd "$(dirname "$0")" && pwd)
 cd "$scriptDir"
 
-if ! ./spd_dump \
+rc=0
+./spd_dump \
     fdl nor_fdl1.bin 0x40004000 \
-    fdl fpdoom.bin ram; then
-    rc=$?
+    fdl fpdoom.bin ram || rc=$?
+if [ "$rc" -ne 0 ]; then
     echo "ERROR: spd_dump failed with exit code $rc" >&2
     exit "$rc"
 fi

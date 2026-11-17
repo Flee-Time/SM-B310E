@@ -15,12 +15,12 @@ $bad = 0
 foreach ($f in $files) {
     $src = Join-Path $Stage $f
     $dst = Join-Path $Card $f
-    if (-not (Test-Path $src)) { Write-Error "missing in staging: $f"; $bad++; continue }
+    if (-not (Test-Path $src)) { [Console]::Error.WriteLine("ERROR: missing in staging: $f"); $bad++; continue }
     Copy-Item -Force $src $dst
     $h1 = (Get-FileHash $src -Algorithm SHA256).Hash
     $h2 = (Get-FileHash $dst -Algorithm SHA256).Hash
     if ($h1 -eq $h2) { Write-Output "OK   $f" } else { Write-Output "DIFF $f"; $bad++ }
 }
 Write-Output ''
-if ($bad -eq 0) { Write-Output 'ALL COPIED AND VERIFIED' } else { Write-Output "$bad file(s) FAILED" }
+if ($bad -eq 0) { Write-Output 'ALL COPIED AND VERIFIED (hashes read through the OS cache: eject the card safely before removing it)' } else { Write-Output "$bad file(s) FAILED" }
 exit $bad

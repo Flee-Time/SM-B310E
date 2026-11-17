@@ -175,6 +175,10 @@ static void digit(edit_t *e, int k, uint32_t now)
         if (e->tap_key >= 0 && e->mode == MODE_ABC1 && e->cur > 0 &&
             e->text[e->cur - 1] != ' ')
             e->mode = MODE_ABC;         /* one capital, then small */
+        if (e->len >= e->max) {         /* full: no letter in, so none for a next tap to change */
+            e->tap_key = -1;
+            return;
+        }
         e->tap_key = k;
         e->tap_index = 0;
         insert(e, cased(e, set[0]));

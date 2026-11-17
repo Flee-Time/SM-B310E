@@ -40,6 +40,7 @@ static struct {
     int depth;                          /* ui_depth with its screen on top */
     struct { uint8_t code, down; } keys[64];
     volatile unsigned key_in, key_out;
+    uint32_t key_queued_down[8];        /* a press of the code's queued, its release not yet */
     kit_view_t view;
     uint32_t spread[256];               /* the palette: r << 22 | b << 11 | g << 1 */
     mutex_t frame_lock;
@@ -722,7 +723,24 @@ static void dark_pause(void)
 
 /* ---- the rest of kit.h ------------------------------------------------------------ */
 uint32_t kit_ms(void) { return ticks() - k.dark_ms; }
-void kit_sleep(uint32_t ms) { thread_sleep(ms); }
+/* An emulator waits here on its own sound ring, not in kit_present*: the sound an
+ * alarm took has to come back here too, or nothing empties the ring again. Only in
+ * the game's thread (found by its stack), as wait_if_paused: the sound thread
+ * sleeps here too (snes9x's render) */
+void kit_sleep(uint32_t ms)
+{
+    char here;
+
+    if (k.thread && (uintptr_t)&here - (uintptr_t)k.thread->stack < k.thread->stack_size)
+        sound_back();
+    if (k.dark) {                       /* another thread through a dark pause (snes9x's sound,
+                                         * waiting on the game): as seldom as dark_pause wakes */
+        while (k.dark && !k.quit_asked)
+            thread_sleep(200);
+        return;
+    }
+    thread_sleep(ms);
+}
 bool kit_quit_asked(void) { return k.quit_asked; }
 void kit_log(const char *s) { klog("%s: %s", kit_game.log_name, s); }
 
@@ -864,6 +882,8 @@ void _exit(int code) __attribute__((noreturn));
 static void game_fault(const char *why)
 {
     snprintf(kit.error, sizeof(kit.error), "%s", why);
+    kit_close_files();                  /* not _exit's _close: its free() is on the heap
+                                         * the fault may have broken */
     _exit(1);
 }
 
@@ -1014,9 +1034,16 @@ static void game_key(screen_t *s, const key_event_t *ev)
         return;
     }
     if (k.running) {
-        unsigned in = k.key_in;
+        unsigned in = k.key_in, fill = in - k.key_out;
+        uint32_t *qd = &k.key_queued_down[ev->code >> 5], bit = 1u << (ev->code & 31);
 
-        if (in - k.key_out < ARRAY_SIZE(k.keys)) {
+        /* A release is never lost (the key would stay down in the game): presses take
+         * only half the queue, so the rest holds a release for every key down. One
+         * whose press was dropped goes too: the game never saw it down */
+        if (ev->down ? fill >= ARRAY_SIZE(k.keys) / 2 : !(*qd & bit))
+            return;
+        *qd = ev->down ? *qd | bit : *qd & ~bit;
+        if (fill < ARRAY_SIZE(k.keys)) {
             k.keys[in % ARRAY_SIZE(k.keys)].code = ev->code;
             k.keys[in % ARRAY_SIZE(k.keys)].down = ev->down;
             k.key_in = in + 1;

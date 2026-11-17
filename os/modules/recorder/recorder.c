@@ -356,10 +356,18 @@ static void draw(screen_t *s)
     } else if (!card_mounted()) {
         gfx_text_centered(y, "no card", C_BAD, FONT_SMALL, 1);
     } else {
-        snprintf(buf, sizeof(buf), rec ? "Leave: it goes on" : "%d recording%s", n_recs,
+        snprintf(buf, sizeof(buf), rec ? "Leaving stops it" : "%d recording%s", n_recs,
                  n_recs == 1 ? "" : "s");
         gfx_text_centered(y, buf, C_DIM, FONT_SMALL, 1);
     }
+}
+
+/* Leave asked while recording: stop it as Stop does, then go */
+static void leave_yes(void)
+{
+    wav_stop();
+    resumed = false;
+    ui_pop();
 }
 
 static void key(screen_t *s, const key_event_t *ev)
@@ -395,7 +403,11 @@ static void key(screen_t *s, const key_event_t *ev)
         ui_push(&list_screen);
         break;
     case KEY_RSOFT:
-        ui_pop();
+        /* in the background another app (Music) could end it unseen: ask */
+        if (wav_recording())
+            ui_confirm("Recording", "Leaving stops the recording.", leave_yes);
+        else
+            ui_pop();
         return;
     }
     labels(s);
@@ -437,9 +449,11 @@ static screen_t *start(void)
     return &screen;
 }
 
-/* Leaving stops what we play; a recording goes on. */
+/* Leaving stops what we play, and the recording: END goes home without asking */
 static void stop(void)
 {
+    if (wav_recording())
+        wav_stop();
     stop_playing();
     free(recs);
     recs = NULL;

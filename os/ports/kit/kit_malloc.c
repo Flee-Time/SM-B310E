@@ -212,8 +212,16 @@ void *realloc(void *p, size_t n)
     b = BLOCK(p);
     s = need(n);
     have = SIZE(b);
-    if (s <= have)
-        return p;                       /* it fits (kept as it is) */
+    if (s <= have) {                    /* it fits: a tail big enough for a block is freed */
+        if (have - s >= MIN_BLK) {
+            blk_t *rest = (blk_t *)((uint8_t *)b + s);
+
+            rest->size = (uint32_t)(have - s) | USED;
+            b->size = (uint32_t)s | USED | (b->size & PREV_FREE);
+            free(DATA(rest));           /* (merged with a free one after it) */
+        }
+        return p;
+    }
     nx = NEXT(b);
     if ((uint8_t *)nx < heap_hi && !(nx->size & USED) && have + SIZE(nx) >= s) {
         unlink_free(nx);                /* grows into the free one after it */

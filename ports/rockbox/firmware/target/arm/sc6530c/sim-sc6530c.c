@@ -149,10 +149,13 @@ static void sim_send(const uint8_t *data, int len)
     spin(10);
     SIM_CTL0 &= ~CTL0_TXFIFO;
     SIM_CTL0 |= CTL0_TX_EN;
+    long end = current_tick + HZ / 2;      /* a stuck FIFO must not hang us */
     for (int i = 0; i < len; i++)
     {
-        while (TX_COUNT() >= 32)
+        while (TX_COUNT() >= 32 && !TIME_AFTER(current_tick, end))
             ;
+        if (TX_COUNT() >= 32)
+            break;                          /* the reply wait then times out */
         SIM_TX = data[i];
     }
     sim_tx_drain();
@@ -201,6 +204,8 @@ static unsigned sim_apdu(const uint8_t hdr[5], const uint8_t *out,
         int n = all ? len - done : 1;
         if (out)
         {
+            if (done + n > len)
+                return 0;                 /* more procedure bytes than data */
             sim_send(out + done, n);
             done += n;
         }

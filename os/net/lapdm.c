@@ -68,6 +68,7 @@ int lapdm_establish(lapdm_dl_t *dl, const uint8_t *l3, int len, uint8_t out[LAPD
         return -1;
     dl->vs = dl->vr = dl->va = 0;
     dl->tx_pending = 0;
+    dl->rx_seg = 0;
     dl->state = LAPDM_ESTABLISHING;
     /* SABM is a command (MS C/R=0) with P=1; its payload is the first L3 message
      * (contention resolution). */
@@ -109,6 +110,10 @@ int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
         *out_valid = 0;
     if (lapdm_decode(in, 0, &cr, &ctrl, body, &blen) < 0)
         return -1;
+    /* Not a LAPDm address for this link (spare 0, LPD 00, EA 1, our SAPI): e.g. a
+     * camped-channel block, which starts with an L2 pseudo-length. Ignore it. */
+    if ((in[0] & 0xe1) != 0x01 || LAPDM_ADDR_SAPI(in[0]) != dl->sapi)
+        return 0;
 
     if (LAPDM_CTRL_IS_U(ctrl)) {
         switch (LAPDM_U_BITS(ctrl)) {
@@ -144,8 +149,14 @@ int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
             dl->state = LAPDM_ESTABLISHED;
         ack_upto(dl, (uint8_t)LAPDM_I_NR(ctrl));
         if (LAPDM_I_NS(ctrl) == dl->vr) {
+            int more = (in[2] >> 1) & 1;        /* M: more segments follow */
+
             dl->vr = (uint8_t)((dl->vr + 1) & 7);
-            if (l3 && l3len) {
+            if (more || dl->rx_seg) {
+                /* No reassembly: a segment (M set, or the continuations up to the
+                 * last one) is not a whole message, so it is not delivered. */
+                dl->rx_seg = (uint8_t)more;
+            } else if (l3 && l3len) {
                 copy_n(l3, body, blen);
                 *l3len = blen;
                 deliver = 1;

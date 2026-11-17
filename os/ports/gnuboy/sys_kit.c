@@ -188,6 +188,10 @@ int pcm_submit(void)
     }
     for (int i = 0; i + 1 < pcm.pos; i += 2) {
         while (ring_in - ring_out >= RING) {
+            if (kit_quit_asked()) {     /* nothing may empty it: Leave all the same */
+                pcm.pos = 0;
+                return 1;
+            }
             kit_sleep(2);
             waited = 1;
         }
@@ -196,7 +200,7 @@ int pcm_submit(void)
         ring_in++;
     }
     pcm.pos = 0;
-    while (ring_in - ring_out > AHEAD) {
+    while (ring_in - ring_out > AHEAD && !kit_quit_asked()) {
         kit_sleep(2);
         waited = 1;
     }

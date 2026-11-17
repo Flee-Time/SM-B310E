@@ -120,9 +120,9 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 
             if (!s)
                 s = "(null)";
-            len = (int)strlen(s);
-            if (prec >= 0 && len > prec)
-                len = prec;
+            /* no further than the precision: the buffer may not end in a 0 */
+            for (len = 0; (prec < 0 || len < prec) && s[len]; len++)
+                ;
             if (!left)
                 pad(&o, ' ', width - len);
             for (int i = 0; i < len; i++)

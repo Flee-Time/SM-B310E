@@ -384,6 +384,13 @@ static void open_options(void)
     ui_choose("Options", options, 5, -1, option_picked, NULL);
 }
 
+/* Leave asked while recording: stop it as Stop recording does, then go */
+static void leave_yes(void)
+{
+    wav_stop();
+    ui_pop();
+}
+
 static void key(screen_t *s, const key_event_t *ev)
 {
     /* Held Up or Down must not stop and start the seek ten times a second, nor a held
@@ -440,7 +447,11 @@ static void key(screen_t *s, const key_event_t *ev)
         open_options();
         return;
     case KEY_RSOFT:
-        ui_pop();                       /* the radio plays on */
+        /* the radio plays on; a recording would not be seen, another app could end it */
+        if (wav_recording())
+            ui_confirm("Recording", "Leaving stops the recording.", leave_yes);
+        else
+            ui_pop();
         return;
     }
     if (fm_is_on())
@@ -452,6 +463,8 @@ static void leave(screen_t *s)
 {
     stop_seek(true);
     conf_save();
+    if (wav_recording())                /* END goes home without asking: no recording */
+        wav_stop();                     /* left on with no screen of ours */
     note_ensure();                      /* it plays on: its buttons stay */
 }
 

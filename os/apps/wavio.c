@@ -103,10 +103,13 @@ static uint32_t le32(const uint8_t *p)
     return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24;
 }
 
+/* refill's and drain's block: off the 6 KB UI stack (drain runs under deep
+ * chains). One is enough: both run on the UI thread, neither calls the other. */
+static uint8_t buf[4096];
+
 static void refill(void)
 {
     while (file_open && !file_eof && RING_BYTES - used() >= 4096) {
-        uint8_t buf[4096];
         UINT got = 0;
         uint32_t want = data_bytes < sizeof(buf) ? data_bytes : sizeof(buf);
 
@@ -235,8 +238,6 @@ static void header(uint8_t h[44], uint32_t bytes)
 
 static void drain(void)
 {
-    uint8_t buf[4096];
-
     while (file_open && used() >= (recording ? sizeof(buf) : 1)) {
         uint32_t n = used() < sizeof(buf) ? used() : sizeof(buf);
         UINT w;
@@ -331,7 +332,8 @@ void wav_stop(void)
     if (playing) {
         audio_play_stop();
         playing = false;
-        klog("audio: stopped after %lu s", (unsigned long)wav_seconds());
+        if (!tone)                      /* the alarm's beeps: one each, the log would fill */
+            klog("audio: stopped after %lu s", (unsigned long)wav_seconds());
     }
     if (recording) {
         uint8_t h[44];

@@ -16,11 +16,29 @@ void ff_memfree(void *mblock)
 
 /* one per volume, plus FatFs's system lock at index FF_VOLUMES */
 static mutex_t locks[FF_VOLUMES + 1];
+static bool made[FF_VOLUMES + 1];
 
+/* Each f_mount creates the volume's lock again: initialise it once only,
+ * a thread may still hold it or wait on it from before an unmount. */
 int ff_mutex_create(int vol)
 {
-    mutex_init(&locks[vol]);
+    if (!made[vol]) {
+        mutex_init(&locks[vol]);
+        made[vol] = true;
+    }
     return 1;
+}
+
+/* fs_suspend: wait for the FatFs call in progress, keep others out while
+ * unmounting (f_mount takes no lock itself). */
+void ff_volume_lock(int vol)
+{
+    mutex_lock(&locks[vol], WAIT_FOREVER);
+}
+
+void ff_volume_unlock(int vol)
+{
+    mutex_unlock(&locks[vol]);
 }
 
 void ff_mutex_delete(int vol)

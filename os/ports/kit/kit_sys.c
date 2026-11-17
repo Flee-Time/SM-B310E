@@ -604,9 +604,10 @@ extern void (*__init_array_start[])(void), (*__init_array_end[])(void);
 
 int kit_run(int argc, char **argv)
 {
-    for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
-        (*f)();
     if (setjmp(exit_jmp))
         return exit_code;
+    /* after the setjmp: one that exits or faults ends in _exit's longjmp */
+    for (void (**f)(void) = __init_array_start; f < __init_array_end; f++)
+        (*f)();
     exit(kit_main(argc, argv));
 }

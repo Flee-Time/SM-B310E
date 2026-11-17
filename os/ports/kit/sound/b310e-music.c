@@ -66,6 +66,7 @@ static void mus_event(struct track *t) {
     if (t->p>=t->end) { t->done=true; return; }
     unsigned event=*t->p++, type=(event>>4)&7, ch=event&15;
     if (type==6) { t->done=true; return; }
+    if (type==5) { if (event&128) t->next+=vlq(t); return; } /* measure end: no data byte */
     if (t->p>=t->end) { t->done=true; return; }
     unsigned value=*t->p++;
     if (type==0) note_off(ch,value&127);

@@ -20,6 +20,14 @@
 
 $ErrorActionPreference = 'Stop'
 
+# REFUSED: the 6-byte hook patch below is known to be wrong. The sites are
+# Thumb code and '00 4f' is Thumb 'ldr r7,[pc,#0]' (Thumb-1 has no
+# 'ldr pc,[pc]'): the hook is never reached, r7 (the value) is clobbered and
+# the literal is executed as code. Do not pack this image until the patch is
+# replaced by a sequence that reaches the Thumb hook (and the hook is changed
+# to match).
+throw "pack-stock-spy: refused: the hook patch ('00 4f' + literal) is Thumb 'ldr r7,[pc,#0]', not a jump; the image would not reach the hook and would crash the stock OS"
+
 $repo     = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $armbin   = 'C:\Program Files (x86)\Arm GNU Toolchain arm-none-eabi\14.2 rel1\bin'
 $dump     = Join-Path $repo 'dump_firmware.bin'
@@ -105,8 +113,10 @@ $image[$PATCH_OFF + 5] = ($HOOK_VA -shr 24) -band 0xFF
 $UPATCH = 0x38416
 $UHOOK_VA = 0x042F1C00
 $uw1 = $image[$UPATCH] + ($image[$UPATCH + 1] * 256)
-if ($uw1 -ne 0x6025) {
-    throw "unexpected bytes at 0x38416: 0x{0:X4} (expected 0x6025 str r5,[r4])" -f $uw1
+$uw2 = $image[$UPATCH + 2] + ($image[$UPATCH + 3] * 256)
+$uw3 = $image[$UPATCH + 4] + ($image[$UPATCH + 5] * 256)
+if ($uw1 -ne 0x6025 -or $uw2 -ne 0xBD10 -or $uw3 -ne 0xB510) {
+    throw ("unexpected bytes at 0x38416: 0x{0:X4}/0x{1:X4}/0x{2:X4} (expected 0x6025 str r5,[r4] / 0xBD10 pop {{r4,pc}} / 0xB510 push {{r4,lr}})" -f $uw1, $uw2, $uw3)
 }
 $image[$UPATCH] = 0x00
 $image[$UPATCH + 1] = 0x4F

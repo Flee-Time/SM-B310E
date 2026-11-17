@@ -61,6 +61,11 @@ if [ "$shim_len" -gt "$SHIM_PAD" ]; then
     exit 1
 fi
 
+# 1b. the shim ends with `bx 0x100`: aliastest.s at image offset 0x100 (the
+# dead PBL region) jumps on to the boot vector at 0x10000
+arm-none-eabi-gcc -c -march=armv5te -o "$scriptdir/aliastest.o" "$scriptdir/aliastest.s"
+arm-none-eabi-objcopy -O binary -j .text "$scriptdir/aliastest.o" "$scriptdir/aliastest.bin"
+
 # 2. slice the stock image (first 1MB of the dump)
 head -c "$IMAGE_LEN" "$dump" > "$tmpdir/image.bin"
 
@@ -68,6 +73,7 @@ head -c "$IMAGE_LEN" "$dump" > "$tmpdir/image.bin"
 head -c "$SHIM_PAD" /dev/zero > "$out"
 dd if="$shim" of="$out" bs=1 conv=notrunc status=none
 dd if="$tmpdir/image.bin" of="$out" bs=1 seek="$SHIM_PAD" conv=notrunc status=none
+dd if="$scriptdir/aliastest.bin" of="$out" bs=1 seek=$((SHIM_PAD + 0x100)) conv=notrunc status=none
 
 out_len=$(wc -c < "$out")
 expected=$((SHIM_PAD + IMAGE_LEN))

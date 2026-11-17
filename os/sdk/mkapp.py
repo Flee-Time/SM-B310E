@@ -111,6 +111,8 @@ def main():
                 fail(f'{s["name"]}+{offset:#x}: relocation type {kind} is not supported')
             if symbols[sym][3] == SHN_ABS:
                 continue                # an absolute value, not an address
+            if symbols[sym][3] == SHN_UNDEF:
+                continue                # undefined weak: stays 0 (NULL)
             if offset + 4 > image_size:       # (unaligned: API 2.8)
                 fail(f'{s["name"]}+{offset:#x}: misplaced relocation')
             if offset & 3:

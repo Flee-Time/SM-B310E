@@ -1073,6 +1073,8 @@ int l1_start(void)
     dsp_info.fi_moves = dsp_info.pm_results = 0;
     cipher_w5 = 0;                       /* ciphering off until a CIPHER MODE COMMAND */
     cipher_count_load = false;
+    cipher_active = false;               /* no COUNT seeding/advance left from a past session */
+    cipher_fn_offset = 0;
     /* stock FUN_0002e98e: clear, interrupt on, clear, start marker */
     sm_clear(0, SHARE_CLEAR);
     fe0_init();
@@ -1575,11 +1577,12 @@ uint8_t l1_cipher_cmdpath = 2;          /* engine select: 2 = AUTO by alg (A5/3 
 uint8_t l1_cipher_reseed  = 0;          /* 1 = also reseed the A5/1 COUNT at share +0x3f0 (a
                                          * no-op for the A5/3 cmd path per RE; 0 = leave it) */
 
-void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
+int l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
 {
     /* Finding 1: select the cipher engine by algorithm. A5/3 (alg 2) -> cmd5+0x1e A5/3 unit;
      * A5/1 (alg 0) -> FI word-5 engine. l1_cipher_cmdpath 2=auto, 1=force cmd, 0=force w5. */
     int use_cmd = l1_cipher_cmdpath == 2 ? (alg == 2) : (l1_cipher_cmdpath != 0);
+    int rc;
 
     if (alg == 0xff) {
         cipher_w5 = 0;
@@ -1587,10 +1590,10 @@ void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
         cipher_count_load = false;
         {
             const uint16_t off[5] = { 5, 0, 0, 0, 0 };   /* stock cipher-off (harmless on w5 path) */
-            post_cmd(off);
+            rc = post_cmd(off);
         }
-        klog("dsp: cipher off");
-        return;
+        klog("dsp: cipher off%s", rc == DSP_OK ? "" : " (command ring full, cmd 5 lost)");
+        return rc;
     }
     if (use_cmd) {
         /* alg is the L3 algorithm id (0=A5/1, 1=A5/2, 2=A5/3), exactly the DSP cmd-5 arg. */
@@ -1599,9 +1602,18 @@ void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
             (uint16_t)((uint16_t)kc[0] << 8 | kc[1]), (uint16_t)((uint16_t)kc[2] << 8 | kc[3]),
             (uint16_t)((uint16_t)kc[4] << 8 | kc[5]), (uint16_t)((uint16_t)kc[6] << 8 | kc[7]) };
 
-        post_cmd(c5);
-        post_cmd(ck);                    /* loads Kc into the DSP; never logged */
-        cipher_w5 = 0;                   /* stock keeps FI word-5 = 0 during cipher (v6 + ARM-DSP
+        rc = post_cmd(c5);
+        if (rc == DSP_OK)
+            rc = post_cmd(ck);           /* loads Kc into the DSP; never logged */
+        if (rc != DSP_OK) {              /* ring full: the key load is lost, so do not
+                                          * report ciphering as on */
+            cipher_w5 = 0;
+            cipher_active = false;
+            cipher_count_load = false;
+            klog("dsp: cipher A5/%u NOT enabled: command ring full", alg + 1);
+            return rc;
+        }
+        cipher_w5 = 0;                  /* stock keeps FI word-5 = 0 during cipher (v6 + ARM-DSP
                                           * session RE) - the A5/3 unit is separate from the FI
                                           * word-5 A5/1 engine. (0x0010 was a mis-read rare value.) */
         /* The share +0x3f0 -> 0xec4c COUNT feeds the A5/1 engine ONLY (ARM-DSP session RE:
@@ -1612,7 +1624,7 @@ void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
         cipher_count_load = l1_cipher_reseed;
         cipher_active = l1_cipher_reseed;
         klog("dsp: cipher A5/%u via cmd5+0x1e", alg + 1);
-        return;
+        return DSP_OK;
     }
     for (int i = 0; i < 8; i++)
         sm_w16(CIPHER_KC_SHARE + 2u * (uint32_t)i, kc[i]);
@@ -1622,6 +1634,7 @@ void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset)
     cipher_w5 = (uint16_t)(0x8000u | ((uint16_t)((alg + 1) & 3) << 13));
     klog("dsp: cipher A5/%u enabled (w5 %04x, fn_off %lu)", alg + 1, cipher_w5,
          (unsigned long)cipher_fn_offset);
+    return DSP_OK;
 }
 
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell)

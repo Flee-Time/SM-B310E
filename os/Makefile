@@ -63,8 +63,9 @@ include ports/snes9x/snes9x.mk
 
 .SECONDEXPANSION:
 .PRECIOUS: $(BUILD)/modules/%.elf
+APP_HDRS := $(wildcard include/os/*.h) sdk/icons.h fs/ffconf.h $(FATFS)/ff.h
 $(BUILD)/modules/%.elf: $$(wildcard modules/$$*/*.c) sdk/start.c sdk/app.ld sdk/app.h \
-                     include/os/app.h include/os/ui.h
+                     $(APP_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(APP_CFLAGS) $(APP_LDFLAGS) -Wl,-Map,$(@:.elf=.map) \
 	    $(filter %.c,$^) -lgcc -o $@
@@ -75,7 +76,7 @@ $(BUILD)/modules/%.app: $(BUILD)/modules/%.elf sdk/mkapp.py
 # Apps only a test loads (os/tests/<name>.c with an APP()): built when the test
 # asks for $(BUILD)/tests/<name>.app, never put on a card by the build
 .PRECIOUS: $(BUILD)/tests/%.elf
-$(BUILD)/tests/%.elf: tests/%.c sdk/start.c sdk/app.ld sdk/app.h include/os/app.h include/os/ui.h
+$(BUILD)/tests/%.elf: tests/%.c sdk/start.c sdk/app.ld sdk/app.h $(APP_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(APP_CFLAGS) $(APP_LDFLAGS) -Wl,-Map,$(@:.elf=.map) \
 	    $(filter %.c,$^) -lgcc -o $@

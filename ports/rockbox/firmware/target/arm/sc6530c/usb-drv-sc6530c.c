@@ -1629,7 +1629,10 @@ void usb_drv_init(void)
     ep0_program();
     USB_REG(USB_TIMEOUT_LMT) = 15;
     diag_stage(7, "irq on");
+    /* read-modify-write of the shared enable mask: no IRQ in between */
+    int old = disable_irq_save();
     REG32(0x80000008) |= 1 << USB_IRQ_LINE;
+    restore_irq(old);
 }
 
 /* ---- hardware watchdog for the freeze recorder (test builds) -----------

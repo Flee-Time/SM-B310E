@@ -102,7 +102,7 @@ $$($(1)_OUT)/port/$(1)_os.o: $$($(1)_PORT)/$(1)_os.c $$(KIT_DIR)/kit_app.h sdk/a
 	$$(CC) $$(KIT_OS_CFLAGS) -MMD -MP -c $$< -o $$@
 
 $$(BUILD)/ports/$$($(1)_APP).elf: $$($(1)_OBJS) sdk/app.ld
-	$$(CC) $$(KIT_LDFLAGS) -Wl,--wrap=Bgetsysmemsize -Wl,--wrap=__aeabi_ldivmod \
+	$$(CC) $$(KIT_LDFLAGS) $$(KIT_PRINTF_FLOAT) -Wl,--wrap=Bgetsysmemsize -Wl,--wrap=__aeabi_ldivmod \
 		-Wl,--wrap=drawrooms -Wl,--wrap=drawmasks -Wl,-Map,$$(@:.elf=.map) $$($(1)_OBJS) $$(KIT_LIBS) -o $$@
 
 $$(BUILD)/ports/$$($(1)_APP).app: $$(BUILD)/ports/$$($(1)_APP).elf sdk/mkapp.py

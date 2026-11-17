@@ -100,8 +100,25 @@ static int cch_pump(l1_cell_t *c, int *burst, int finishing)
     return DSP_OK;
 }
 
+/* IMMEDIATE ASSIGNMENT REJECT (TS 44.018 9.1.20) carries up to four request
+ * references (RA + 2 frame octets, then a wait indication), from octet 4. 1 when
+ * one is our RA and frame. */
+static int imm_reject_ours(const uint8_t *d, uint8_t ra, uint32_t rach_fn)
+{
+    if (rr_msg_type(d) != RR_IMM_ASSIGN_REJ)
+        return 0;
+    for (int i = 0; i < 4; i++) {
+        const uint8_t *rr = d + 4 + 4 * i;
+
+        if (rr[0] == ra && ref_delta((uint16_t)(rr[1] << 8 | rr[2]), rach_fn) != 127)
+            return 1;
+    }
+    return 0;
+}
+
 /* Received blocks: count the good CCCH ones and look for our grant. 1 when
- * IMMEDIATE ASSIGNMENT for our RA and frame came (*ch filled), else 0. */
+ * IMMEDIATE ASSIGNMENT for our RA and frame came (*ch filled), 2 when IMMEDIATE
+ * ASSIGNMENT REJECT for it came, else 0. */
 static int take_cch(uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
                     reg_lu_progress_t *prog)
 {
@@ -111,6 +128,8 @@ static int take_cch(uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
         if ((rx.hdr[0] != 7 && rx.hdr[0] != 8) || rx.hdr[1] != 0)
             continue;
         prog->cch_blocks++;
+        if (imm_reject_ours(rx.data, ra, rach_fn))
+            return 2;
         if (rr_parse_imm_assign(rx.data, ch) == 0) {
             prog->imm_seen++;
             if (ch->ra == ra) {
@@ -129,7 +148,8 @@ static int take_cch(uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
 /* Read CCCH until an IMMEDIATE ASSIGNMENT whose request reference (RA and frame)
  * matches our RACH (sent in cell frame rach_fn) arrives, or the budget runs out.
  * Either way the block being posted is completed and the ring left LU_AHEAD
- * deep, so the next post has room. 1 + *ch filled, 0 none, or a DSP_E* error. */
+ * deep, so the next post has room. 1 + *ch filled, 2 rejected, 0 none, or a
+ * DSP_E* error. */
 static int wait_imm_assign(l1_cell_t *c, uint8_t ra, uint32_t rach_fn, rr_chan_desc_t *ch,
                            uint32_t ms, reg_lu_progress_t *prog)
 {
@@ -159,21 +179,43 @@ static int wait_imm_assign(l1_cell_t *c, uint8_t ra, uint32_t rach_fn, rr_chan_d
 /* SIM auth runs on its own thread: RUN GSM ALGORITHM blocks ~1s, and a
  * synchronous call inside the SDCCH pump would starve the frame-instruction ring
  * and break L1. The pump keeps feeding frames while this computes. One attempt
- * runs at a time, so a file-scope job is safe; reg_lu_run waits for the thread to
- * finish before returning (so the job is not reused and the SIM not freed under
- * it). */
+ * runs at a time, so a file-scope job is safe; reg_lu_run waits (bounded) for the
+ * thread to finish before returning, then retires the job's generation, so a
+ * thread that outlives that wait cannot store its old result into a newer job. */
 static struct {
     volatile int done;                  /* 0 running, 1 ok, -1 failed */
     int slot;
+    uint32_t gen;                       /* the job the running thread belongs to */
     uint8_t rand[16];
     uint8_t sres[4], kc[8];
 } sim_job;
+static mutex_t sim_job_lock;            /* the gen check and the result store as one */
 
 static void sim_auth_thread(void *arg)
 {
-    (void)arg;
-    sim_job.done = sim_run_gsm_algo(sim_job.slot, sim_job.rand, sim_job.sres,
-                                    sim_job.kc) == SIM_OK ? 1 : -1;
+    uint32_t gen = (uint32_t)(uintptr_t)arg;
+    uint8_t rand[16], sres[4], kc[8];
+    int slot, ok;
+
+    mutex_lock(&sim_job_lock, WAIT_FOREVER);
+    if (gen != sim_job.gen) {           /* already retired */
+        mutex_unlock(&sim_job_lock);
+        return;
+    }
+    slot = sim_job.slot;
+    for (int i = 0; i < 16; i++)
+        rand[i] = sim_job.rand[i];
+    mutex_unlock(&sim_job_lock);
+    ok = sim_run_gsm_algo(slot, rand, sres, kc) == SIM_OK;
+    mutex_lock(&sim_job_lock, WAIT_FOREVER);
+    if (gen == sim_job.gen) {           /* a late thread must not touch a newer job */
+        for (int i = 0; i < 4; i++)
+            sim_job.sres[i] = sres[i];
+        for (int i = 0; i < 8; i++)
+            sim_job.kc[i] = kc[i];
+        sim_job.done = ok ? 1 : -1;
+    }
+    mutex_unlock(&sim_job_lock);
 }
 
 /* Assemble the 23-byte uplink SACCH block: the 2-byte L1 header (ordered MS power
@@ -210,7 +252,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     uint8_t ul[LAPDM_BLOCK];
     uint8_t bsic = c->bsic;
     reg_lu_progress_t p = {0};
-    int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0;
+    int have_ul, sim_pending = 0, sabm_tries = 0, cm_sent = 0, cipher_on = 0;
     uint8_t last_acked_vr = 0;           /* V(R) at our last uplink: send an SDCCH RR keepalive only
                                           * when a new downlink I-frame has advanced V(R) past it,
                                           * not every window (that flooded ul to 310+; SACCH now
@@ -253,6 +295,10 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             rc = wait_imm_assign(c, ra_a, rach_fn, &ch, LU_RACH_WAIT_MS, &p);
             if (rc < 0)
                 break;
+            if (rc == 2) {              /* the network refused our request: no retry */
+                klog("lu: IMMEDIATE ASSIGNMENT REJECT for our request (att %d)", att);
+                break;
+            }
             granted = rc == 1;
         }
         if (prog)
@@ -269,6 +315,20 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     p.ch_tsc = ch.tsc;
     if (prog)
         *prog = p;
+    /* The dedicated phase below follows only a non-hopping SDCCH/8 on the serving
+     * cell's own carrier (c->index); any other grant would be worked on the wrong
+     * channel, so give up on it here. */
+    {
+        int same = 0;
+
+        for (int b = L1_BAND_GSM900; b <= L1_BAND_GSM850 && !same; b++)
+            same = l1_arfcn_index(b, ch.arfcn) == c->index;
+        if (ch.hopping || ch.chan_type != RR_CH_SDCCH8 || !same) {
+            klog("lu: grant not followable (t=%u hop=%u arfcn=%u, cell idx %u)",
+                 ch.chan_type, ch.hopping, ch.arfcn, c->index);
+            return REG_ERROR;
+        }
+    }
     /* Re-assert cell tracking (command 3) for the dedicated phase: the RACH keyed
      * the PA, which disturbs the AFC, and a drifting AFC fails the SDCCH CRC. The
      * camp before the RACH is not enough once we have transmitted. Dedicated
@@ -351,6 +411,14 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * own ~1/102 keying. With the flood paced down, SACCH's small contribution should be sustainable
      * (HW to confirm). Knob: comment this out to disarm SACCH if the decode still collapses. */
     l1_sacch_set(sacch);
+    {
+        l1_rx_t rx;
+
+        /* drop camped-phase blocks (paging, assignments) still in the receive ring:
+         * they are not SDCCH frames and must not reach LAPDm */
+        while (l1_api.rx_read(&rx) == 1)
+            ;
+    }
     /* 5: pump the SDCCH, one block a call. A real MS retransmits the SABM on
      * T200 until the UA; without it one lost block ended the attempt. Once the
      * link is up, AUTHENTICATION runs off-thread so the ring stays fed. */
@@ -358,7 +426,8 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
     last_ul = kernel_ticks();
     uint16_t prev_l3 = 0;              /* log each decoded L3 message as it arrives */
     while (kernel_ticks() - t0 < budget_ms &&
-           r->state != REG_ACCEPTED && r->state != REG_REJECTED) {
+           r->state != REG_ACCEPTED && r->state != REG_REJECTED &&
+           r->state != REG_RELEASED && r->state != REG_AUTH_REJECTED) {
         l1_dm_t st;
 
         /* Hold the dedicated channel the STOCK way (on-phone DSP logger, 2026-11-12):
@@ -425,12 +494,18 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                 sabm_tries = 0;
             }
             if (state == REG_NEED_SRES && !sim_pending) {
+                uint32_t gen;
+
                 p.reached_auth = 1;
+                mutex_lock(&sim_job_lock, WAIT_FOREVER);
+                gen = ++sim_job.gen;
                 sim_job.done = 0;
                 sim_job.slot = sim_slot;
                 for (int i = 0; i < 16; i++)
                     sim_job.rand[i] = r->rand[i];
-                if (thread_create("simauth", PRIO_NORMAL, 2048, sim_auth_thread, 0))
+                mutex_unlock(&sim_job_lock);
+                if (thread_create("simauth", PRIO_NORMAL, 2048, sim_auth_thread,
+                                  (void *)(uintptr_t)gen))
                     sim_pending = 1;
                 else
                     break;              /* could not start the SIM thread */
@@ -445,7 +520,13 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
                  * algorithm is commanded: enable the cipher (l1_cipher_set posts cmd 5+0x1e),
                  * then send CIPHERING MODE COMPLETE enciphered (the DSP ciphers TX from here). */
                 if (r->ciph_sc) {
-                    l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset);  /* A5 before COMPLETE */
+                    cipher_on = 1;      /* switched off again on the way out */
+                    if (l1_cipher_set(r->kc, r->ciph_alg, c->fn_offset) != DSP_OK) {
+                        /* A5 before COMPLETE: the key load was lost, so a COMPLETE now
+                         * would not be enciphered */
+                        klog("lu: cipher enable failed - ending the attempt");
+                        break;
+                    }
                     l1_rxhdrlog = 1;    /* from here, log raw SNR/BFI per block: diagnose whether
                                          * the ciphered LU ACCEPT is lost to RF or keystream */
                 }
@@ -482,7 +563,7 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
          *       AUTHENTICATION RESPONSE / CIPHERING MODE COMPLETE must be resent);
          *   (c) otherwise send an RR keep-alive on every free uplink opportunity,
          *       which also keeps our N(R) ack flowing so the network advances.
-         * (b) resends sabm[] - the last real frame built - only while it is still
+         * (b) resends the outstanding I-frame (dl.tx) only while it is still
          * unacked, so an already-acked I-frame is not blindly repeated (which
          * desynced N(S) before); (c) touches no sequence state. */
         if (!have_ul && r->dl.state != LAPDM_ESTABLISHED &&
@@ -493,8 +574,11 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
             sabm_tries++;
         } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED && r->dl.tx_pending &&
                    kernel_ticks() - last_ul >= LU_T200_MS) {
-            for (int i = 0; i < LAPDM_BLOCK; i++)
-                ul[i] = sabm[i];
+            /* resend the outstanding I-frame itself (dl.tx, N(S) = V(S)-1, current
+             * N(R)), not sabm[]: an RR answering a repeated downlink frame overwrites
+             * sabm[], and the RR would then be resent instead */
+            lapdm_encode(ul, r->dl.sapi, 0, (uint8_t)((r->dl.vr & 7) << 5 | LAPDM_PF |
+                         ((r->dl.vs + 7) & 7) << 1), r->dl.tx, r->dl.tx_len);
             have_ul = 1;
         } else if (!have_ul && r->dl.state == LAPDM_ESTABLISHED &&
                    r->dl.vr != last_acked_vr && reg_keepalive(r, ul) > 0) {
@@ -535,7 +619,19 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
         if (prog)
             *prog = p;
     }
+    /* A reply built with the ACCEPT (TMSI REALLOCATION COMPLETE, or the ack) ends
+     * the loop above before it reaches L1: send it now, bounded (~1 s). */
+    for (int w = 0; have_ul && r->state == REG_ACCEPTED && w < 8; w++) {
+        l1_dm_t st;
+
+        if (l1_api.dm_sched(c, ch.subch, ch.tn, ch.tsc, bsic, LU_BLOCK_MS, ul, &st) != DSP_OK)
+            break;
+        if (st.ul_done)
+            have_ul = 0;
+    }
     l1_sacch_set(0);                     /* disarm: sacch[] leaves scope on return */
+    if (cipher_on)
+        l1_cipher_set(r->kc, 0xff, 0);    /* the defined cipher-off: no A5 state left over */
     l1_fi_fn_offset = 0;                  /* back to local FI stamps: camp resumes without a
                                           * fresh l1_cell_sync, so clear the dedicated absolute
                                           * offset here too or camp FIs point at wrong frames. */
@@ -544,8 +640,14 @@ int reg_lu_run(gsm_reg_t *r, l1_cell_t *c, int cell_slot, int sim_slot,
      * bounded, since sim_run_gsm_algo self-times-out (SIM_ETIMEOUT) anyway */
     for (int w = 0; sim_pending && !sim_job.done && w < 600; w++)
         thread_sleep(5);
+    mutex_lock(&sim_job_lock, WAIT_FOREVER);
+    sim_job.gen++;                        /* retire the job: a thread still running drops
+                                           * its result instead of storing it */
+    mutex_unlock(&sim_job_lock);
     if (prog)
         *prog = p;
     return r->state == REG_ACCEPTED ? REG_ACCEPTED :
-           r->state == REG_REJECTED ? REG_REJECTED : REG_ERROR;
+           r->state == REG_REJECTED ? REG_REJECTED :
+           r->state == REG_RELEASED ? REG_RELEASED :
+           r->state == REG_AUTH_REJECTED ? REG_AUTH_REJECTED : REG_ERROR;
 }

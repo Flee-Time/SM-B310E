@@ -709,6 +709,8 @@ static void scan(void)
 
             if (fi.fattrib & (AM_DIR | AM_HID | AM_SYS) || !is_bin(fi.fname))
                 continue;
+            if (strlen(fi.fname) >= NAME_LEN)   /* a cut name would not open */
+                continue;
             str_copy(it.name, fi.fname, NAME_LEN);
             it.size = (uint32_t)fi.fsize;
             for (i = nitems; i > 0 && before(&it, &items[i - 1]); i--)

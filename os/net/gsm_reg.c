@@ -60,10 +60,13 @@ int reg_begin(gsm_reg_t *r, uint8_t out[LAPDM_BLOCK])
 }
 
 /* Send an L3 message up to the network as a LAPDm I-frame (overrides any L2 ack
- * that lapdm_receive just produced in out). */
+ * that lapdm_receive just produced in out). Every caller answers a network
+ * command, a mandatory response: clear a stale tx-pending first, as reg_sres and
+ * reg_cipher_complete do, or lapdm_send returns 0 and the answer is lost. */
 static void send_l3(gsm_reg_t *r, const uint8_t *l3, int len, uint8_t out[LAPDM_BLOCK],
                     int *out_valid)
 {
+    r->dl.tx_pending = 0;
     if (lapdm_send(&r->dl, l3, len, out) == LAPDM_BLOCK)
         *out_valid = 1;
 }
@@ -78,7 +81,7 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
     *out_valid = ov;
     if (r->state == REG_WAIT_UA && r->dl.state == LAPDM_ESTABLISHED)
         r->state = REG_RUNNING;
-    if (deliver != 1)
+    if (deliver != 1 || l3len < 2)      /* no PD + message type: nothing to parse */
         return r->state;
 
     r->last_pd = (uint8_t)(l3[0] & 0x0f);
@@ -104,6 +107,15 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
             if (mm_parse_auth_request(l3, l3len, r->rand) == 0)
                 r->state = REG_NEED_SRES;
             break;
+        case MM_AUTH_REJECT:            /* the network refused our SRES: attempt over */
+            r->state = REG_AUTH_REJECTED;
+            break;
+        case MM_TMSI_REALLOC_CMD: {     /* confirm it, as for a TMSI in the ACCEPT */
+            uint8_t c[2];
+
+            send_l3(r, c, mm_encode_tmsi_realloc_complete(c), out, out_valid);
+            break;
+        }
         case MM_IDENTITY_REQUEST: {
             uint8_t resp[LAPDM_N201];
             int type = l3len > 2 ? (l3[2] & 0x07) : MI_TYPE_IMSI;
@@ -152,6 +164,9 @@ int reg_rx(gsm_reg_t *r, const uint8_t in[LAPDM_BLOCK], uint8_t out[LAPDM_BLOCK]
              * A5/3 and commands A5/3, which we cannot complete. */
             uint8_t msg[6];
             send_l3(r, msg, rr_encode_classmark_change(msg, r->classmark1), out, out_valid);
+        } else if (l3[1] == RR_CHAN_RELEASE && r->state != REG_ACCEPTED &&
+                   r->state != REG_REJECTED) {
+            r->state = REG_RELEASED;    /* the network ended the exchange: stop now */
         }
     }
     return r->state;

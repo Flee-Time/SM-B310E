@@ -68,6 +68,7 @@ for f in "${files[@]}"; do
         continue
     fi
     cp -f "$src" "$dst"
+    sync
     h1=$(sha256sum "$src" | awk '{print $1}')
     h2=$(sha256sum "$dst" | awk '{print $1}')
     if [[ "$h1" == "$h2" ]]; then

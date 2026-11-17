@@ -71,9 +71,11 @@ typedef struct {
     char line[LINE_MAX + 1];
     char cwd[PATH_MAX];
     char path[PATH_MAX], path2[PATH_MAX];
+    uint32_t last_rx;                   /* kernel_ticks of its last input at the prompt */
 } sess_t;
 
 static sess_t sess[SESS_N];
+static volatile bool turned_away;      /* a connection got "busy" */
 static thread_t *server;
 static sem_t server_exited;
 
@@ -196,14 +198,41 @@ static bool interrupted(sess_t *s, uint32_t wait_ms)
     return b != NET_EAGAIN;
 }
 
+/* There is no TCP keepalive: a PC gone without FIN or RST holds its slot for
+ * ever. Once a connection was turned away as busy, the session idle longest at
+ * the prompt, if over IDLE_DROP_MS, ends to make room. */
+#define IDLE_DROP_MS (10 * 60 * 1000u)
+static bool idle_drop(sess_t *s)
+{
+    uint32_t now = kernel_ticks(), idle = now - s->last_rx;
+
+    if (!turned_away || idle < IDLE_DROP_MS)
+        return false;
+    for (int i = 0; i < SESS_N; i++)
+        if (sess[i].used && &sess[i] != s && now - sess[i].last_rx > idle)
+            return false;
+    turned_away = false;
+    return true;
+}
+
 /* One line, with the telnet port's echo and editing; false at the end. */
 static bool read_line(sess_t *s)
 {
     int n = 0;
+    bool over = false;                  /* longer than LINE_MAX: a cut line is not run */
 
+    s->last_rx = kernel_ticks();
     for (;;) {
-        int b = get_byte(s, WAIT_FOREVER);
+        int b = get_byte(s, 60000);
 
+        if (b == NET_EAGAIN) {
+            if (idle_drop(s)) {
+                s->quit = true;
+                return false;
+            }
+            continue;
+        }
+        s->last_rx = kernel_ticks();
         if (b < 0)
             return false;
         if (s->cr && (b == '\n' || b == 0)) {   /* CR LF, CR NUL */
@@ -215,12 +244,18 @@ static bool read_line(sess_t *s)
             s->cr = b == '\r';
             if (s->telnet)
                 out_text(s, "\n", 1);
+            if (over) {
+                say(s, "ERR line longer than %d bytes, not run\n", LINE_MAX);
+                n = 0;
+            }
             s->line[n] = 0;
             return true;
         }
         if (!s->telnet) {
             if (n < LINE_MAX)
                 s->line[n++] = (char)b;
+            else
+                over = true;
             continue;
         }
         if (b == 8 || b == 127) {               /* Backspace */
@@ -231,6 +266,7 @@ static bool read_line(sess_t *s)
         } else if (b == 3) {                    /* Ctrl-C */
             out_text(s, "^C\n" PROMPT, 3 + sizeof(PROMPT) - 1);
             n = 0;
+            over = false;
         } else if (b == 4 && n == 0) {          /* Ctrl-D */
             strncpy(s->line, "exit", sizeof(s->line));
             out_text(s, "\n", 1);
@@ -238,6 +274,8 @@ static bool read_line(sess_t *s)
         } else if (b >= 32 && b < 127 && n < LINE_MAX) {
             s->line[n++] = (char)b;
             put_byte(s, (char)b);
+        } else if (b >= 32 && b < 127) {
+            over = true;
         }
         if (s->in_pos == s->in_len)
             flush(s);                           /* the echo, now */
@@ -248,6 +286,22 @@ static int read_exact(sess_t *s, uint8_t *buf, int n)
 {
     int got = 0;
 
+    /* the command ended with CR: its LF (skipped by the next read_line) is not data */
+    if (s->cr && n > 0) {
+        s->cr = false;
+        if (s->in_pos == s->in_len) {
+            int r = tcp_read(s->c, s->in, sizeof(s->in), 10000);
+
+            if (r <= 0) {
+                s->quit = true;
+                return -1;
+            }
+            s->in_len = r;
+            s->in_pos = 0;
+        }
+        if (s->in[s->in_pos] == '\n')
+            s->in_pos++;
+    }
     while (got < n) {
         if (s->in_pos < s->in_len) {
             int k = s->in_len - s->in_pos < n - got ? s->in_len - s->in_pos : n - got;
@@ -319,8 +373,10 @@ static bool resolve(sess_t *s, const char *p, char *out)
         n = snprintf(tmp, sizeof(tmp), "%s", p);
     else
         n = snprintf(tmp, sizeof(tmp), "%s/%s", s->cwd, p);
-    if (n >= (int)sizeof(tmp))
+    if (n >= (int)sizeof(tmp)) {
+        say(s, "ERR path too long\n");  /* the callers return without a word */
         return false;
+    }
     out[0] = 0;
     for (char *seg = tmp; *seg; ) {
         char *end = seg;
@@ -338,8 +394,10 @@ static bool resolve(sess_t *s, const char *p, char *out)
                 o--;
             out[o] = 0;
         } else {
-            if (o + 1 + len >= PATH_MAX)
+            if (o + 1 + len >= PATH_MAX) {
+                say(s, "ERR path too long\n");
                 return false;
+            }
             out[o++] = '/';
             memcpy(out + o, seg, (size_t)len);
             o += len;
@@ -481,6 +539,8 @@ static void c_txburst(sess_t *s, int argc, char **argv)
         goto stop;
     }
     txb_idle(300);                      /* let the frame clock settle */
+    if (net_stopping)                   /* net_stop waits only 5 s for the session */
+        goto stop;
     index = l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 : L1_BAND_GSM900, (int)arfcn);
     ukhz = band == 1 ? 1710200L + 200L * ((long)arfcn - 512) :
            890000L + 200L * ((long)arfcn - (arfcn >= 975 ? 1024L : 0L));   /* E-GSM: n - 1024 */
@@ -504,10 +564,14 @@ static void c_txburst(sess_t *s, int argc, char **argv)
             goto stop;
         }
         rxlev = l1_rxlev_measure(cidx, 6, 600);
+        if (net_stopping)
+            goto stop;
         if (l1_cell_sync(&tc, cidx, l1_gain_for_rxlev(rxlev), 0, 2000) != 1) {
             say(s, "txburst: camp: no sync on index %u (rxlev %d)\n", cidx, rxlev);
             goto stop;
         }
+        if (net_stopping)
+            goto stop;
         slot = tc.slot;
         rc = l1_cell_track(tc.slot, (uint8_t)(2 * tc.gain));
         memset(&st, 0, sizeof st);
@@ -521,7 +585,7 @@ static void c_txburst(sess_t *s, int argc, char **argv)
         "index %u, word 7 bits 15:10 = 0x%02x, PCL %d; firing %lu burst(s), ~20 ms apart...\n",
         modename[mode], (unsigned long)band, (unsigned long)arfcn, ukhz, ukhz / 2, index,
         l1_access_w7hi, pcl, (unsigned long)count);
-    for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t i = 0; i < count && !net_stopping; i++) {
         if (l1_access_post(index, slot, 0, 0x3f) == DSP_OK) /* BSIC 0: no BTS takes it */
             ok++;
         txb_idle(20);                   /* space the bursts; keep the clock alive */
@@ -621,6 +685,8 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
         goto stop;
     }
     txb_idle(300);
+    if (net_stopping)                   /* net_stop waits only 5 s for the session */
+        goto stop;
     index = l1_arfcn_index(band == 1 ? L1_BAND_DCS1800 : L1_BAND_GSM900, (int)arfcn);
     if (index == L1_NO_INDEX) {
         say(s, "rxcell: no index for band %lu arfcn %lu\n",
@@ -628,6 +694,8 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
         goto stop;
     }
     rxlev = l1_rxlev_measure(index, 6, 600);
+    if (net_stopping)
+        goto stop;
     if (!gain)
         gain = l1_gain_for_rxlev(rxlev);
     {
@@ -638,7 +706,7 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
             " in %lu ms\n", (unsigned long)band, (unsigned long)arfcn, index, rxlev,
             rxlev - 110, (unsigned long)gain, synced, (unsigned long)(kernel_ticks() - ts));
     }
-    if (synced == 1) {
+    if (synced == 1 && !net_stopping) {
         say(s, "  SCH ok: BSIC %u (NCC %u BCC %u), frame offset %lu\n", c->bsic,
             c->bsic >> 3, c->bsic & 7, (unsigned long)c->fn_offset);
         l1_cell_read(c, 24, L1_SI3 | L1_SI4, 3000);
@@ -647,8 +715,8 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
             c->ci, (unsigned long)c->good, (unsigned long)c->bad);
         /* receive only: the channel the grant comes on; with TRACK, again after
          * command 3 (camping: the AFC follows the cell), to compare */
-        for (int pass = 0; cch_s && pass < (track ? 2 : 1); pass++) {
-            l1_cch_t st;
+        for (int pass = 0; cch_s && pass < (track ? 2 : 1) && !net_stopping; pass++) {
+            l1_cch_t st, part;
             int32_t h7;
             uint32_t n7;
 
@@ -657,7 +725,19 @@ static void c_rxcell(sess_t *s, int argc, char **argv)
                     l1_cell_track(c->slot, (uint8_t)(2 * c->gain)));
             memset(&st, 0, sizeof st);
             l1_cch_hdr7(&h7, &n7);      /* reset */
-            rc = l1_cch_read(c, cch_s * 1000u, &st);
+            /* a second at a time, so a network stop ends it within net_stop's 5 s */
+            rc = DSP_OK;
+            for (uint32_t sec = 0; sec < cch_s && rc == DSP_OK && !net_stopping; sec++) {
+                rc = l1_cch_read(c, 1000, &part);
+                st.blocks += part.blocks;
+                st.bad += part.bad;
+                st.paging += part.paging;
+                st.imm_assign += part.imm_assign;
+                st.filler += part.filler;
+                st.other += part.other;
+            }
+            if (net_stopping)
+                goto stop;
             l1_cch_hdr7(&h7, &n7);
             say(s, "  CCCH %lus%s: %lu good / %lu bad, %lu grants, %lu paging, hdr+0e avg %ld"
                 " (rc %d)\n", (unsigned long)cch_s, pass ? " tracked" : "",
@@ -1561,6 +1641,7 @@ static void c_reboot(sess_t *s, int argc, char **argv)
  * (/prof.bin): "PROF", the samples, the ms, the apps (name[20], image, size: their
  * pcs are offsets into the .elf), then the samples' pc and lr */
 #define PROF_MAX 16384
+static bool prof_busy;                  /* prof_buf/prof_n/prof_cap are one set: one prof at a time */
 static void c_prof(sess_t *s, int argc, char **argv)
 {
     uint32_t secs = 0, t0, ms, n, head[4];
@@ -1578,8 +1659,20 @@ static void c_prof(sess_t *s, int argc, char **argv)
     }
     if (!need_card(s) || !resolve(s, argc > 2 ? argv[2] : "/prof.bin", s->path))
         return;
+    {
+        uint32_t irq = arch_irq_save();
+        bool busy = prof_busy;
+
+        prof_busy = true;
+        arch_irq_restore(irq);
+        if (busy) {
+            say(s, "ERR prof is already running\n");
+            return;
+        }
+    }
     n = secs * 1000 < PROF_MAX ? secs * 1000 : PROF_MAX;
     if (!(buf = kmalloc(n * 8))) {
+        prof_busy = false;
         say(s, "ERR out of memory\n");
         return;
     }
@@ -1595,6 +1688,7 @@ static void c_prof(sess_t *s, int argc, char **argv)
     ms = kernel_ticks() - t0;
     n = prof_n;
     prof_buf = NULL;
+    prof_busy = false;                  /* buf is ours alone from here */
     while (app_span(apps, &name, &base, &size))
         apps++;
     head[0] = 0x464f5250;               /* "PROF" */
@@ -1742,8 +1836,10 @@ static void session(void *arg)
         tcp_close(s->c);
     }
     net_stat.shell_open--;
-    s->used = false;
+    /* post first: once used is false the server may sem_init the slot for a new
+     * session, and a post after that would be the new session's */
     sem_post(&s->exited);
+    s->used = false;
     thread_exit();
 }
 
@@ -1761,6 +1857,7 @@ static void server_main(void *arg)
         if (!s) {
             static const char busy[] = "busy: three sessions are open\r\n";
 
+            turned_away = true;         /* a long-idle session may end (idle_drop) */
             tcp_write(c, busy, sizeof(busy) - 1);
             tcp_flush(c, 500);
             tcp_close(c);

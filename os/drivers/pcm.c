@@ -86,7 +86,8 @@ void audio_drop_code(const void *base, size_t size)
 
     if (running && (uintptr_t)fill - lo < size)
         audio_play_stop();
-    if (rec_running && (uintptr_t)sink - lo < size)
+    /* also after a DMA error ended it: the route is still on (audio_record_stop) */
+    if ((rec_running || rec_failed) && (uintptr_t)sink - lo < size)
         audio_record_stop();
 }
 
@@ -297,6 +298,9 @@ int audio_play(unsigned rate, audio_fill_fn f, void *ctx)
     if (!f || !audio_rate_ok(rate))
         return -1;
     audio_play_stop();
+    /* All in the codec's mutex: a killed app thread dies at its release,
+     * after starting is cleared, not at audio_power's or set_rate's. */
+    audio_lock();
     /* until running is set, so no other thread closes the codec under the DMA */
     starting = true;
     audio_power(true);
@@ -317,6 +321,7 @@ int audio_play(unsigned rate, audio_fill_fn f, void *ctx)
     VBC_CTRL = (VBC_CTRL & ~VBC_CPU_ACCESS) | VBC_PLAY;
     irq_update();
     arch_irq_restore(s);
+    audio_unlock();
     return 0;
 }
 
@@ -340,9 +345,13 @@ int audio_record(unsigned rate, int source, audio_sink_fn f, void *ctx)
 {
     uint32_t s;
 
-    if (!f || rate % 4000 || !audio_rate_ok(rate))
-        return -1;                      /* the ADC runs at multiples of 4 kHz */
+    if (!f || rate % 4000 || rate / 4000 > 15 || !audio_rate_ok(rate))
+        return -1;                      /* the ADC runs at 4 kHz multiples, up to 60 kHz */
     audio_record_stop();
+    /* All in the codec's mutex: a killed app thread dies at its release,
+     * with rec_running set (audio_drop_code closes it), not with the route
+     * on and nothing to close it. */
+    audio_lock();
     audio_power(true);
     audio_set_rate(rate);
     audio_record_route(source);
@@ -362,6 +371,7 @@ int audio_record(unsigned rate, int source, audio_sink_fn f, void *ctx)
     rec_running = true;
     irq_update();
     arch_irq_restore(s);
+    audio_unlock();
     return 0;
 }
 

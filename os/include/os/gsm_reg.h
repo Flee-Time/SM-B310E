@@ -23,6 +23,8 @@ enum {
     REG_REJECTED,           /* LOCATION UPDATING REJECT (see reject_cause) */
     REG_ERROR,
     REG_NEED_CIPHER,       /* CIPHERING MODE COMMAND seen; enable A5 + send COMPLETE */
+    REG_RELEASED,          /* RR CHANNEL RELEASE before ACCEPT/REJECT: attempt over */
+    REG_AUTH_REJECTED,     /* MM AUTHENTICATION REJECT: attempt over */
 };
 
 typedef struct {

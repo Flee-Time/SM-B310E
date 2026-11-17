@@ -65,6 +65,8 @@ static void load(browser_t *b)
     size_t used = 0, cap = 4096;
     int n = 0;
 
+    /* an early return must not leave an old count over a new table */
+    b->list.count = 0;
     b->entries = kzalloc(MAX_ENTRIES * sizeof(entry_t));
     b->names = kmalloc(cap);
     if (!b->entries || !b->names) {
@@ -73,8 +75,10 @@ static void load(browser_t *b)
     }
     for (int pass = 0; pass < 2; pass++) {
         b->error = f_opendir(&dir, b->path);
-        if (b->error != FR_OK)
+        if (b->error != FR_OK) {
+            b->list.count = n;      /* the folders the first pass filled */
             return;
+        }
         while (n < MAX_ENTRIES && f_readdir(&dir, &fi) == FR_OK && fi.fname[0]) {
             bool is_dir = fi.fattrib & AM_DIR;
             size_t len = strlen(fi.fname) + 1;
@@ -418,6 +422,8 @@ static void paste(browser_t *b)
     }
     if ((r = f_open(&cp.src, clip, FA_READ)) != FR_OK || !(cp.buf = kmalloc(COPY_CHUNK))) {
         klog("files: paste from %s: %s %d", clip, r ? "FatFs" : "no memory", (int)r);
+        if (r == FR_OK)                 /* opened, then no memory */
+            f_close(&cp.src);
         f_close(&cp.dst);
         f_unlink(cp.to);
         ui_message("Paste", "Could not copy it.");

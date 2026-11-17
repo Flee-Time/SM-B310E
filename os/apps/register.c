@@ -94,7 +94,7 @@ static const struct { uint16_t lo, hi; } band900[] = { { 0, 124 }, { 499, 547 } 
 
 enum { P_IDLE, P_SIM, P_DSP, P_SCAN, P_FIND, P_TX, P_DONE };
 enum { RES_NONE, RES_NO_SIM, RES_RADIO_FAIL, RES_NO_CELL, RES_ACCEPTED,
-       RES_REJECTED, RES_NO_RESPONSE };
+       RES_REJECTED, RES_NO_RESPONSE, RES_RELEASED, RES_AUTH_REJECTED };
 
 static volatile struct {
     uint8_t phase, result, busy, runs;
@@ -781,7 +781,9 @@ static void worker(void *arg)
          reg.last_pd, reg.last_mtype, reg.state);
     reg_ui.reject_cause = reg.reject_cause;
     reg_ui.result = rc == REG_ACCEPTED ? RES_ACCEPTED :
-                    rc == REG_REJECTED ? RES_REJECTED : RES_NO_RESPONSE;
+                    rc == REG_REJECTED ? RES_REJECTED :
+                    rc == REG_RELEASED ? RES_RELEASED :
+                    rc == REG_AUTH_REJECTED ? RES_AUTH_REJECTED : RES_NO_RESPONSE;
 
 done:
     dsp_stop();
@@ -873,6 +875,8 @@ static void result_line(const char **msg, uint32_t *color)
     switch (reg_ui.result) {
     case RES_ACCEPTED:    *msg = "Registered"; *color = C_OK; return;
     case RES_NO_RESPONSE: *msg = "Not registered"; *color = C_WARN; return;
+    case RES_RELEASED:    *msg = "Released by network"; *color = C_WARN; return;
+    case RES_AUTH_REJECTED: *msg = "Authentication rejected"; *color = C_BAD; return;
     case RES_NO_CELL:     *msg = "No home cell found"; *color = C_WARN; return;
     case RES_NO_SIM:      *msg = "SIM not ready"; *color = C_BAD; return;
     case RES_RADIO_FAIL:  *msg = "Radio did not start"; *color = C_BAD; return;
@@ -982,8 +986,10 @@ static screen_t screen = {
 
 screen_t *app_register(void)
 {
+    if (reg_ui.busy)                    /* a worker still runs: keep its state, so
+                                         * Register stays refused until it ends */
+        return &screen;
     reg_ui.runs = 0;
-    reg_ui.busy = 0;
     reg_ui.phase = P_IDLE;
     reg_ui.result = RES_NONE;
     reg_ui.arfcn_index = L1_NO_INDEX;

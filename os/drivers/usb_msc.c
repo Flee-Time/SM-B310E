@@ -459,6 +459,7 @@ void usb_msc_run(void)
     bool armed = false;
 
     ejected = false;
+    ahead_ok = ahead_asked = false;     /* buf[0] is new, the card may have changed */
     usb_msc_reset();
     while (!usb_stopping()) {
         cmd_t c;

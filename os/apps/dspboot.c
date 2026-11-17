@@ -53,9 +53,16 @@ static void worker(void *arg)
     dspboot_status.busy = 0;
 }
 
+static bool in_use;                     /* the last start was refused: DSP in use */
+
 static void start(void)
 {
     if (dspboot_status.busy)
+        return;
+    /* A registration or radio scan owns the DSP: dsp_boot would reset and
+     * re-download it under that thread (as register.c / gsmstatus.c refuse). */
+    in_use = dsp_info.state == DSP_BOOTING || dsp_info.state == DSP_RUNNING;
+    if (in_use)
         return;
     dspboot_status.busy = 1;
     if (!thread_create("dspboot", PRIO_NORMAL, 2048, worker, NULL))
@@ -78,6 +85,9 @@ static void draw(screen_t *s)
     if (dspboot_status.busy) {
         snprintf(buf, sizeof(buf), "%s", p->phase < 7 ? phases[p->phase] : "...");
         c = C_TEXT;
+    } else if (in_use) {
+        snprintf(buf, sizeof(buf), "DSP in use");
+        c = C_WARN;
     } else if (!dspboot_status.runs) {
         snprintf(buf, sizeof(buf), "-");
         c = C_TEXT;

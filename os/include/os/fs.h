@@ -15,6 +15,9 @@
 #include "ff.h"
 
 void disk_set_readahead(LBA_t first, LBA_t count);     /* fs/diskio.c */
+void disk_suspend(bool on);                             /* fs/diskio.c */
+void ff_volume_lock(int vol);                           /* fs/ffsystem.c */
+void ff_volume_unlock(int vol);
 
 #define OS_DIR      "/b310e-os"
 #define OS_LOG      OS_DIR "/log.txt"

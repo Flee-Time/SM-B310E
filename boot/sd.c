@@ -191,6 +191,7 @@ int card_open(void)
         }
     }
     for (tries = 0; tries < 30; tries++) {
+        r[0] = 0;                       /* not copied when INT_ERR is set */
         st = command(CMD8, 0x1aa, INT_COMMON, NULL, 0, r);
         if (st & INT_CMD_TIMEOUT) {
             ms_wait(20);

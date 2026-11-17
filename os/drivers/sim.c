@@ -463,7 +463,8 @@ static int t0(const uint8_t hdr[5], const uint8_t *data, uint8_t *resp, int *got
     SIM_WDT = 0x803;
     if (!sim_send(hdr, 5))
         return SIM_ETIMEOUT;
-    for (int nulls = 0; nulls < 100;) {
+    /* Every procedure byte counts: an ACK after the last byte moves nothing. */
+    for (int nulls = 0, pbs = 0; nulls < 100 && pbs < 100 + len; pbs++) {
         int pb = sim_getc(WWT_MS);
 
         if (pb < 0)
@@ -544,6 +545,8 @@ int sim_run_gsm_algo(int slot, const uint8_t rand[16], uint8_t sres[4], uint8_t 
         return sw;
     hdr[1] = 0xc0;                                      /* GET RESPONSE */
     hdr[4] = (uint8_t)(sw & 0xff);
+    if (hdr[4] < 12 || hdr[4] > sizeof(resp))           /* 0 means 256 */
+        return SIM_EPROTO;
     sw = sim_apdu(slot, hdr, 0, resp, &got);
     if (sw < 0)
         return sw;

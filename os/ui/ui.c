@@ -188,8 +188,20 @@ void ui_push_urgent(screen_t *s)
 
 void ui_push(screen_t *s)
 {
-    if (!s || depth >= MAX_DEPTH + (urgent_push ? 1 : 0))
+    if (!s || depth >= MAX_DEPTH + (urgent_push ? 1 : 0)) {
+        /* not pushed: released as ui_pop would, or it leaks with its data */
+        if (s && s->free_on_pop) {
+            app_t *a = s->app ? s->app : app_self();
+
+            if (a) {
+                collect = true;
+                app_forget(a, s);
+            }
+            kfree(s);
+        }
         return;
+    }
+    held_key = 0;                       /* a held key's repeat is not the new screen's */
     if (depth && top_mode() & UI_MODE_RAW_KEYS)
         raw_release_all(stack[depth - 1], kernel_ticks());  /* a game lets go of its keys */
     if (!s->app)
@@ -242,6 +254,7 @@ void ui_pop(void)
     if (depth <= 1)
         return;
     s = stack[--depth];
+    held_key = 0;                       /* nor the screen's under it */
     ui_screen_mode(s, 0);
     if (s->leave)
         AS_OWNER(s, s->leave(s));
@@ -985,10 +998,10 @@ static void every_second(uint32_t now)
 {
     static unsigned n;
     uint32_t timeout = (uint32_t)ui_settings.screen_timeout_s * 1000u;
-    int h, m, sec;
+    rtc_datetime_t t;
 
-    rtc_time(&h, &m, &sec);
-    alarm_check(h, m);
+    rtc_get(&t);                        /* carry-safe: rtc_time can read 11:00 as 11:59 */
+    alarm_check(t.hour, t.min);
     usb_auto_tick();
     notify_tick();
     audio_idle_tick();

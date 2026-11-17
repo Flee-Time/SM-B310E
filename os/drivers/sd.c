@@ -28,17 +28,24 @@ static bool present;
 static int init_code = -1;
 static sd_stats_t stats;
 
-int sd_init(void)
+/* Controller and card probe. Also the runtime recovery in transfer(), which
+ * holds the lock: so it must not touch the mutex. */
+static int probe(void)
 {
     uint32_t s;
 
-    mutex_init(&lock);
     s = arch_irq_save();                /* the probe must not see the tick */
     sdio_init();
     init_code = sdcard_init();
     arch_irq_restore(s);
     present = init_code == 0;
     return init_code;
+}
+
+int sd_init(void)
+{
+    mutex_init(&lock);                  /* once, at boot */
+    return probe();
 }
 
 bool sd_present(void)
@@ -119,7 +126,7 @@ static int transfer(uint32_t lba, uint8_t *buf, unsigned count, bool write)
                  * wedged (an RF TX burst does this). Re-initialise once, as a
                  * reset does, and retry before giving up — so a transmit no
                  * longer leaves the card unreadable until a reboot. */
-                if (!reinit && sd_init() == 0) {
+                if (!reinit && probe() == 0) {
                     reinit = true;      /* recovered; stats.reinits counts it */
                     stats.reinits++;
                     tries = 0;

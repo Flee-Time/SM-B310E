@@ -99,6 +99,13 @@ static unsigned bcd(const char *digits, uint8_t *out, unsigned max,
 static void card_file_data(Sc6530SimState *s, uint8_t *data, unsigned len)
 {
     memset(data, 0xff, len);
+    if (len == 0) {
+        /*
+         * P3 = 0 means 256 bytes in GSM 11.11, more than the 64-byte RX
+         * FIFO holds; answer no data, and never let len - 1 wrap below.
+         */
+        return;
+    }
     if (s->file == 0x2fe2) {
         bcd(s->iccid_prop ? s->iccid_prop : "8901260123456789012",
             data, len, -1);

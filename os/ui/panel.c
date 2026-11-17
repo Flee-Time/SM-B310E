@@ -244,8 +244,13 @@ static void adjust(int c, int d)
 
 static void key(screen_t *s, const key_event_t *ev)
 {
-    int n = notes();
-    notify_t *note = sel < n ? notify_get(sel) : NULL;
+    const notify_t *drawn = sel_note;   /* the one on screen when the key came */
+    int n;
+    notify_t *note;
+
+    follow_sel();                       /* sel and act_sel for the list as it is now */
+    n = notes();
+    note = sel < n ? notify_get(sel) : NULL;
 
     switch (ev->code) {
     case KEY_UP:
@@ -273,6 +278,8 @@ static void key(screen_t *s, const key_event_t *ev)
     }
     case KEY_CENTER:
     case KEY_LSOFT:
+        if (note != drawn)              /* the row changed under the key: shown first */
+            break;
         if (note)
             notify_run(note, act_sel);
         else if (sel - n == P_TORCH)

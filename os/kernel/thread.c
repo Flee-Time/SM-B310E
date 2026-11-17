@@ -442,6 +442,7 @@ void thread_exit(void)
     arch_irq_save();
     ready_remove(t);
     t->state = T_DEAD;
+    t->name = "(dead)";                 /* its own may be in an app freed before the idle thread frees t */
     t->next = zombies;
     zombies = t;
     if (t->owner && thread_owned_exit)
@@ -471,6 +472,7 @@ static void kill_thread(thread_t *t)
     }
     t->blocked_on = NULL;
     t->state = T_DEAD;
+    t->name = "(dead)";                 /* as thread_exit: the app may be freed */
     t->next = zombies;
     zombies = t;
     if (waited && waited->owner)

@@ -50,6 +50,18 @@ static void leave(void)
     mutex_unlock(&lock);
 }
 
+/* pcm.c: a start done whole inside the lock, so a killed app thread dies
+ * only after it (mutex_unlock), never half-way with the codec held. */
+void audio_lock(void)
+{
+    enter();
+}
+
+void audio_unlock(void)
+{
+    leave();
+}
+
 static void adi_update(uint32_t addr, uint16_t mask, uint16_t bits)
 {
     uint32_t s = arch_irq_save();
@@ -102,8 +114,12 @@ bool audio_headphones(void)
 
 void audio_mute(bool mute)
 {
-    /* Stock 0x8131e: ramp controller on (15), mute request (14). */
+    /* Stock 0x8131e: ramp controller on (15), mute request (14). Masked:
+     * the DMA interrupt mutes too (play_hw_stop). */
+    uint32_t s = arch_irq_save();
+
     VBC_DP_CTL = (VBC_DP_CTL & ~CODEC_MUTE) | (mute ? CODEC_MUTE : 0x8000u);
+    arch_irq_restore(s);
 }
 
 static void set_rate(unsigned rate)
@@ -112,12 +128,16 @@ static void set_rate(unsigned rate)
         96000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 9600, 8000,
     };
 
-    /* ADC_CTL[3:0] = rate / 4000 (stock 0x81220), when a multiple of 4 kHz */
-    if (rate % 4000 == 0 && rate / 4000 >= 1 && rate / 4000 <= 15)
+    /* ADC_CTL[3:0] = rate / 4000 (stock 0x81220), when a multiple of 4 kHz;
+     * not while recording: playback starting would change the capture rate */
+    if (!recording_on && rate % 4000 == 0 && rate / 4000 >= 1 && rate / 4000 <= 15)
         REG32(0x8a002018) = (REG32(0x8a002018) & ~15u) | rate / 4000;
     for (unsigned mode = 0; mode < sizeof(rates) / sizeof(rates[0]); mode++)
         if (rates[mode] == rate) {
+            uint32_t s = arch_irq_save();       /* audio_mute from the DMA irq */
+
             VBC_DP_CTL = (VBC_DP_CTL & ~15u) | mode;
+            arch_irq_restore(s);
             current_rate = rate;
             return;
         }
@@ -722,6 +742,8 @@ unsigned audio_headset_tick(bool hook, uint32_t now)
             unsigned c;
 
             hook_raw = headset_line();
+            if (hook_raw < 0)           /* ADC timed out: no reading */
+                break;
             c = classify(hook_raw, hook);
             if (c != cand) {
                 cand = c;

@@ -190,6 +190,27 @@ static bool initialized;
 static uint32_t rx_ok, tx_ok, rx_err, tx_err, rx_nobuf;
 static const uint8_t zero_byte[4] __attribute__((aligned(4)));
 
+/* control messages noted by the handler for the session thread's log */
+#define MSG_LOG_N 8
+typedef struct {
+    uint32_t type, oid, data;
+    int len;
+} msg_log_t;
+static volatile msg_log_t msg_log[MSG_LOG_N];
+static volatile unsigned msg_in, msg_out;
+
+static void msg_log_flush(void)
+{
+    while (msg_out != msg_in) {
+        volatile msg_log_t *e = &msg_log[msg_out % MSG_LOG_N];
+
+        klog("rndis: msg %08lx, %d bytes, oid %08lx, data %08lx",
+             (unsigned long)e->type, e->len, (unsigned long)e->oid,
+             (unsigned long)e->data);
+        msg_out++;
+    }
+}
+
 static uint32_t le32(const void *p)
 {
     const uint8_t *b = p;
@@ -329,14 +350,19 @@ static void rndis_command(const uint8_t *m, int len)
     {                                   /* the first messages, for the log */
         static unsigned logged;
 
-        if (logged++ < 40)
-            klog("rndis: msg %08lx, %d bytes, oid %08lx, data %08lx",
-                 (unsigned long)type, len,
-                 (unsigned long)(len >= 16 && (type == MSG_QUERY || type == MSG_SET) ?
-                                 le32(m + 12) : 0),
-                 (unsigned long)(type == MSG_SET && len >= 28 &&
-                                 le32(m + 20) <= (uint32_t)len - 12 ?
-                                 le32(m + le32(m + 20) + 8) : 0));
+        /* klog takes a mutex: noted here, logged by the session thread */
+        if (logged++ < 40 && msg_in - msg_out < MSG_LOG_N) {
+            volatile msg_log_t *e = &msg_log[msg_in % MSG_LOG_N];
+
+            e->type = type;
+            e->len = len;
+            e->oid = len >= 16 && (type == MSG_QUERY || type == MSG_SET) ?
+                     le32(m + 12) : 0;
+            e->data = type == MSG_SET && len >= 28 &&
+                      le32(m + 20) <= (uint32_t)len - 12 ?
+                      le32(m + le32(m + 20) + 8) : 0;
+            msg_in++;
+        }
     }
     switch (type) {
     case MSG_INIT:
@@ -534,6 +560,7 @@ void usb_rndis_run(void)
         int n;
         uint32_t mlen, off, dlen;
 
+        msg_log_flush();
         if (!usb_wait_configured(&gen))
             continue;
         b = net_rx_get(100);

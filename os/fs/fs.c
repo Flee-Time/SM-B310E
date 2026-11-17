@@ -192,7 +192,12 @@ void fs_suspend(void)
     mutex_lock(&log_lock, WAIT_FOREVER);
     info.mounted = false;               /* log_flush stops writing */
     mutex_unlock(&log_lock);
+    /* f_mount takes no lock: wait for a FatFs call in progress (an app's,
+     * or count_free's) so it cannot write the card once USB has it */
+    ff_volume_lock(0);
+    disk_suspend(true);
     f_mount(NULL, "", 0);
+    ff_volume_unlock(0);
     mutex_unlock(&flush_lock);
 }
 
@@ -200,6 +205,7 @@ int fs_resume(void)
 {
     if (info.mounted || info.sd_code)
         return info.mounted ? 0 : -1;
+    disk_suspend(false);
     info.mount_result = f_mount(&fat, "", 1);
     info.mounted = info.mount_result == FR_OK;
     if (info.mounted) {

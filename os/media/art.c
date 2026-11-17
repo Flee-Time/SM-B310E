@@ -738,6 +738,8 @@ static bool jpeg_decode(src_t *s, int side, uint16_t *px)
                 len -= 17 + n;
             }
         } else if (m == 0xc0 || m == 0xc1 || m == 0xc2) {   /* SOF0/1/2 */
+            if (sof)
+                goto out;               /* one frame only: a second would leak dcv[] */
             progressive = m == 0xc2;
             if (src_byte(s) != 8)
                 goto out;
@@ -947,6 +949,7 @@ typedef struct {
     /* the zlib stream comes in IDAT pieces: the reader takes chunk data */
     uint32_t chunk_left;
     bool err;
+    bool done;                          /* the out side has all it wants */
     void (*out)(void *ctx, uint8_t b);
     void *ctx;
 } inflate_t;
@@ -1058,7 +1061,7 @@ static bool inflate_run(inflate_t *z)
         return false;
     dt = lt + 1;
     ibits(z, 16);                       /* the zlib header */
-    while (!last && !z->err) {
+    while (!last && !z->err && !z->done) {
         int type;
 
         if (cancelled(z->s))
@@ -1072,7 +1075,7 @@ static bool inflate_run(inflate_t *z)
             z->nbits = 0;
             len = ibits(z, 16);
             ibits(z, 16);
-            while (len-- > 0 && !z->err)
+            while (len-- > 0 && !z->err && !z->done)
                 iput(z, (uint8_t)ibits(z, 8));
             continue;
         }
@@ -1125,7 +1128,7 @@ static bool inflate_run(inflate_t *z)
         for (;;) {                      /* the block's symbols */
             int sym = isym(z, lt);
 
-            if (sym < 0 || z->err)
+            if (sym < 0 || z->err || z->done)
                 break;
             if (sym < 256) {
                 iput(z, (uint8_t)sym);
@@ -1159,6 +1162,7 @@ typedef struct {
     int filter, row;
     uint8_t pal[256][4];
     sink_t *k;
+    inflate_t *z;
 } png_t;
 
 static uint8_t paeth(int a, int b, int c)
@@ -1213,6 +1217,8 @@ static void png_row_done(png_t *p)
         px[0] = (uint8_t)r; px[1] = (uint8_t)g; px[2] = (uint8_t)b;
     }
     sink_row(p->k, p->row++, p->rgb);
+    if (p->row >= p->h)
+        p->z->done = true;              /* the rest of the stream is not needed */
     {
         uint8_t *t = p->prev;
 
@@ -1280,6 +1286,8 @@ static bool png_decode(src_t *s, int side, uint16_t *px)
             p->h = (int)be32(d + 4);
             p->depth = d[8];
             p->ctype = d[9];
+            if (p->ctype != 0 && p->ctype != 2 && p->ctype != 3 && p->ctype != 4 && p->ctype != 6)
+                goto out;               /* the row buffer is sized by a valid type */
             if (p->depth != 1 && p->depth != 2 && p->depth != 4 && p->depth != 8)
                 goto out;               /* 0 would never end a row; 16 is not done */
             if (d[12] || p->w <= 0 || p->h <= 0 || p->w > 8192 || p->h > 8192)
@@ -1296,6 +1304,8 @@ static bool png_decode(src_t *s, int side, uint16_t *px)
                     p->pal[i][c] = (uint8_t)src_byte(s);
             skip_n(s, (int)(len - (len / 3 < 256 ? len / 3 : 256) * 3) + 4);
         } else if (!memcmp(h + 4, "tRNS", 4) && p->ctype == 3) {
+            if (len > 256)
+                goto out;               /* one per palette entry; a huge len spun here */
             for (uint32_t i = 0; i < len; i++) {
                 int a = src_byte(s);
 
@@ -1321,6 +1331,7 @@ static bool png_decode(src_t *s, int side, uint16_t *px)
     if (!p->cur || !p->prev || !p->rgb || !z.win || !sink_init(&k, p->w, p->h, side, px))
         goto out;
     p->k = &k;
+    p->z = &z;
     p->filter = -1;
     z.s = s;
     z.out = png_byte;

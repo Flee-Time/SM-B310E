@@ -120,12 +120,14 @@ uint8 *S9xPageIn(uint32 Address)
     return Memory.Map[b];
 }
 
-static void pages_setup(void)
+static bool pages_setup(void)
 {
     int pages;
 
     page_size = Memory.HiROM ? 0x10000 : 0x8000;
     pages = (int)((s9x_rom_paged + page_size - 1) / page_size);
+    if (pages > PAGES_MAX)              /* more than the tables hold */
+        return false;
     for (int b = 0; b < MEMMAP_NUM_BLOCKS; b++) {
         uint8 *m = Memory.Map[b];
         int32_t off;
@@ -161,6 +163,7 @@ static void pages_setup(void)
            kit_heap_largest() >= page_size &&
            (slots[nslots].data = malloc(page_size)) != NULL)
         slots[nslots++].page = -1;
+    return true;
 }
 
 static void pages_age(void)
@@ -367,7 +370,8 @@ int kit_main(int argc, char **argv)
     char *dot;
     FILE *f;
     long size;
-    uint32_t runs = 0;
+    uint32_t runs = 0, due;
+    bool silent;
 
     if (argc < 2) {
         kit_log("snes9x: no ROM");
@@ -437,7 +441,10 @@ int kit_main(int argc, char **argv)
             kit_log("snes9x: a game with its own chip has to fit whole");
             return 1;
         }
-        pages_setup();
+        if (!pages_setup()) {
+            kit_log("snes9x: the ROM is bigger than 6 MB");
+            return 1;
+        }
         snprintf(text, sizeof(text), "snes9x: %ld KB ROM in %u KB pages, %d of them in memory "
                  "(%u KB free after them, the largest piece %u KB)", size / 1024, page_size / 1024, nslots,
                  (unsigned)(mallinfo().fordblks / 1024), (unsigned)(kit_heap_largest() / 1024));
@@ -449,13 +456,29 @@ int kit_main(int argc, char **argv)
     strncat(srm_path, ".srm", sizeof(srm_path) - strlen(srm_path) - 1);
     srm(false);
 
-    kit_audio_start(RATE, render);
+    silent = kit_audio_start(RATE, render) != 0;
+    if (silent)
+        kit_log("snes9x: no sound, the clock paces the game");
+    due = kit_ms();
     /* Paced by the sound: a frame whenever what is queued for the speaker (the kit's
      * and ours) is below TARGET, so the game keeps the speaker's clock and never runs
      * dry or ahead. Below LOW it is behind: the frame is not drawn */
     while (!kit_quit_asked()) {
         unsigned queued = kit_audio_queued() + (ring_in - ring_out);
 
+        if (silent) {                   /* nothing empties the ring: the clock paces it */
+            int32_t early = (int32_t)(due - kit_ms());
+
+            ring_out = ring_in;
+            if (early > 0) {
+                kit_sleep((uint32_t)early);
+                continue;
+            }
+            due += 1000 / (Settings.PAL ? 50 : 60);
+            if ((int32_t)(kit_ms() - due) > 100)
+                due = kit_ms();         /* far behind: no rush to catch up */
+            queued = TARGET;            /* every frame drawn */
+        }
         if (queued > TARGET) {
             kit_sleep(1 + (queued - TARGET) / (RATE / 1000));
             continue;

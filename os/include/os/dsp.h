@@ -256,8 +256,10 @@ void l1_sacch_set(const uint8_t *block);
  * descriptors just-in-time. See dsp.c. */
 int txbuf_free(void);                   /* free TXBUFQ slots (uplink pacing) */
 /* Enable A5 ciphering: Kc, algorithm (0=A5/1, 0xff=off), and the synced cell's
- * fn_offset so the DSP ciphers with the cell's absolute GSM frame number. */
-void l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset);
+ * fn_offset so the DSP ciphers with the cell's absolute GSM frame number.
+ * DSP_OK, or the error of a DSP command that could not be posted (then ciphering
+ * is left off). */
+int l1_cipher_set(const uint8_t kc[8], uint8_t alg, uint32_t fn_offset);
 int l1_uplink_fi(uint16_t index, int tag, int burst, int tn, int tsc, int cell);
 int l1_uplink_desc(int tag, int burst, uint8_t bsic, const uint8_t block[23]);
 int l1_uplink_post(uint16_t index, int tag, int burst, int tn, int tsc, int cell,

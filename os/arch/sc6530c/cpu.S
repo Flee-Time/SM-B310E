@@ -322,13 +322,15 @@ arch_irq_restore:
 
     .global arch_in_irq
     .type   arch_in_irq, %function
-arch_in_irq:
+arch_in_irq:                    /* any mode but a thread's (SYS, USR): IRQ,
+                                 * SVC (the scheduler), and the fault screen's
+                                 * abort, undefined and FIQ, which must not sleep */
     mrs     r0, cpsr
     and     r0, r0, #0x1f
-    cmp     r0, #0x12           /* IRQ mode */
-    cmpne   r0, #0x13           /* SVC: the scheduler itself */
-    moveq   r0, #1
-    movne   r0, #0
+    cmp     r0, #0x1f           /* SYS: threads */
+    cmpne   r0, #0x10           /* USR */
+    movne   r0, #1
+    moveq   r0, #0
     bx      lr
 
     .global arch_wait_for_irq

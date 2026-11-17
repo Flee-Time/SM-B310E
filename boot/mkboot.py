@@ -44,7 +44,7 @@ def crc(image):
     return zlib.crc32(data) & 0xffffffff
 
 
-def check(image, name):
+def check(image, name, want_crc=True):
     if len(image) < 0x60 or image[8:16] != b'B310BOOT':
         sys.exit(f'{name}: not a B310E boot loader image')
     size = struct.unpack_from('<I', image, 0x10)[0]
@@ -54,6 +54,10 @@ def check(image, name):
         sys.exit(f'{name}: {len(image)} bytes, more than {NOR_MAX}')
     if struct.unpack_from('<I', image, 0)[0] >> 24 != 0xea:
         sys.exit(f'{name}: word 0 is not an ARM branch')
+    # the raw linker output has no CRC yet; every finished image must
+    stored, = struct.unpack_from('<I', image, CRC_AT)
+    if want_crc and stored != crc(image):
+        sys.exit(f'{name}: CRC-32 {stored:08x}, the image gives {crc(image):08x}')
 
 
 def describe(image):
@@ -71,7 +75,7 @@ def describe(image):
 
 def cmd_image(args):
     image = bytearray(args.raw.read_bytes())
-    check(image, args.raw)
+    check(image, args.raw, want_crc=False)
     mode, _, path = args.default.partition(':')
     if mode not in MODES:
         sys.exit(f'--default: {mode}? (stock, menu, program[:path])')
@@ -194,8 +198,10 @@ def cmd_backup_check(args):
 
 def cmd_info(args):
     image = args.image.read_bytes()
-    check(image, args.image)
+    check(image, args.image, want_crc=False)
     print(f'{args.image}: {describe(image)}')
+    if struct.unpack_from('<I', image, CRC_AT)[0] != crc(image):
+        sys.exit(1)
 
 
 def main():

@@ -68,6 +68,7 @@ typedef struct {
 
 static const l1_api_t *L;
 static volatile bool stop_asked, running;
+static volatile bool dsp_owned;         /* the worker booted (or is booting) the DSP */
 static char status[48] = "starting";
 static char *out;
 static int out_len;
@@ -832,7 +833,8 @@ static void worker(void *arg)
         say("the DSP is in use (Radio status?)");
         goto done;
     }
-    if (base.tx >= 0) {                 /* arm the clamp before start() loads the cal */
+    dsp_owned = true;                   /* from here the stop hook must release it */
+    if (base.tx >= 0) {                /* arm the clamp before start() loads the cal */
         L->tx_min_power(1);
         say("tx: min-power clamp ARMED (APC setpoints forced to the calibrated minimum)");
     }
@@ -923,6 +925,7 @@ static void worker(void *arg)
 stop:
     L->dsp_stop();
     L->tx_min_power(0);                 /* never leave the clamp armed for a later run */
+    dsp_owned = false;
 done:
     say("radiolab: done%s", stop_asked ? " (stopped)" : "");
     snprintf(status, sizeof(status), "done: %s", OUT_FILE);
@@ -963,6 +966,8 @@ static screen_t screen = {
 
 static screen_t *start(void)
 {
+    if (running)                        /* the worker of an earlier open still runs */
+        return &screen;
     L = l1_api;
     stop_asked = false;
     running = true;
@@ -973,4 +978,15 @@ static screen_t *start(void)
     return &screen;
 }
 
-APP("Radio lab", start, NULL, NULL);
+/* The app ends with its threads: a worker killed mid-run left the DSP up (and
+ * the TX clamp armed), so release them the way the worker's own exit does. */
+static void app_stop(void)
+{
+    if (dsp_owned) {
+        L->dsp_stop();
+        L->tx_min_power(0);
+        dsp_owned = false;
+    }
+}
+
+APP("Radio lab", start, app_stop, NULL);

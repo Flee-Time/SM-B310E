@@ -37,6 +37,7 @@
 #include "os/lib.h"
 #include "os/media.h"
 #include "media/media_internal.h"
+#include "apps/wavio.h"
 
 #define RING_FRAMES     65536u
 #define RING_MASK       (RING_FRAMES - 1)
@@ -95,6 +96,7 @@ static volatile uint32_t underruns, played, last_fill;
 static volatile bool codec_done;        /* nothing more comes: end at the empty ring */
 static volatile bool audio_on;          /* our DMA runs */
 static volatile bool stolen;
+static volatile bool no_rate;           /* the codec gave PCM without a sample rate */
 static uint32_t base_ms;                /* the position when played was 0 */
 static volatile int32_t seek_target = -1;
 
@@ -116,6 +118,7 @@ static int32_t rs_prev[2];
 static uint32_t cycles0, wall0, status_at;
 
 static bool start(void);
+static void init(void);
 
 static void barrier(void)
 {
@@ -152,7 +155,8 @@ static unsigned fill(int16_t *lr, unsigned frames, void *ctx)
 /* ---- audio on and off (under lock) ---------------------------------------- */
 static void audio_start_locked(void)
 {
-    if (audio_on || paused || !out_rate || stolen)
+    /* a recording runs: playing would re-rate the codec under it */
+    if (audio_on || paused || !out_rate || stolen || wav_recording())
         return;
     last_fill = kernel_ticks();
     volume_use(VOL_MUSIC);              /* the music's own level */
@@ -166,7 +170,8 @@ static void audio_start_locked(void)
 static void audio_stop_locked(void)
 {
     if (audio_on) {
-        audio_play_stop();
+        if (!stolen)                    /* taken: the PCM plays someone else's sound */
+            audio_play_stop();
         audio_on = false;
     }
 }
@@ -276,6 +281,10 @@ static void pcmbuf_insert(const void *ch1, const void *ch2, int count)
     bool wide = sample_depth > 16;
     int i = 0;
 
+    if (!out_rate) {                    /* nothing could play it: the ring would fill for ever */
+        no_rate = true;
+        return;
+    }
     frames_in += (uint32_t)count;
     while (i < count) {
         uint32_t n = 0;
@@ -507,7 +516,7 @@ static long fd_size(int fd)
 /* ---- commands and time ------------------------------------------------------ */
 static long get_command(intptr_t *param)
 {
-    if (req_stop || req_play || audio_taken())
+    if (req_stop || req_play || no_rate || audio_taken())
         return CODEC_ACTION_HALT;
     if (req_seek >= 0) {
         *param = req_seek;
@@ -724,8 +733,9 @@ bool media_supported(const char *path)
     bool ok = false;
 
     lower_ext(path, ext, sizeof(ext));
-    if (!ext[0] || !start())
+    if (!ext[0])
         return false;
+    init();                             /* listing a folder takes no playback buffers */
     mutex_lock(&lock, WAIT_FOREVER);
     scan_locked(false);
     for (int i = 0; i < n_codecs && !ok; i++)
@@ -736,8 +746,7 @@ bool media_supported(const char *path)
 
 const char *media_extensions(void)
 {
-    if (!start())
-        return "";
+    init();
     mutex_lock(&lock, WAIT_FOREVER);
     scan_locked(false);
     mutex_unlock(&lock);
@@ -950,6 +959,7 @@ static void play_track(const char *path)
     seek_target = -1;
     codec_done = false;
     stolen = false;
+    no_rate = false;
     underruns = 0;
     mutex_unlock(&lock);
 
@@ -988,7 +998,10 @@ static void play_track(const char *path)
             state = MEDIA_STOPPED;
         else if (req_stop || req_play)
             ;                           /* media_stop() / media_play() set it */
-        else if (st != CODEC_OK && !frames_in) {
+        else if (no_rate) {
+            state = MEDIA_ERROR;
+            error_text = "no sample rate";
+        } else if (st != CODEC_OK && !frames_in) {
             state = MEDIA_ERROR;
             error_text = "decoding failed";
         } else
@@ -1024,9 +1037,14 @@ static void decoder_main(void *arg)
         bool go;
 
         if (sem_wait(&wake, 1000) != WAIT_OK) {
-            /* free the codec (and its arena) a while after the music */
-            if (codec && kernel_ticks() - idle_since > UNLOAD_MS)
+            /* free the codec (and its arena) and the file window a while
+             * after the music; only this thread uses the window */
+            if ((codec || fbuf) && kernel_ticks() - idle_since > UNLOAD_MS) {
                 unload_codec();
+                kfree(fbuf);
+                fbuf = NULL;
+                fcap = flen = 0;
+            }
             continue;
         }
         mutex_lock(&lock, WAIT_FOREVER);
@@ -1048,18 +1066,29 @@ static void decoder_main(void *arg)
     }
 }
 
-static bool start(void)
+/* the lock and the codec list only: no playback buffers, no thread */
+static void init(void)
 {
-    if (ready)
-        return true;
-    if (!ring)
-        ring = kmalloc(RING_FRAMES * sizeof(uint32_t));
-    if (!ring)
-        return false;
+    static bool inited;
+
+    if (inited)
+        return;
     mutex_init(&lock);
     sem_init(&wake, 0);
     sem_init(&room, 0);
     api_init();
+    inited = true;
+}
+
+static bool start(void)
+{
+    if (ready)
+        return true;
+    init();
+    if (!ring)
+        ring = kmalloc(RING_FRAMES * sizeof(uint32_t));
+    if (!ring)
+        return false;
     thread = thread_create("decoder", PRIO_NORMAL - 1, STACK_BYTES, decoder_main, NULL);
     if (!thread)
         return false;
@@ -1120,6 +1149,8 @@ void media_pause(bool pause)
     } else if (!pause && paused) {
         paused = false;
         state = audio_on ? MEDIA_PLAYING : head != tail ? MEDIA_PLAYING : MEDIA_LOADING;
+        if (!audio_on && wav_recording())
+            state = MEDIA_LOADING;      /* starts when the recording ends */
         if (head != tail)
             audio_start_locked();
     }

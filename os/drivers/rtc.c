@@ -148,6 +148,7 @@ const char *rtc_weekday_name(int wday)
 
 /* While rtc_set runs, readers get the time being set plus the time since. */
 static volatile bool setting;
+static mutex_t set_lock;                /* held through rtc_set (zeroed: unlocked) */
 static uint32_t set_seconds;            /* days * 86400 + time of day */
 static uint32_t set_at;                 /* kernel_ticks() then */
 
@@ -173,7 +174,11 @@ static uint32_t read_counters(void)
         if (sec == first)
             break;
     }
-    /* a field out of range (never seen) counts as its maximum */
+    /* a field out of range (never seen) counts as its maximum; a day past
+     * RTC_DAY_MAX as the day after it, which reads as RTC_EBADDATE (days *
+     * 86400 overflows past day 49710) */
+    if (day > RTC_DAY_MAX)
+        day = RTC_DAY_MAX + 1;
     return to_seconds(day, hour < 24 ? hour : 23, min < 60 ? min : 59,
                       sec < 60 ? sec : 59);
 }
@@ -236,9 +241,14 @@ int rtc_set(const rtc_datetime_t *t)
     days = (uint32_t)rtc_days_from_date(t->year, t->month, t->day);
     want = to_seconds(days, t->hour, t->min, t->sec);
 
+    /* The whole set inside a mutex: an app thread killed in it dies at the
+     * release (after setting is cleared), not with setting left on. */
+    if (mutex_lock(&set_lock, 0) != WAIT_OK)
+        return RTC_EBUSY;
     s = arch_irq_save();
     if (setting) {
         arch_irq_restore(s);
+        mutex_unlock(&set_lock);
         return RTC_EBUSY;
     }
     set_seconds = want;
@@ -272,6 +282,7 @@ int rtc_set(const rtc_datetime_t *t)
     s = arch_irq_save();
     setting = false;
     arch_irq_restore(s);
+    mutex_unlock(&set_lock);
 
     got = read_counters();
     if (!ok) {

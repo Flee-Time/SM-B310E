@@ -186,7 +186,10 @@ static void next_track(bool ended)
 {
     int k = order_pos();
 
-    if (ended && repeat == MEDIA_REPEAT_ONE) {
+    if (wav_recording()) {              /* play_index would end the recording: stop here */
+        music_on = false;
+        media_stop();
+    } else if (ended && repeat == MEDIA_REPEAT_ONE) {
         play_index(music_cur);
     } else if (repeat == MEDIA_REPEAT_OFF && k + 1 >= count) {
         music_on = false;               /* the end of the list */
@@ -264,7 +267,10 @@ int media_queue_add_m3u(const char *path)
     f_read(&f, buf, M3U_MAX, &got);
     f_close(&f);
     buf[got] = 0;
-    for (p = buf; *p; ) {
+    p = buf;
+    if (got >= 3 && !memcmp(p, "\xef\xbb\xbf", 3))
+        p += 3;                         /* a UTF-8 byte-order mark */
+    for (; *p; ) {
         char *line = p;
         size_t n;
 

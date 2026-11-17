@@ -271,11 +271,14 @@ static void ring_stop(void)
     }
 }
 
+static uint32_t ring_ticked;            /* its last tick: none for long = covered */
+
 static void ring_tick(screen_t *s)
 {
     uint32_t t = kernel_ticks() - ring_start;
     bool want = (t / BEEP_MS) % 2 == 0;
 
+    ring_ticked = kernel_ticks();
     if (t >= RING_MS) {
         ui_pop();                       /* leave() stops it */
         return;
@@ -359,7 +362,7 @@ static void ring(int index, int minute)
     ringing_index = index;
     alarm_ringing = true;
     ring_min = minute;
-    ring_start = kernel_ticks();
+    ring_start = ring_ticked = kernel_ticks();
     beep_on = false;
     klog("alarm: ringing at %02d:%02d", minute / 60, minute % 60);
     /* Its tone needs the DAC and its own volume: the music waits, and the radio's
@@ -417,6 +420,10 @@ void alarm_check(int h, int m)
             if (due(i, now, &wday))
                 pending |= 1u << i;
     }
+    /* A screen over the ring (a message) stops its tick: the buzz goes off rather
+     * than stay on, and once uncovered past RING_MS its tick closes it at once */
+    if (alarm_ringing && beep_on && kernel_ticks() - ring_ticked > 1000)
+        ring_stop();
     if (alarm_ringing)
         return;
     for (int i = 0; i < count; i++)

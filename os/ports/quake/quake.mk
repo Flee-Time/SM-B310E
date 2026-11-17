@@ -64,7 +64,7 @@ $(QUAKE_OUT)/port/quake_os.o: $(QUAKE_PORT)/quake_os.c $(KIT_DIR)/kit_app.h sdk/
 	$(CC) $(KIT_OS_CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/ports/quake.elf: $(QUAKE_OBJS) sdk/app.ld
-	$(CC) $(KIT_LDFLAGS) -Wl,-Map,$(@:.elf=.map) $(QUAKE_OBJS) $(KIT_LIBS) -o $@
+	$(CC) $(KIT_LDFLAGS) $(KIT_PRINTF_FLOAT) -Wl,-Map,$(@:.elf=.map) $(QUAKE_OBJS) $(KIT_LIBS) -o $@
 
 $(BUILD)/ports/quake.app: $(BUILD)/ports/quake.elf sdk/mkapp.py
 	$(PYTHON) sdk/mkapp.py $< $@

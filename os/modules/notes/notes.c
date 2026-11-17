@@ -128,9 +128,13 @@ static void saved(const char *text, void *ctx)
     }
     path_of(num, path, sizeof(path));
     /* the list holds 64: past that, the highest listed is not the highest there is */
-    while (editing == 0 && num < 9999 && f_stat(path, NULL) == FR_OK) {
+    while (editing == 0 && num <= 9999 && f_stat(path, NULL) == FR_OK) {
         num++;
         path_of(num, path, sizeof(path));
+    }
+    if (num > 9999) {                   /* NOTE9999 is the last name the list knows */
+        ui_message("Notes", "No free note number left.");
+        return;
     }
     if (f_open(&f, path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
         ui_message("Notes", "Could not save the note.");
@@ -159,14 +163,31 @@ static void open_note(int i)
         return;
     editing = notes[i - 1].number;
     path_of(editing, path, sizeof(path));
-    if (f_open(&f, path, FA_READ) == FR_OK) {
+    if (f_open(&f, path, FA_READ) != FR_OK) {
+        free(buf);                      /* an empty editor would save over it */
+        ui_message("Notes", "Could not open the note.");
+        return;
+    }
+    {
+        bool too_long = f_size(&f) > NOTE_MAX;
+
         f_read(&f, buf, NOTE_MAX, &n);
         f_close(&f);
+        buf[n] = 0;
+        if (too_long) {                 /* saving the part loaded would cut the rest */
+            ui_text_view("Note (too long to edit)", buf);
+            free(buf);
+            return;
+        }
     }
-    buf[n] = 0;
-    for (UINT k = 0; k < n; k++)        /* CR LF from a PC: LF */
-        if (buf[k] == '\r')
-            buf[k] = ' ';
+    {
+        UINT w = 0;
+
+        for (UINT k = 0; k < n; k++)    /* CR LF from a PC: LF */
+            if (buf[k] != '\r')
+                buf[w++] = buf[k];
+        buf[w] = 0;
+    }
     ui_text_edit("Note", buf, NOTE_MAX, true, saved, NULL);
     free(buf);
 }

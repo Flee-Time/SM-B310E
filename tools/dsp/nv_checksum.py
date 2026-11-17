@@ -296,6 +296,33 @@ def main(argv=None):
             # factory copy @0x680000 (sector), user-data EFS copy @0x7F0E5A+X
             # (only the Headset-region pages are emitted here; full copy 2 is
             # the 0x7F0000 sector set)
+            #
+            # REFUSED: the sector images come from the dump, so the header
+            # must be crc16 over the island AS IT IS ON THE PHONE after the
+            # write. Only the touched sectors are rewritten; the rest of the
+            # island is whatever the phone holds now, and data point (3)
+            # above says the runtime re-laid the store after our earlier
+            # 0x680000 patch (read-back covered only 0x1000 of 0x9ED4). The
+            # phone island therefore no longer equals the dump, and no header
+            # this tool computes offline is known to match it.
+            print("FATAL: --emit refused: the checksum header cannot be made to "
+                  "match the island on the phone. The sector images come from "
+                  "the dump, but the phone's island was re-laid by the runtime "
+                  "after the earlier 0x680000 patch (data point 3), so a header "
+                  "computed over the dump (or over stock/nvitem.bin, which is "
+                  "itself stale) is not known to match. Read the full island "
+                  "back from the phone first and compute over that.",
+                  file=sys.stderr)
+            return 1
+            dump = open(args.dump, "rb").read()
+            if hashlib.sha256(dump).hexdigest().upper() != DUMP_SHA256:
+                print("FATAL: stale dump (SHA256 mismatch)", file=sys.stderr)
+                return 1
+            # the header must cover the image being written: the dump's
+            # island with the writes applied (not stock/nvitem.bin)
+            dump_island = apply_writes(dump[DS1_BASE:DS1_BASE + ISLAND_SIZE],
+                                       writes)
+            dump_ck = nvitem_checksum(dump_island)
             groups = {}
             for off, _v in writes:
                 s = (NOR_FACTORY + off) & ~0xFFF
@@ -304,26 +331,25 @@ def main(argv=None):
                 rels = sorted(groups[s])
                 base = "nv-factory-sect-0x%05X" % s
                 # build the full 0x1000 sector image for this sector
-                sec = bytearray(open(args.dump, "rb").read()[s:s + SECTOR])
+                sec = bytearray(dump[s:s + SECTOR])
                 for off, val in writes:
                     if s <= NOR_FACTORY + off < s + SECTOR:
                         sec[NOR_FACTORY + off - s:NOR_FACTORY + off - s + 2] = \
                             struct.pack("<H", val & 0xFFFF)
-                # recompute the island checksum for the patched island
-                patched_island = apply_writes(island, writes)
-                new_ck = nvitem_checksum(patched_island)
-                sec[0:2] = struct.pack("<H", new_ck & 0xFFFF)
+                # the checksum header lives only in the island's first sector
+                if s == DS1_BASE:
+                    sec[0:2] = struct.pack("<H", dump_ck & 0xFFFF)
                 pfile = os.path.join(os.getcwd(), base + ".bin")
                 with open(pfile, "wb") as f:
                     f.write(bytes(sec))
                 print("  sector image %s (factory, %d patched bytes)" % (base, len(sec)))
                 for cmd in emit_commands(s, base + ".bin"):
                     print("    " + cmd)
-                err = validate_command(cmd.split())
-                if err:
-                    print("  FATAL: emitted command fails grammar: %s" % err,
-                          file=sys.stderr)
-                    return 1
+                    err = validate_command(cmd.split())
+                    if err:
+                        print("  FATAL: emitted command fails grammar: %s" % err,
+                              file=sys.stderr)
+                        return 1
             print("  [USER] run from tools\\spd_dump\\; keep the USB cable seated "
                   "between erase_flash and write_data.")
             print("  WARNING: the runtime RE-LAYS sector 0x680000 into 0x400-byte "

@@ -389,8 +389,11 @@ void InfoNES_SoundOutput(int samples, BYTE *w1, BYTE *w2, BYTE *w3, BYTE *w4, BY
 
     if (!sound_on)
         return;
-    while (RING - (in - ring_out) < (unsigned)samples)
+    while (RING - (in - ring_out) < (unsigned)samples) {
+        if (kit_quit_asked())           /* nothing may empty it: Leave all the same */
+            return;
         kit_sleep(2);
+    }
     for (int i = 0; i < samples; i++) {
         int v = (w1[i] + w2[i] + w3[i] + w4[i] + w5[i]) * 64;
 

@@ -49,6 +49,8 @@ typedef struct {
     uint8_t tx[LAPDM_N201];             /* the last I-frame payload, for resend */
     uint8_t tx_len;
     uint8_t tx_pending;                 /* an unacked I-frame is outstanding */
+    uint8_t rx_seg;                     /* inside a segmented (M bit) message: its
+                                         * segments are dropped, not delivered */
 } lapdm_dl_t;
 
 /* ---- frame codec (pure) ---- */
@@ -70,7 +72,10 @@ int lapdm_establish(lapdm_dl_t *dl, const uint8_t *l3, int len, uint8_t out[LAPD
 int lapdm_send(lapdm_dl_t *dl, const uint8_t *l3, int len, uint8_t out[LAPDM_BLOCK]);
 /* Feed a received frame. If it carries L3 to deliver up, copies it to l3/l3len.
  * If a frame must be sent in reply (UA ack, RR), writes it to out and sets
- * *out_valid. Returns 1 if l3 was delivered, 0 otherwise, -1 on error. */
+ * *out_valid. Returns 1 if l3 was delivered, 0 otherwise, -1 on error. A frame
+ * whose address octet is not this link's (EA, LPD 0, our SAPI) is ignored, and
+ * the segments of a segmented message (M bit) are acked but not delivered: there
+ * is no reassembly. */
 int lapdm_receive(lapdm_dl_t *dl, const uint8_t in[LAPDM_BLOCK], uint8_t *l3,
                   int *l3len, uint8_t out[LAPDM_BLOCK], int *out_valid);
 /* Build an idle RR keep-alive/ack frame (receiver ready, N(R)=V(R), P=0) to hold

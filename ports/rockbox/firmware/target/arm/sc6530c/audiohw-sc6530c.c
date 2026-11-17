@@ -259,6 +259,8 @@ static void hook_sample(bool hook)
         return;
     hook_poll = 0;
     hook_raw = sc6530_adc_headset_raw();
+    if (hook_raw < 0)
+        return;                 /* conversion timed out: no reading, no class */
     cls = hook_classify(hook_raw, hook);
     if (cls != hook_cand)
     {
