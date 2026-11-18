@@ -33,6 +33,34 @@
 #define T0_INT      0x8100000cu
 
 uint32_t sleep_idle_count;              /* system sleeps the idle loop took */
+
+/* Clock gates closed around the idle loop's system sleep (power audit B0,
+ * 2026-11-18): stock's deep-sleep set (NOR 0x374b4: APB 0xba01efff, AHB
+ * 0x1fc7f) minus what must stay awake here: the timers' bus (bit 16: timer 2
+ * is our tick and the sleep's end), the keypad (6), GPIO (7: the torch's pin)
+ * and the digital EIC (25). The 32 kHz domain (19, 22, 26) and the ADI (24)
+ * are not in stock's set. AHB bit 8 is the PSRAM controller's clock: closing
+ * it froze the phone (2026-11-09); it is not in the set and must never be.
+ * sleep_gates (dev, poked from the shell): bit 0 the APB set, bit 1 the AHB
+ * set; 0 (the default) closes nothing. */
+#define APB_EB_SET  0x8b0000a0u
+#define APB_EB_CLR  0x8b0000a4u
+#define APB_EB      0x8b0000a8u
+#define AHB_EB_SET  0x20500060u
+#define AHB_EB_CLR  0x20500070u
+#define AHB_EB      0x20500080u
+#define AHB_PSRAM   (1u << 8)
+#define IDLE_APB_GATES (0xba01efffu & ~(1u << 16 | 1u << 6 | 1u << 7 | 1u << 25))
+#define IDLE_AHB_GATES (0x1fc7fu & ~AHB_PSRAM)
+_Static_assert(!(IDLE_AHB_GATES & AHB_PSRAM), "AHB bit 8 is the PSRAM clock");
+_Static_assert(!(IDLE_APB_GATES & (1u << 16)), "timer 2 needs the timers' bus");
+volatile uint32_t sleep_gates;
+/* The audio DMA runs (pcm.c): its interrupt comes every 3.3 ms and the VBC
+ * holds no more, so the PLL is not stopped (a restart is 9.8 ms with
+ * interrupts off) and the system does not sleep. Only reached in
+ * power_burst_dev mode: otherwise the codec holds the clock up. */
+volatile bool sleep_keep_pll;
+uint32_t sleep_gated_apb, sleep_gated_ahb;     /* what the last one closed */
 static bool chip_ready, idle_on = true;
 
 static void ana_bits(uint32_t addr, uint32_t clear, uint32_t set)
@@ -102,6 +130,11 @@ void sleep_chip_init(void)
     adi_write(0x82001180, adi_read(0x82001180) | 2u);   /* it runs on the DC-DC */
     adi_write(0x82001160, adi_read(0x82001160) & ~1u);
     adi_write(0x820011e8, (adi_read(0x820011e8) & ~8u) | 4u);
+    /* VSIM1 (bit 2 of the LDO pair): neither forced on nor off at boot (phone:
+     * 1184 0x0012, 11a4 0x0001). Off, as sim.c's power-down leaves it; sim.c
+     * switches it on for a slot-1 session (power audit A5, 2026-11-18). */
+    adi_write(0x820011a4, adi_read(0x820011a4) & ~4u);
+    adi_write(0x82001184, adi_read(0x82001184) | 4u);
     chip_ready = true;
     arch_irq_restore(s);
 }
@@ -136,14 +169,36 @@ void sleep_idle_enable(bool on)
 
 /* The idle loop's wait, interrupts off. Only at 26 MHz with no hold: anything
  * using a bus or a clock (SD, USB, the codec, the DSP, the SIM) holds the clock
- * up, and the panel must be asleep for 26 MHz at all. Timer 2 runs through this
+ * up, and the panel must be asleep for 26 MHz (or cpufreq_lit_low on, where
+ * each LCD transfer holds the clock instead). Timer 2 runs through this
  * sleep (phone, 2026-11-08), so it cannot sleep past the kernel's next timeout. */
 void sleep_idle(void)
 {
-    if (idle_on && chip_ready && clock_level() == 0 && !cpufreq_holds()) {
+    if (idle_on && chip_ready && clock_level() == 0 && !cpufreq_holds() && sleep_keep_pll) {
+        /* no system sleep either: tried as "half-deep" (power_burst_dev 2,
+         * 2026-11-18), it stalled the audio DMA in every sleep: 133 s of audio
+         * played in 156 s, heard as broken sound in the dark */
+        arch_wait_for_irq();
+    } else if (idle_on && chip_ready && clock_level() == 0 && !cpufreq_holds()) {
+        uint32_t apb = 0, ahb = 0, g = sleep_gates;
+
         sleep_idle_count++;
         clock_pll_stop();               /* until something needs it */
+        if (g & 1) {
+            apb = REG32(APB_EB) & IDLE_APB_GATES;
+            REG32(APB_EB_CLR) = apb;
+        }
+        if (g & 2) {
+            ahb = REG32(AHB_EB) & IDLE_AHB_GATES;
+            REG32(AHB_EB_CLR) = ahb & ~AHB_PSRAM;
+        }
         sleep_stop(0);
+        if (ahb)
+            REG32(AHB_EB_SET) = ahb;
+        if (apb)
+            REG32(APB_EB_SET) = apb;
+        sleep_gated_apb = apb;
+        sleep_gated_ahb = ahb;
     } else {
         arch_wait_for_irq();
     }

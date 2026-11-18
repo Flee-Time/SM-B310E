@@ -45,40 +45,9 @@
 
 #define REG32(a) (*(volatile uint32_t *)(a))
 
-/* Bounded ADI mailbox (fpdoom/B310E-OS drivers/battery.c pattern). */
-#define ADI_RD_CMD      0x82000018
-#define ADI_RD_DATA     0x8200001C
-#define ADI_FIFO_STS    0x82000020
-#define ADI_FIFO_FULL   (1 << 9)
-#define ADI_FIFO_EMPTY  (1 << 8)
-#define ADI_BUDGET      1000000u
-
-static uint32_t adi_read(uint32_t addr)
-{
-    int old = disable_irq_save();
-    uint32_t a = 0, n = ADI_BUDGET;
-
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)
-        if (--n == 0) break;
-    restore_irq(old);
-    return a & 0xffffu;
-}
-
-static void adi_write(uint32_t addr, uint32_t val)
-{
-    int old = disable_irq_save();
-    uint32_t n = ADI_BUDGET;
-
-    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) goto done;
-    REG32(addr) = val;
-    n = ADI_BUDGET;
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) goto done;
-done:
-    restore_irq(old);
-}
+/* Bounded ADI mailbox: the shared IRQ-safe copy (system-sc6530c.c). */
+#define adi_read(addr)       sc6530_adi_read(addr)
+#define adi_write(addr, val) sc6530_adi_write(addr, val)
 
 /* ---- ADC registers (adc_phy_v5.c; base 0x82001680) --------------------- */
 #define BAT_ADC_BASE      0x82001680u

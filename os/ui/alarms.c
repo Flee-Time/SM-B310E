@@ -274,6 +274,8 @@ bool alarm_delete(int i)
         return false;
     if (i < ringing_index)
         ringing_index--;
+    else if (i == ringing_index)
+        ringing_index = -1;             /* the one ringing: none, not the next one */
     for (int j = i; j + 1 < count; j++) {
         snoozed[j] = snoozed[j + 1];
         snooze_at[j] = snooze_at[j + 1];

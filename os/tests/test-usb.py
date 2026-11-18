@@ -432,10 +432,9 @@ def main():
     for lba, data in written.items():
         assert image[lba * BLOCK:lba * BLOCK + len(data)] == data, f'write at {lba} not in the image'
     result['image_writes_verified'] = True
-    log_at = image.find(b'lcd: transfer spacing')
-    log_at = log_at // 512 * 512 if log_at >= 0 else -1
-    end = image.find(b'\0', log_at) if log_at >= 0 else -1
-    log_text = image[log_at:end].decode(errors='replace') if log_at >= 0 else ''
+    # through the FAT: the log is not one run of sectors once another file
+    # (the data store) is made soon after boot
+    log_text = (BOOT['card_file'](image, '/b310e-os/log') or b'').decode(errors='replace')
     (out / 'card-log.txt').write_text(log_text)
     result['card_log'] = [l for l in log_text.splitlines() if 'usb:' in l]
     for want in ('usb: session 1 ended (unplugged)', 'usb: session 2 ended (back)'):

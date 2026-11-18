@@ -44,11 +44,12 @@ spec.loader.exec_module(capture)
 FIELDS = ('magic ticks idle_permille selftest_done selftest_pass pi_wait_ms '
           'sem_rounds_per_s keys last_key worker_loops heap_free stray_irqs cycles idle_cycles '
           'sd_code fs_mounted fs_free_kib sd_retries sd_failures fs_write_kib_per_s '
-          'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz audio_icon').split()
+          'fs_read_kib_per_s ui_depth ui_title ui_list_count battery_mv fs_count_ms ui_light apps_loaded cpu_mhz audio_icon '
+          'ui_missing_glyphs').split()
 MAGIC = 0x534f3342
 MENU = ['Apps', 'Files', 'Tools', 'System', 'Settings', 'Power']
-SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'USB', 'Storage',
-            'Developer', 'About']
+SETTINGS = ['Display', 'Sound & touch', 'Power', 'Date & time', 'Text input', 'USB',
+            'Storage', 'Developer', 'About']
 DISPLAY = ['Brightness', 'Screen off', 'Keypad light']
 ST_ALL = 0x3f
 FS_PATTERN = bytes((i * 7 + (i >> 8)) & 0xff for i in range(512))
@@ -357,10 +358,17 @@ def main():
             result['led_dark'] = hex(led)
             assert led & 0x60 == 0x20, f'backlight not switched off: {led:#x}'
             result['went_dark'] = True
-            s = wait_for(qt, base, lambda s: s['cpu_mhz'] == 26, 5, 'not 26 MHz while dark')
-            result['mhz_dark'] = s['cpu_mhz']
+            # the clock and the idle share from the kernel's own variables: dark,
+            # the UI copies them into os_status only every 10-30 s (2026-11-17)
+            level, kidle = symbol(args.elf, 'level'), symbol(args.elf, 'idle_permille')
+            mhz = lambda: {0: 26, 1: 104, 2: 208}.get(qt.read(level), -1)
+            t0 = time.time()
+            while mhz() != 26 and time.time() - t0 < 5:
+                time.sleep(0.1)
+            result['mhz_dark'] = mhz()
+            assert result['mhz_dark'] == 26, f'not 26 MHz while dark: {result}'
             time.sleep(2.5)                  # a full second counted while dark
-            result['idle_dark'] = status(qt, base)['idle_permille']
+            result['idle_dark'] = qt.read(kidle)
             assert result['idle_dark'] > 900, f'not idle while dark: {result}'
             qmp.hmp('sendkey down 100')      # only wakes
             wait_for(qt, base, lambda s: s['ui_light'] == 0, 5, 'no wake')

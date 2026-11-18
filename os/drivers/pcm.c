@@ -15,6 +15,7 @@
 #include "os/arch.h"
 #include "os/audio.h"
 #include "os/kernel.h"
+#include "os/lib.h"
 #include "drivers/audio_internal.h"
 
 #define IRQ_DMA         20
@@ -32,7 +33,8 @@
 #define VBC_REC         ((1u << 12) | (1u << 11))
 
 static int16_t plane[2][VBC_FRAMES] __attribute__((aligned(32)));
-static int16_t lr[VBC_FRAMES * 2];
+/* aligned: fill callbacks may copy into it a word at a time */
+static int16_t lr[VBC_FRAMES * 2] __attribute__((aligned(4)));
 static int16_t rec_bank[2][VBC_FRAMES] __attribute__((aligned(32)));
 
 static audio_fill_fn fill;
@@ -108,6 +110,7 @@ static void irq_update(void)
         irq_register(IRQ_DMA, dma_isr);
         irq_ready = true;
     }
+    sleep_keep_pll = running || rec_running;
     if (running || rec_running)
         irq_enable_line(IRQ_DMA);
     else
@@ -136,11 +139,75 @@ static void play_hw_stop(void)
     irq_update();
 }
 
+typedef uint32_t __attribute__((may_alias)) frame_t;     /* L | R << 16, as lr holds it */
+
+/* A new peak is rare: out of line, so the compiler keeps the branch (made
+ * conditional, the abs ran for every sample) */
+__attribute__((target("arm"), noinline))
+static uint32_t magnitude(int32_t x)
+{
+    return (uint32_t)(x < 0 ? -x : x);
+}
+
+/* |x| above pk: x + pk, unsigned, is above 2 pk (below -pk it wraps), one
+ * add and a compare with a shifted operand */
+#define PEAK(x, pk) do {                                                    \
+        if ((uint32_t)(x) + (pk) > (pk) << 1)                               \
+            (pk) = magnitude(x);                                            \
+    } while (0)
+
+/* n frames times g (Q15) into the two planes; pk raised to the largest
+ * magnitude among them. ARM -O2: the Thumb -Os loop it replaces took
+ * about 40 instructions a frame (a bounds test per frame, the gain and
+ * the peak spilled to the stack). */
+__attribute__((target("arm"), optimize("O2"), noinline))
+static unsigned split_frames(const frame_t *f, int16_t *left, int16_t *right, unsigned n,
+                             int32_t g, unsigned pk)
+{
+    const frame_t *end = f + n;
+
+    if (g == 32768) {                   /* x * 32768 >> 15 is x: full volume, no multiply */
+        const int16_t *s = (const int16_t *)(const void *)f, *e = (const int16_t *)(const void *)end;
+
+        for (; s < e; s += 2) {
+            int32_t l = s[0], r = s[1];
+
+            PEAK(l, pk);
+            PEAK(r, pk);
+            *left++ = (int16_t)l;
+            *right++ = (int16_t)r;
+        }
+    } else {                            /* below 32768 g fits 16 bits: smulbb, smultb */
+        int16_t g16 = (int16_t)g;
+
+        for (; f < end; f++) {
+            uint32_t w = *f;
+            int32_t l = (int16_t)w * g16 >> 15, r = (int16_t)(w >> 16) * g16 >> 15;
+
+            PEAK(l, pk);
+            PEAK(r, pk);
+            *left++ = (int16_t)l;
+            *right++ = (int16_t)r;
+        }
+    }
+    return pk;
+}
+
+/* the recording's bank, the same way (its loop had the same abs and max) */
+__attribute__((target("arm"), optimize("O2"), noinline))
+static unsigned bank_peak(const int16_t *s, unsigned n, unsigned pk)
+{
+    for (const int16_t *e = s + n; s < e; s++) {
+        int32_t x = *s;
+
+        PEAK(x, pk);
+    }
+    return pk;
+}
+
 static unsigned fill_plane(void)
 {
-    unsigned n = 0, got;
-    int32_t g = gain_q15;
-    unsigned pk = peak;
+    unsigned n = 0, got, pk = peak;
 
     while (n < VBC_FRAMES && !eof) {
         got = fill(lr + n * 2, VBC_FRAMES - n, fill_ctx);
@@ -148,26 +215,19 @@ static unsigned fill_plane(void)
             eof = true;
         n += got;
     }
-    for (unsigned i = 0; i < VBC_FRAMES; i++) {
-        int32_t l = i < n ? lr[2 * i] * g >> 15 : 0;
-        int32_t r = i < n ? lr[2 * i + 1] * g >> 15 : 0;
-        unsigned m = (unsigned)(l < 0 ? -l : l);
-
-        if (m > pk) pk = m;
-        m = (unsigned)(r < 0 ? -r : r);
-        if (m > pk) pk = m;
-        plane[0][i] = (int16_t)l;
-        plane[1][i] = (int16_t)r;
+    peak = split_frames((const frame_t *)(const void *)lr, plane[0], plane[1], n, gain_q15, pk);
+    if (n < VBC_FRAMES) {               /* the end: silence after it (adds nothing to the peak) */
+        memset(plane[0] + n, 0, (VBC_FRAMES - n) * sizeof(plane[0][0]));
+        memset(plane[1] + n, 0, (VBC_FRAMES - n) * sizeof(plane[1][0]));
     }
-    peak = pk;
     dcache_clean_range(plane, sizeof(plane));
     return n;
 }
 
-static void arm_channel(unsigned ch, const int16_t *samples, uint32_t port)
+static void arm_channel(unsigned ch, const int16_t *samples, uint32_t port, uint32_t irqs)
 {
     DMA_REG(ch, 8) = 0;
-    DMA_REG(ch, 12) = DMA_ACK | DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+    DMA_REG(ch, 12) = DMA_ACK | irqs;
     DMA_REG(ch, 16) = (uint32_t)samples;
     DMA_REG(ch, 20) = port;
     /* halfword widths [31:30]/[29:28], destination fixed [21:20],
@@ -177,11 +237,47 @@ static void arm_channel(unsigned ch, const int16_t *samples, uint32_t port)
     DMA_REG(ch, 8) = 0x3001u;           /* priority 3, normal request, on */
 }
 
+/* One block interrupt a plane, not two (power audit A6, 2026-11-18: both
+ * channels raised one, 2 x 300 a second at 48 kHz): only irq_ch raises it.
+ * The other one is done by then, which the interrupt checks by its raw
+ * status (bit 9); if it is not, its block interrupt is enabled and finishes
+ * the plane as before (pcm_late_channel counts that), and the interrupt moves
+ * to that channel from the next plane: which channel ends last differed from
+ * run to run on the phone (once late on every plane, once never). Errors
+ * interrupt on both. */
+uint32_t pcm_late_channel;
+static unsigned irq_ch = DMA_RIGHT;
+
 static void arm_stereo(void)
 {
     completed = 0;
-    arm_channel(DMA_LEFT, plane[0], VBC_BASE);
-    arm_channel(DMA_RIGHT, plane[1], VBC_BASE + 4);
+    arm_channel(DMA_LEFT, plane[0], VBC_BASE,
+                DMA_ERROR_IRQ | (irq_ch == DMA_LEFT ? DMA_BLOCK_IRQ : 0));
+    arm_channel(DMA_RIGHT, plane[1], VBC_BASE + 4,
+                DMA_ERROR_IRQ | (irq_ch == DMA_RIGHT ? DMA_BLOCK_IRQ : 0));
+}
+
+/* the channels whose block is done without their interrupt (raw status) */
+static void collect_quiet(void)
+{
+    for (unsigned ch = DMA_RIGHT; ch <= DMA_LEFT; ch++) {
+        uint32_t bit = 1u << ch;
+
+        if (completed & bit)
+            continue;
+        for (int i = 0; i < 16; i++) {
+            if (DMA_REG(ch, 12) & (1u << 9)) {
+                completed |= bit;
+                DMA_REG(ch, 12) = DMA_ACK | DMA_ERROR_IRQ;
+                break;
+            }
+        }
+        if (!(completed & bit)) {       /* still running: its own interrupt ends it */
+            pcm_late_channel++;
+            irq_ch = ch;                /* it ends last: its interrupt from now */
+            DMA_REG(ch, 12) = DMA_BLOCK_IRQ | DMA_ERROR_IRQ;
+        }
+    }
 }
 
 /* ---- recording ---------------------------------------------------------- */
@@ -239,13 +335,7 @@ static void rec_irq(void)
         rec_skip = rec_skip > VBC_FRAMES ? rec_skip - VBC_FRAMES : 0;
         return;
     }
-    for (unsigned i = 0; i < VBC_FRAMES; i++) {
-        unsigned m = (unsigned)(bank[i] < 0 ? -bank[i] : bank[i]);
-
-        if (m > pk)
-            pk = m;
-    }
-    peak = pk;
+    peak = bank_peak(bank, VBC_FRAMES, pk);
     sink(bank, VBC_FRAMES, sink_ctx);
 }
 
@@ -278,6 +368,8 @@ static void dma_isr(void)
         pcm_stop_why = 2;
         return;
     }
+    if (completed && completed != DMA_PLAY_MASK)
+        collect_quiet();
     if (completed != DMA_PLAY_MASK)     /* both channels done with the plane */
         return;
     if (draining) {

@@ -321,6 +321,7 @@ static void tick(screen_t *s)
 {
     sample();
     record();
+    ui_redraw();                        /* a new sample: the figures and graphs move */
 }
 
 static void enter(screen_t *s)

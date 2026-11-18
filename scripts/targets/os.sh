@@ -46,15 +46,19 @@ for game in Doom Heretic Hexen; do
 done
 # the emulators (os/ports/gnuboy, os/ports/infones): their ROMs go beside them
 # Wolf3D (os/ports/wolf4sdl): its *.WL6 go beside it
+# Blood, Shadow Warrior, Quake, the SNES (os/ports/blood, sw, quake, snes9x):
+# their data beside them as well; sdcard/ is a local staging folder (not in
+# the repository), so the SNES's non-commercial licence does not stop it
 # (a folder with an .app of its own name is an app; any other, a category)
-for pair in "gnuboy:Game Boy" "infones:NES" "wolf3d:Wolf3D" "duke3d:Duke 3D"; do
+for pair in "gnuboy:Game Boy" "infones:NES" "wolf3d:Wolf3D" "duke3d:Duke 3D" \
+            "blood:Blood" "sw:Shadow Warrior" "quake:Quake" "snes9x:SNES"; do
     app="${pair%%:*}.app" folder="${pair#*:}"
     if [ -f "$BUILD_DIR/ports/$app" ]; then
         mkdir -p "$REPO_DIR/sdcard/b310e-os/apps/$folder"
         rm -f "$REPO_DIR/sdcard/b310e-os/apps/$folder/$app"
         cp -f "$BUILD_DIR/ports/$app" "$REPO_DIR/sdcard/b310e-os/apps/$folder/$folder.app"
     else
-        echo "no $app: run python os/ports/sources.py first (gnuboy, infones, wolf4sdl, jfbuild jfmact jfduke3d jfaudiolib)"
+        echo "no $app: run python os/ports/sources.py first (gnuboy, infones, wolf4sdl, jfbuild jfmact jfduke3d jfaudiolib, nblood fpdoom, jfsw, quake, snes9x2002)"
     fi
 done
 ls -l "$REPO_DIR/sdcard/payloads/b310e-os.bin" "$REPO_DIR"/sdcard/b310e-os/apps/*.app "$REPO_DIR"/sdcard/b310e-os/apps/*/*.app 2>/dev/null || true

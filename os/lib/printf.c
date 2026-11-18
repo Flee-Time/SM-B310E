@@ -1,5 +1,5 @@
 /* B310E OS — vsnprintf: %d %i %u %x %X %o %p %s %c %%, flags '-' '0' '+',
- * width, precision for strings, 'l' and 'z' length modifiers.
+ * width, precision for strings, 'l', 'll' and 'z' length modifiers.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <stdbool.h>
@@ -24,16 +24,26 @@ static void pad(out_t *o, char c, int n)
         emit(o, c);
 }
 
-static void number(out_t *o, unsigned long v, unsigned base, bool upper,
+static void number(out_t *o, unsigned long long v, unsigned base, bool upper,
                    char sign, int width, bool left, bool zero)
 {
     char tmp[24];
     const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     int n = 0, len;
 
-    do {
-        tmp[n++] = digits[v % base];
-        v /= base;
+    do {                                /* 32-bit steps once it fits: no libgcc call */
+        unsigned d;
+
+        if (v >> 32) {
+            d = (unsigned)(v % base);
+            v /= base;
+        } else {
+            uint32_t w = (uint32_t)v;
+
+            d = w % base;
+            v = w / base;
+        }
+        tmp[n++] = digits[d];
     } while (v);
     len = n + (sign ? 1 : 0);
     if (!left && !zero)
@@ -53,8 +63,8 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
     out_t o = { buf, size, 0 };
 
     for (; *fmt; fmt++) {
-        bool left = false, zero = false, lng = false, plus = false;
-        int width = 0, prec = -1;
+        bool left = false, zero = false, plus = false;
+        int width = 0, prec = -1, lng = 0;  /* lng: 1 'l' or 'z', 2 'll' */
 
         if (*fmt != '%') {
             emit(&o, *fmt);
@@ -86,15 +96,18 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
                 prec = prec * 10 + (*fmt++ - '0');
         }
         while (*fmt == 'l' || *fmt == 'z') {
-            lng = true;
-            fmt++;
+            if (*fmt++ == 'l')
+                lng++;
+            else if (!lng)
+                lng = 1;                /* 'z': size_t is 32 bits */
         }
 
         switch (*fmt) {
         case 'd':
         case 'i': {
-            long v = lng ? va_arg(ap, long) : va_arg(ap, int);
-            number(&o, v < 0 ? -(unsigned long)v : (unsigned long)v, 10,
+            long long v = lng > 1 ? va_arg(ap, long long) :
+                          lng ? va_arg(ap, long) : va_arg(ap, int);
+            number(&o, v < 0 ? -(unsigned long long)v : (unsigned long long)v, 10,
                    false, v < 0 ? '-' : plus ? '+' : 0, width, left, zero);
             break;
         }
@@ -102,8 +115,9 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         case 'x':
         case 'X':
         case 'o': {
-            unsigned long v = lng ? va_arg(ap, unsigned long)
-                                  : va_arg(ap, unsigned int);
+            unsigned long long v = lng > 1 ? va_arg(ap, unsigned long long) :
+                                   lng ? va_arg(ap, unsigned long)
+                                       : va_arg(ap, unsigned int);
             unsigned base = *fmt == 'u' ? 10 : *fmt == 'o' ? 8 : 16;
             number(&o, v, base, *fmt == 'X', 0, width, left, zero);
             break;
@@ -123,6 +137,8 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             /* no further than the precision: the buffer may not end in a 0 */
             for (len = 0; (prec < 0 || len < prec) && s[len]; len++)
                 ;
+            if (prec >= 0 && len == prec)  /* and not inside a UTF-8 character */
+                len = (int)utf8_cut(s, (size_t)len);
             if (!left)
                 pad(&o, ' ', width - len);
             for (int i = 0; i < len; i++)
@@ -146,8 +162,10 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
             break;
         }
     }
-    if (size)
-        buf[o.len < size ? o.len : size - 1] = 0;
+    if (size && o.len < size)
+        buf[o.len] = 0;
+    else if (size)                      /* cut: on a character */
+        buf[utf8_cut(buf, size - 1)] = 0;
     return (int)o.len;
 }
 

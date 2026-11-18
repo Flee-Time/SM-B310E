@@ -2,6 +2,7 @@
  * loader, and the probe that runs the format's metadata parser.
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
+#include <setjmp.h>
 #include "glue.h"
 
 struct codec_api *ci;
@@ -12,6 +13,50 @@ struct mp3entry glue_id3;
 enum codec_status codec_start(enum codec_entry_call_reason reason)
 {
     return codec_main(reason);
+}
+
+/* Each module links its own copy of this file: the buffer is the module's.
+ * Armed only while the engine is inside the codec, so a panicf from the
+ * probe's parser (no jump set) still just returns. setjmp.S keeps r4-r11,
+ * sp and lr, all an ARM-built codec has to keep (no VFP). */
+static jmp_buf glue_jmp;
+static bool glue_armed;
+
+enum codec_status glue_start(enum codec_entry_call_reason reason)
+{
+    enum codec_status st;
+
+    if (setjmp(glue_jmp)) {
+        glue_armed = false;
+        return CODEC_ERROR;
+    }
+    glue_armed = true;
+    st = codec_start(reason);
+    glue_armed = false;
+    return st;
+}
+
+enum codec_status glue_run(void)
+{
+    enum codec_status st;
+
+    if (setjmp(glue_jmp)) {
+        glue_armed = false;
+        return CODEC_ERROR;
+    }
+    glue_armed = true;
+    st = codec_run();
+    glue_armed = false;
+    return st;
+}
+
+/* rt.c's panicf, after the engine has its flag: out of the codec. Its
+ * memory is the arena, which the engine frees with the module; it holds
+ * no lock of the engine's (it is in its own code when it panics). */
+void glue_panic(void)
+{
+    if (glue_armed)
+        longjmp(glue_jmp, 1);
 }
 
 static const char *label(unsigned type)

@@ -19,6 +19,7 @@ static uint32_t period;                 /* the tick: 26000 cycles */
 static uint32_t cur;                    /* the load running now */
 static uint32_t base;                   /* cycles before the current period */
 static uint32_t low;                    /* the lowest count read this period */
+static bool started;                    /* timer_wait_us: udelay before */
 
 /* Cycles into the current period; a period that ended but whose interrupt
  * has not run yet counts whole. It ended when bit 2 is pending, or when
@@ -67,6 +68,7 @@ void timer_init(unsigned hz, void (*tick)(void))
     REG32(T2_CTL) = 0xc0;
     irq_register(IRQ_TIMER2, timer2_isr);
     irq_enable_line(IRQ_TIMER2);
+    started = true;
 }
 
 uint32_t timer_count(void)
@@ -88,8 +90,13 @@ uint32_t timer_cycles(void)
 /* Start a new period of cycles now (tickless idle: a long one; after it,
  * the tick again). Stop, load, start, as at init: the count restarts from
  * the load on the chip. Interrupts off. */
+static bool long_bad;                   /* a load did not read back as written */
+static uint32_t long_max;               /* the longest load read back right */
+
 void timer_restart(uint32_t cycles)
 {
+    uint32_t back;
+
     if ((int32_t)cycles < 260)          /* 10 us (or late): not worth less */
         cycles = 260;
     base += into_period();
@@ -97,7 +104,33 @@ void timer_restart(uint32_t cycles)
     REG32(T2_CTL) = 0;
     REG32(T2_LOAD) = cycles;
     REG32(T2_CTL) = 0xc0;
+    /* Since 2026-11-18 a tickless sleep loads up to 60 s (1.56e9 cycles, 31
+     * bits); the 1 s before needed 25, and the sleep test's 3 s load 27. The
+     * register's width is not documented: a long load is read back, and one
+     * that differs (cut to fewer bits) is what the count runs from, so the
+     * time stays right; the kernel then keeps its sleeps to a second
+     * (timer_long_ok). An unreadable 0 changes nothing. */
+    if (cycles > TIMER_HZ) {
+        back = REG32(T2_LOAD);
+        if (back == cycles) {
+            if (cycles > long_max)
+                long_max = cycles;
+        } else if (back) {
+            long_bad = true;
+            cycles = back;
+        }
+    }
     cur = low = cycles;
+}
+
+bool timer_long_ok(void)
+{
+    return !long_bad;
+}
+
+uint32_t timer_long_max(void)
+{
+    return long_max;
 }
 
 void timer_skip(uint32_t cycles)
@@ -117,4 +150,47 @@ uint32_t timer_elapsed(uint32_t start)
     uint32_t now = REG32(T2_COUNT);
 
     return start >= now ? start - now : start + cur - now;
+}
+
+/* A busy wait on the down-counter, for waits that must not run long with the
+ * clock (udelay's 2 ms are about 2.46 ms at 26 MHz). Interrupts off for it:
+ * reads come far less than a period apart, so a count above the last read is
+ * one reload of the load running, the 1 ms tick or a tickless sleep's up to
+ * 60 s. Before timer_init, or with the count standing (the sleep test stops
+ * timer 2 or closes the timers' bus clock), udelay, which is never short.
+ *
+ * The interrupt after it counts one reload (into_period too), however many
+ * passed: a 2 ms wait on the 1 ms tick, a PLL restart, lost a period from
+ * the kernel's time. The others it saw go into base here. */
+void timer_wait_us(unsigned us)
+{
+    uint32_t need = us * (TIMER_HZ / 1000000u), sum = 0, same = 0, reloads, mark, s;
+
+    if (!started) {
+        udelay(us);
+        return;
+    }
+    s = arch_irq_save();
+    mark = REG32(T2_COUNT);
+    /* a reload not yet counted: then every one in the wait is extra */
+    reloads = (REG32(T2_INT) & 4) || mark > low ? 1 : 0;
+    while (sum < need) {
+        uint32_t now = REG32(T2_COUNT);
+
+        if (now == mark) {
+            if (++same > 10000) {
+                udelay(us);
+                break;
+            }
+            continue;
+        }
+        same = 0;
+        if (now > mark)
+            reloads++;
+        sum += mark > now ? mark - now : mark + cur - now;
+        mark = now;
+    }
+    if (reloads > 1)
+        base += (reloads - 1) * cur;
+    arch_irq_restore(s);
 }

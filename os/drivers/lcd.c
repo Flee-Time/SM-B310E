@@ -328,6 +328,36 @@ uint16_t lcd_back[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(32)));
 
 static bool asleep;
 static uint32_t last_kick, last_ms;     /* the last transfer: start, length */
+/* With cpufreq_lit_low on (power audit B1) the clock may be at 26 MHz while
+ * the panel is awake: each transfer then holds it at 104 MHz (the LCM timing
+ * is set for that AHB) from before its commands until its time has passed;
+ * lcd_tick() (the UI loop) gives the hold back. */
+static bool xfer_held;
+
+static void xfer_hold(void)
+{
+    uint32_t s;
+
+    if (!cpufreq_lit_low_on())
+        return;
+    s = arch_irq_save();
+    if (!xfer_held) {
+        xfer_held = true;
+        cpufreq_hold();
+    }
+    arch_irq_restore(s);
+}
+
+static void xfer_release(void)
+{
+    uint32_t s = arch_irq_save();
+
+    if (xfer_held) {
+        xfer_held = false;
+        cpufreq_release();
+    }
+    arch_irq_restore(s);
+}
 volatile uint32_t lcd_kicks;            /* transfers started (diagnostics) */
 volatile uint32_t lcd_rows_sent;        /* rows sent, all transfers (diagnostics) */
 volatile uint32_t lcd_skipped;          /* updates with nothing changed */
@@ -361,14 +391,49 @@ static void set_band(int y, int h)
     band_h = h;
 }
 
+/* memcmp (lib/string.c, ARM -O2: 4 words a step, out at the first that
+ * differs): this Thumb -Os word loop was 9% of a list-scroll redraw
+ * (prof, 2026-11-17). Kept out of ARM itself: lcd.c's bounded waits count
+ * loop passes, and faster code would shorten them. */
 static bool row_same(const uint16_t *a, const uint16_t *b)
 {
-    const uint32_t *p = (const uint32_t *)a, *q = (const uint32_t *)b;
+    return memcmp(a, b, LCD_WIDTH * 2) == 0;
+}
 
-    for (int i = 0; i < LCD_WIDTH / 2; i++)
-        if (p[i] != q[i])
-            return false;
-    return true;
+/* The rows of lcd_fb written since the last update that compared or sent
+ * the frame, y0 .. y1-1 (empty: y0 >= y1). ui/gfx.c widens it on every
+ * drawing call; other writers call lcd_dirty(). After such an update every
+ * row outside it is the same in lcd_fb and in the frame sent (it was
+ * compared or copied, and nothing wrote it since), so lcd_update_drawn()
+ * compares only these rows: the same band, found with fewer compares, and
+ * nothing compared when nothing was drawn. A full compare was 160 memcmp
+ * of 256 bytes, ~51k instructions, and on the phone 80 KB read through the
+ * D-cache from PSRAM (the back buffer and FRAME_ADDR), about 1 ms: memory
+ * bound, which is why a faster compare loop did not show there. The
+ * range is the UI thread's, as drawing is. */
+int lcd_dirty_y0 = 0, lcd_dirty_y1 = LCD_HEIGHT;
+
+void lcd_dirty(int y0, int y1)
+{
+    if (y0 < 0)
+        y0 = 0;
+    if (y1 > LCD_HEIGHT)
+        y1 = LCD_HEIGHT;
+    if (y0 >= y1)
+        return;
+    if (y0 < lcd_dirty_y0)
+        lcd_dirty_y0 = y0;
+    if (y1 > lcd_dirty_y1)
+        lcd_dirty_y1 = y1;
+}
+
+/* x / LCD_HEIGHT (160) without the library's divide: (x / 32) / 5, and
+ * n / 5 == n * 52429 >> 18 for n < 81920 (52429 * 5 = 2^18 + 1) */
+static uint32_t div_height(uint32_t x)
+{
+    uint32_t n = x >> 5;
+
+    return n < 81920u ? n * 52429u >> 18 : n / 5u;
 }
 
 /* Send what changed: the back buffer against the frame last sent (the
@@ -391,6 +456,18 @@ uint32_t lcd_busy_ms(void)
     return kicked && since < last_ms ? last_ms - since : 0;
 }
 
+/* The UI loop, every pass: a transfer's clock hold back once it is done. */
+bool lcd_holding(void)
+{
+    return xfer_held;
+}
+
+void lcd_tick(void)
+{
+    if (xfer_held && !lcd_busy_ms())
+        xfer_release();
+}
+
 /* A whole frame of a game's, sent as it lies: the LCDC reads it where it
  * is (32-byte aligned, left alone until the next one is sent), no copy,
  * and no 40 KB going through the D-cache and out with the game's data each
@@ -407,6 +484,7 @@ void lcd_present(const uint16_t *px)
     presented = true;
     if (asleep || !px || px == sent_px)
         return;
+    xfer_hold();
     if (kicked) {
         uint32_t since = kernel_ticks() - last_kick;
 
@@ -435,11 +513,12 @@ const uint16_t *lcd_source(void)
     return px ? px : (const uint16_t *)FRAME_ADDR;
 }
 
-void lcd_update(void)
+/* drawn: compare only the rows in lcd_dirty_y0..y1 (lcd_update_drawn) */
+static void update(bool drawn)
 {
     lcdc_t *lc = LCDC;
     const uint16_t *frame = (const uint16_t *)FRAME_ADDR;
-    int y0 = 0, y1 = LCD_HEIGHT;
+    int y0 = 0, y1 = LCD_HEIGHT, top = 0, bottom = LCD_HEIGHT;
 
     /* Not from the fault screen (abort mode): its one update must show. */
     if (presented && !arch_in_irq()) {
@@ -453,14 +532,25 @@ void lcd_update(void)
         send_all = true;
     }
     if (asleep)
-        return;
+        return;                         /* the rows drawn stay marked */
+    /* From here the frame sent ends up equal to lcd_fb (compared, or
+     * copied): the rows drawn are emptied, what is drawn after counts for
+     * the next update. */
+    if (drawn) {
+        top = lcd_dirty_y0;
+        bottom = lcd_dirty_y1;
+    }
+    lcd_dirty_y0 = LCD_HEIGHT;
+    lcd_dirty_y1 = 0;
     if (!send_all) {
-        while (y0 < LCD_HEIGHT && row_same(lcd_back + y0 * LCD_WIDTH, frame + y0 * LCD_WIDTH))
+        y0 = top;
+        while (y0 < bottom && row_same(lcd_back + y0 * LCD_WIDTH, frame + y0 * LCD_WIDTH))
             y0++;
-        if (y0 == LCD_HEIGHT) {
+        if (y0 >= bottom) {
             lcd_skipped++;
             return;
         }
+        y1 = bottom;
         while (y1 > y0 && row_same(lcd_back + (y1 - 1) * LCD_WIDTH, frame + (y1 - 1) * LCD_WIDTH))
             y1--;
         if (y1 - y0 > LCD_HEIGHT * 3 / 4) {
@@ -468,6 +558,7 @@ void lcd_update(void)
             y1 = LCD_HEIGHT;
         }
     }
+    xfer_hold();                        /* before the band's commands */
     if (kicked) {
         uint32_t since = kernel_ticks() - last_kick;
 
@@ -489,8 +580,24 @@ void lcd_update(void)
     lcd_kicks++;
     lcd_rows_sent += (uint32_t)(y1 - y0);
     last_kick = kernel_ticks();
-    last_ms = TRANSFER_MS * (uint32_t)(y1 - y0) / LCD_HEIGHT + 2;
+    last_ms = div_height(TRANSFER_MS * (uint32_t)(y1 - y0)) + 2;
     kicked = true;
+}
+
+/* Whatever wrote lcd_fb: every row compared (the console, the fault
+ * screen, anything that writes the frame without lcd_dirty) */
+void lcd_update(void)
+{
+    update(false);
+}
+
+/* For a caller whose writes to lcd_fb since the last update all went
+ * through ui/gfx.c or were marked with lcd_dirty(): only those rows are
+ * compared, none when nothing was drawn. The rows sent, the transfer and
+ * its timing are the same as lcd_update()'s. */
+void lcd_update_drawn(void)
+{
+    update(true);
 }
 
 /* Panel sleep, as Rockbox does it on the phone (docs/rockbox-power.md):
@@ -517,7 +624,10 @@ void lcd_sleep(void)
     lcm_send(0, 0x28);
     lcm_send(0, 0x10);
     thread_sleep(PANEL_SETTLE_MS);
-    REG32(AHB_PWR_OFF) = 0x1000;
+    xfer_release();
+    /* the LCDC's clock and the LCM's (AHB bit 6, as stock's deep sleep mask):
+     * nothing touches either until lcd_wake (power audit A3, 2026-11-18) */
+    REG32(AHB_PWR_OFF) = 0x1000 | 0x40;
     cpufreq_allow_low(true);
 }
 
@@ -526,7 +636,7 @@ void lcd_wake(void)
     if (!asleep)
         return;
     cpufreq_allow_low(false);           /* back to the AHB the timing assumes */
-    REG32(AHB_PWR_ON) = 0x1000;
+    REG32(AHB_PWR_ON) = 0x1000 | 0x40;
     lcm_set_mode(1);
     lcm_send(0, 0x11);
     thread_sleep(PANEL_SETTLE_MS);
@@ -549,31 +659,67 @@ bool lcd_asleep(void)
     return asleep;
 }
 
+/* The fault screen (arch_fault: interrupts off, maybe in abort mode): the
+ * panel out of its sleep as lcd_wake() does, but polled: no thread sleep, no
+ * clock request, no lock. At 26 MHz the LCM's 104 MHz timing only makes the
+ * strobes longer. Until 2026-11-18 a fault with the screen dark drew into a
+ * sleeping panel: nobody saw it. */
+void lcd_fault_wake(void)
+{
+    if (!asleep)
+        return;
+    REG32(AHB_PWR_ON) = 0x1000 | 0x40;
+    lcm_set_mode(1);
+    lcm_send(0, 0x11);
+    udelay(PANEL_SETTLE_MS * 1000);
+    lcm_send(0, 0x29);
+    lcm_exec(init_window);
+    lcm_set_mode(0x28);
+    LCDC->lcm_start = 0;
+    LCDC->lcm_size = LCD_WIDTH | LCD_HEIGHT << 16;
+    band_y = 0;
+    band_h = LCD_HEIGHT;
+    LCDC->ctrl |= 1;
+    asleep = false;
+    kicked = false;
+    send_all = true;
+}
+
 /* Time one full transfer by the LCDC's done flag (interrupt enabled in
  * the LCDC only, not in the INTC) for the boot log: microseconds, or 0
  * when the flag did not come within 50 ms. Call from a thread. */
 uint32_t lcd_measure(void)
 {
     lcdc_t *lc = LCDC;
-    uint32_t s, start, us = 0;
+    uint32_t s, prev, cycles = 0, us = 0;
 
     if (asleep)
         return 0;
     send_all = true;                    /* a whole frame, to time */
-    lcd_update();                       /* waits out the previous transfer */
+    lcd_update();                       /* waits out the previous transfer, holds */
     thread_sleep(TRANSFER_MS + 2);
     s = arch_irq_save();
     lc->irq.en |= 1;
     lc->irq.clr |= 1;
-    start = timer_cycles();
+    prev = timer_count();
     lc->ctrl |= 8;
-    while (timer_cycles() - start < 50u * 26000u) {
+    /* Interrupts off: timer_cycles() stops at about two tick periods, so
+     * it cannot bound 50 ms. Counted 10 us steps bound the wait; the time
+     * is summed from the down-counter every half period (it may wrap once). */
+    for (int n = 0; n < 5000; n++) {
+        uint32_t e = timer_elapsed(prev);
+
         if (lc->irq.raw & 1) {
-            us = (timer_cycles() - start) / 26u;
+            us = (cycles + e) / 26u;
             if (!us)                    /* seen, under 1 us (QEMU: at once) */
                 us = 1;
             break;
         }
+        if (e > timer_load() / 2) {
+            cycles += e;
+            prev = timer_count();       /* the few cycles between are lost */
+        }
+        udelay(10);
     }
     lc->irq.clr |= 1;
     lc->irq.en &= ~1u;

@@ -18,8 +18,8 @@
  *
  * peek and poke reach: the PSRAM, IRAM 0x40000000-0x4000ffff, the NOR
  * (read only) and the register blocks the OS keeps clocked (INTC,
- * timers, ADI master, GPIO, APB and AHB control, DMA, and USB while it
- * runs); anything else needs -f. A data abort is caught (probe.S) and
+ * timers, ADI master, GPIO, APB and AHB control, and DMA and USB while
+ * they are clocked); anything else needs -f. A data abort is caught (probe.S) and
  * reported, but a block whose clock is off stalls the bus instead and no
  * handler runs again: the phone hangs until the battery is pulled. The
  * analog die goes through its mailbox: "adi".
@@ -954,6 +954,8 @@ static bool addr_ok(uintptr_t a, uint32_t size, bool write)
         return false;
     if (usb_running() && a >= 0x20300000u && end <= 0x20300fffu)
         return true;
+    if (a <= 0x20102fffu && end >= 0x20100000u && !dma_clock_on())
+        return false;                   /* the DMA engine, clocked only while used */
     for (unsigned i = 0; i < ARRAY_SIZE(safe); i++)
         if (a >= safe[i].lo && end <= safe[i].hi)
             return !write || safe[i].rw;
@@ -1106,6 +1108,31 @@ static void c_bench(sess_t *s, int argc, char **argv)
     flush(s);
     tcp_flush(s->c, 1000);
     usb_bench_request(seconds, dark, nosleep);
+}
+
+/* The boot self-test on request (at boot it runs only in developer mode or
+ * on a new card): kernel objects and a 32 KB card write and read. */
+static void c_selftest(sess_t *s, int argc, char **argv)
+{
+    uint32_t t0 = kernel_ticks();
+
+    if (!selftest_start()) {
+        say(s, "ERR the self-test is running already, or its thread did not start\n");
+        return;
+    }
+    while (selftest_running() && !net_stopping && kernel_ticks() - t0 < 30000)
+        thread_sleep(50);
+    if (selftest_running()) {
+        say(s, "ERR not done after %lu ms\n", (unsigned long)(kernel_ticks() - t0));
+        return;
+    }
+    say(s, "self-test %s (done %02lx, passed %02lx) in %lu ms: card %lu KB/s write, "
+           "%lu KB/s read; %lu semaphore rounds/s, inheritance wait %lu ms\n",
+        os_status.selftest_pass == os_status.selftest_done ? "ok" : "FAILED",
+        (unsigned long)os_status.selftest_done, (unsigned long)os_status.selftest_pass,
+        (unsigned long)(kernel_ticks() - t0), (unsigned long)os_status.fs_write_kib_per_s,
+        (unsigned long)os_status.fs_read_kib_per_s, (unsigned long)os_status.sem_rounds_per_s,
+        (unsigned long)os_status.pi_wait_ms);
 }
 
 /* ---- files ------------------------------------------------------------------ */
@@ -1278,7 +1305,7 @@ static void c_crc(sess_t *s, int argc, char **argv)
     r = f_open(&f, s->path, FA_READ);
     if (r == FR_OK) {
         while (!net_stopping && (r = f_read(&f, buf, XFER_BUF, &n)) == FR_OK && n) {
-            crc = net_crc32(crc, buf, n);
+            crc = crc32_update(crc, buf, n);
             total += n;
         }
         f_close(&f);
@@ -1330,7 +1357,7 @@ static void c_put(sess_t *s, int argc, char **argv)
             r = FR_INT_ERR;
             break;
         }
-        crc = net_crc32(crc, buf, k);
+        crc = crc32_update(crc, buf, k);
         if (open && r == FR_OK && (f_write(&f, buf, k, &n) != FR_OK || n != k))
             r = FR_DENIED;
         left -= k;
@@ -1355,7 +1382,7 @@ static void c_put(sess_t *s, int argc, char **argv)
 
 static void send_blob(sess_t *s, const uint8_t *p, uint32_t size)
 {
-    uint32_t crc = net_crc32(0xffffffffu, p, size);
+    uint32_t crc = crc32_update(0xffffffffu, p, size);
 
     say(s, "DATA %lu\n", (unsigned long)size);
     out_raw(s, p, (int)size);
@@ -1395,7 +1422,7 @@ static void c_get(sess_t *s, int argc, char **argv)
         if (f_read(&f, buf, k, &n) != FR_OK || n != k)
             memset(buf, 0, k);          /* the length was promised: zeros, and a bad CRC */
         else
-            crc = net_crc32(crc, buf, k);
+            crc = crc32_update(crc, buf, k);
         out_raw(s, buf, (int)k);
         left -= k;
     }
@@ -1574,12 +1601,18 @@ static void c_key(sess_t *s, int argc, char **argv)
     };
 
     if (argc < 2) {
-        say(s, "usage: key NAME...   (up down left right center lsoft rsoft end dial 0-9 * #)\n");
+        say(s, "usage: key NAME[:hold]...   (up down left right center lsoft rsoft end dial "
+            "0-9 * #; :hold keeps it down 1 s)\n");
         return;
     }
     for (int i = 1; i < argc; i++) {
         uint8_t code = 0;
+        char *hold = strchr(argv[i], ':');
 
+        if (hold && streq(hold, ":hold"))
+            *hold = 0;                  /* a long press: the editor's digit, its picker ... */
+        else
+            hold = NULL;
         if (argv[i][0] >= '0' && argv[i][0] <= '9' && !argv[i][1])
             code = (uint8_t)(KEY_0 + argv[i][0] - '0');
         for (unsigned k = 0; k < ARRAY_SIZE(keys) && !code; k++)
@@ -1590,7 +1623,7 @@ static void c_key(sess_t *s, int argc, char **argv)
             return;
         }
         keypad_inject(code, true);
-        thread_sleep(60);
+        thread_sleep(hold ? 1000 : 60);
         keypad_inject(code, false);
         thread_sleep(60);
     }
@@ -1994,6 +2027,7 @@ static const cmd_t cmds[] = {
     { "adi", "ADDR [VAL]", "analog die register", c_adi },
     { "usbstall", "irq|low", "stall the USB link a second", c_usbstall },
     { "bench", "SECONDS [dark] [nosleep]", "USB off that long, cable in", c_bench },
+    { "selftest", "", "the boot self-test: kernel, 32 KB card write and read", c_selftest },
     { "ls", "[DIR]", "list a folder", c_ls },
     { "cd", "[DIR]", "change folder", c_cd },
     { "pwd", "", "current folder", c_pwd },
@@ -2010,7 +2044,7 @@ static const cmd_t cmds[] = {
     { "shot", "", "the screen, RGB565 (raw port)", c_shot },
     { "run", "APP [ARG]", "close the open app, load and start APP (with ARG)", c_run },
     { "close", "", "close the open app", c_close },
-    { "key", "NAME...", "press keys", c_key },
+    { "key", "NAME[:hold]...", "press keys", c_key },
     { "reboot", "[soft|menu|os|stock]", "hard reset; soft: the card's OS again, no reset", c_reboot },
     { "echo", "TEXT", "print TEXT", c_echo },
     { "exit", "", "end the session", c_exit },
@@ -2113,7 +2147,10 @@ static void server_main(void *arg)
         s->c = c;
         s->telnet = tcp_port(c) == NET_PORT_TELNET;
         sem_init(&s->exited, 0);
-        if (!thread_create("shell", PRIO_NORMAL - 2, 8192, session, s)) {
+        /* 4 KB: the deepest command from the code (-fcallgraph-info, 11-17)
+         * is db import (compact, flush, FatFs, SD) at 2.8 KB with the frame;
+         * file transfer and the L1 commands 1.4-1.5 KB; peak seen 620 B */
+        if (!thread_create("shell", PRIO_NORMAL - 2, 4096, session, s)) {
             s->used = false;
             tcp_close(c);
         }
@@ -2129,7 +2166,8 @@ int shell_start(void)
     sem_init(&server_exited, 0);
     if (tcp_listen(NET_PORT_TELNET) || tcp_listen(NET_PORT_RAW))
         return -1;
-    server = thread_create("netsh", PRIO_NORMAL - 1, 1536, server_main, NULL);
+    /* accept and hand over only: about 200 B from the code, 140 B seen */
+    server = thread_create("netsh", PRIO_NORMAL - 1, 1024, server_main, NULL);
     return server ? 0 : -1;
 }
 

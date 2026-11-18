@@ -52,6 +52,10 @@ static void auto_stop(bool unplugged);
 /* The hold a session took. A session still running keeps it, or the PLL goes off under
  * it, which kills its data pipes: usb_auto_tick gives it back when it has ended. */
 static int release_due;
+/* The card, the same way: mounted again only once the session has ended, or
+ * the PC could still be writing it. It stays suspended (nothing reads or
+ * writes it) until then. */
+static bool resume_due;
 static volatile uint32_t bench_req;     /* seconds; from the shell's thread */
 
 static void usb_release_hold(void)
@@ -65,6 +69,7 @@ static void usb_release_hold(void)
 static void storage_begin(void)
 {
     wav_stop();                         /* its file must be closed: the card goes */
+    resume_due = false;                 /* this session's end mounts it */
     memset(&st, 0, sizeof(st));
     media_queue_clear();                /* the music reads the card */
     media_stop();
@@ -88,7 +93,12 @@ static void storage_end(void)
     if (st.started)
         usb_stop();
     cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
-    usb_app_resume_result = fs_resume();
+    if (usb_running()) {                /* usb_stop timed out: usb_auto_tick mounts it */
+        resume_due = true;
+        usb_app_resume_result = -1;
+    } else {
+        usb_app_resume_result = fs_resume();
+    }
     usb_release_hold();
     if (!st.started)
         klog("usb: not started (%s)", sd_present() ? "no memory" : "no card");
@@ -111,8 +121,8 @@ static void storage_end(void)
              (unsigned long)(s ? usb_stat.bytes_written / 1024 / s : 0));
         usb_msc_trace_log();
     }
-    klog("usb: card %s", usb_app_resume_result == 0 ? "mounted again"
-                                                    : "not mounted again");
+    klog("usb: card %s", resume_due ? "mounted once the session ends" :
+                         usb_app_resume_result == 0 ? "mounted again" : "not mounted again");
 }
 
 static void usb_enter(screen_t *s)
@@ -144,6 +154,7 @@ static void usb_tick(screen_t *s)
         st.window_ms = now;
         st.window_bytes = bytes;
     }
+    ui_redraw();                        /* the transfer's figures, as before */
 }
 
 static void amount(char *buf, size_t n, const char *what, uint32_t bytes)
@@ -284,6 +295,8 @@ static void net_tick(screen_t *s)
         if (nt.cable_seen) {
             nt.unplugged = true;
             ui_pop();                   /* net_leave() stops USB */
+        } else {
+            ui_redraw();
         }
         return;
     }
@@ -296,6 +309,7 @@ static void net_tick(screen_t *s)
         net_begin();
         nt.depth = depth;
     }
+    ui_redraw();                        /* the link's figures, as before */
 }
 
 static void net_draw(screen_t *s)
@@ -393,6 +407,11 @@ static screen_t menu_screen = {
     .title = "USB", .left = "Select", .center = "OK", .right = "Back",
     .draw = menu_draw, .key = menu_key,
 };
+
+static uint32_t menu_shown(screen_t *s)
+{
+    return 0;                           /* two fixed rows: keys redraw them */
+}
 
 /* ---- in the background: the function chosen in Settings, on the plug ---- */
 
@@ -503,6 +522,15 @@ static void bench_end(void)
     usb_auto_resume();
 }
 
+/* ms until usb_auto_tick has something due (a bench's end), or UINT32_MAX:
+ * the UI's dark pass comes only every minute (ui.c dark_next) */
+uint32_t usb_auto_due_ms(uint32_t now)
+{
+    int32_t d = (int32_t)(bench_end_at - now);
+
+    return !bench_on ? UINT32_MAX : d > 0 ? (uint32_t)d : 0;
+}
+
 bool usb_auto_network(void)
 {
     return auto_fn == USB_FN_NETWORK;
@@ -529,6 +557,12 @@ void usb_auto_tick(void)
     bool cable = usb_cable();
     bool plugged = cable && !cable_was, retry;
 
+    if (resume_due && !usb_running()) {
+        resume_due = false;
+        usb_app_resume_result = fs_resume();
+        klog("usb: session over at last: card %s",
+             usb_app_resume_result == 0 ? "mounted again" : "not mounted again");
+    }
     while (release_due && !usb_running()) {
         release_due--;
         cpufreq_release();
@@ -634,6 +668,8 @@ screen_t *app_usb_menu(void)
     menu_list.count = 2;
     menu_list.item = menu_item;
     menu_list.icon = menu_icon;
+    ui_screen_shown(&menu_screen, menu_shown);
+    ui_screen_partial(&menu_screen);    /* a list_draw: the rows a key changed */
     return &menu_screen;
 }
 

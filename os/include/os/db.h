@@ -132,6 +132,10 @@ uint32_t db_changes(void);              /* changes with every change of the stor
 /* ---- the OS's side ---------------------------------------------------------------- */
 void db_init(void);                     /* load the file (main.c, after fs_init) */
 void db_tick(void);                     /* the log thread: due writes, compaction */
+/* The log thread: ms until db_tick has work, WAIT_FOREVER for none. A change
+ * that makes work while it waits for none kicks it (fs_kick). */
+uint32_t db_next_ms(void);
+bool db_new(void);                      /* the file was made at this boot: a new card */
 void db_sync(void);                     /* write everything now */
 void db_suspend(void);                  /* sync, then hands off the card (fs_suspend) */
 void db_resume(void);                   /* the card is back (fs_resume) */
@@ -158,7 +162,8 @@ void db_bulk(bool on);                  /* table writes gathered until it ends *
 
 /* ---- UTF-8 ------------------------------------------------------------------------ */
 bool utf8_valid(const char *s, size_t n);
-size_t utf8_cut(const char *s, size_t n);   /* the most of s's n bytes ending on a character */
+size_t utf8_cut(const char *s, size_t n);   /* the most of s's n bytes ending on a character
+                                             * (lib/utf8.c) */
 /* in (n bytes) as UTF-8 into out (size, NUL-ended): bytes that are not UTF-8 are
  * taken as Latin-1 (old files from a PC). Its length. */
 size_t utf8_from_latin1(const char *in, size_t n, char *out, size_t size);

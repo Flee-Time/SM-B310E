@@ -22,6 +22,22 @@
 
 uint32_t adi_read_errors;
 
+/* Interrupts off; the PLL is the caller's (the Sleep test reads with it just
+ * enabled, to see when the bus answers). */
+uint32_t adi_read_once(uint32_t addr)
+{
+    uint32_t n = ADI_BUDGET, data;
+
+    while (!(REG32(ADI_STS) & ADI_EMPTY) && --n)
+        ;
+    REG32(ADI_RD_CMD) = addr & 0xfff;
+    n = ADI_BUDGET;
+    do {
+        data = REG32(ADI_RD_DATA);
+    } while ((data >> 31) && --n);
+    return data;
+}
+
 uint32_t adi_read(uint32_t addr)
 {
     uint32_t s = arch_irq_save(), data = 0;
@@ -29,15 +45,7 @@ uint32_t adi_read(uint32_t addr)
 
     clock_pll_need();
     for (int tries = 0; tries < 3 && !ok; tries++) {
-        uint32_t n = ADI_BUDGET;
-
-        while (!(REG32(ADI_STS) & ADI_EMPTY) && --n)
-            ;
-        REG32(ADI_RD_CMD) = addr & 0xfff;
-        n = ADI_BUDGET;
-        do {
-            data = REG32(ADI_RD_DATA);
-        } while ((data >> 31) && --n);
+        data = adi_read_once(addr);
         ok = !(data >> 31) && ((data >> 16) & 0xfff) == (addr & 0xfff);
     }
     if (!ok) {                          /* 0, not another register's value */

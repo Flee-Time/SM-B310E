@@ -175,12 +175,16 @@ static void change_volume(int d)
     volume_set(vol_cat, v);
 }
 
+static uint32_t view_drawn;             /* radio_view() at the last draw */
+static uint32_t radio_view(void);
+
 static void draw(screen_t *s)
 {
     char buf[32];
     int f = fm_frequency(), x = UI_PAD, w = LCD_WIDTH - 2 * UI_PAD, p = preset_of(f);
     int vol = volume_level(vol_cat);
 
+    view_drawn = radio_view();
     labels(s);
     snprintf(buf, sizeof(buf), "%d.%d", f / 1000, f % 1000 / 100);
     gfx_text_centered(UI_TOP + 10, buf, fm_is_on() ? C_TEXT : C_DIM, FONT_HUGE, 1);
@@ -225,9 +229,35 @@ static void draw(screen_t *s)
     }
 }
 
+/* What draw() shows, as one number: the tick asks for a frame when it
+ * changes, not twenty times a second */
+static uint32_t radio_view(void)
+{
+    int f = fm_frequency();
+    uint32_t k = 2166136261u;
+    const uint32_t v[] = {
+        (uint32_t)f, (uint32_t)preset_of(f), fm_is_on(), (uint32_t)rssi, stereo, muted,
+        (uint32_t)volume_level(vol_cat), audio_headphones(), fm_speaker(), wav_recording(),
+        wav_recording() ? wav_seconds() : 0, (uint32_t)(uintptr_t)state,
+    };
+
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); i++)
+        k = (k ^ v[i]) * 16777619u;
+    return k;
+}
+
 static uint32_t conf_due;
 
+static void tick_inner(screen_t *s);
+
 static void tick(screen_t *s)
+{
+    tick_inner(s);
+    if (radio_view() != view_drawn)
+        ui_redraw();
+}
+
+static void tick_inner(screen_t *s)
 {
     if (conf_due && (int32_t)(ticks() - conf_due) >= 0) {
         conf_due = 0;

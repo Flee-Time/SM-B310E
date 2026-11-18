@@ -11,7 +11,12 @@ names both stores and the thread's end, the OS's clock goes on, and Close
 still closes the app and unloads it. Then a fault outside an app's thread (an
 undefined instruction from the app's key handler, in the UI's thread): the
 fault screen restarts the phone by itself (20 s), and the next boot's log has
-the kept registers, the pc as FaultTest+offset.
+the kept registers, the pc as FaultTest+offset. The NOR holds the boot loader's
+header, so the fault leaves the loader's menu request (0xb1 in the high byte
+of analog 0x82001148; QEMU's reset reloads the OS directly and nothing takes
+it). Then the same fault with the screen dark (# in the app: from its tick
+once the panel sleeps): the fault screen wakes the panel and lights it, and
+the next boot logs that fault too (2026-11-18).
 
   make PYTHON=python ../build/os/b310e-os.bin ../build/os/tests/faultapp.app  (from os/)
   python os/tests/test-fault.py
@@ -55,6 +60,10 @@ def main():
                     '--rockbox', str(REPO / 'sdcard/payloads/rockbox.bin'),
                     '--add', f'b310e-os/apps/faultapp.app={app.resolve()}',
                     '--output', str(card)], check=True, capture_output=True)
+    nor = out / 'nor.img'                # zeros, and the loader's header magic
+    img = bytearray(4 << 20)
+    img[0x3fc008:0x3fc010] = b'B310BOOT'
+    nor.write_bytes(bytes(img))
     qmp_port, qtest_port = free_port(), free_port()
     cmd = [str(args.qemu.resolve()), '-M', 'b310e,boot-mode=rockbox',
            '-display', os.environ.get('B310E_QEMU_DISPLAY', 'none'), '-serial', 'none', '-monitor', 'none',
@@ -63,7 +72,8 @@ def main():
            '-qmp', f'tcp:127.0.0.1:{qmp_port},server=on,wait=off',
            '-qtest', f'tcp:127.0.0.1:{qtest_port},server=on,wait=off',
            '-audiodev', 'none,id=audio0', '-global', 'sc6530_adi.audiodev=audio0',
-           '-global', 'sc6530_adi.watchdog=on']
+           '-global', 'sc6530_adi.watchdog=on',
+           '-drive', f'file={nor.as_posix()},format=raw,if=none,id=nor,readonly=on']
     env = os.environ.copy()
     if os.name == 'nt':
         env['PATH'] = r'D:\Toolchains\msys64\mingw64\bin;' + env.get('PATH', '')
@@ -120,8 +130,31 @@ def main():
         result['restarted_after_s'] = round(time.time() - t0, 1)
         qmp.command('screendump', {'filename': str(out / 'fault.png'), 'format': 'png'})
         wait_for(qt, base, lambda s: s['ui_depth'] == 1, 60, 'no UI after the restart')
+        result['request_after_fault'] = hex(qt.read(0x82001148) >> 8 & 0xff)
+        qt.write(0x82001148, qt.read(0x82001148) & 0xff)     # (the loader takes it)
         time.sleep(2)
         qmp.command('screendump', {'filename': str(out / 'last.png'), 'format': 'png'})
+        # The same fault with the screen dark
+        key('esc', 'B310E OS', 0.5)
+        key('ret', 'Menu', 0.6)
+        key('ret', 'Apps', 0.6)
+        key('ret', 'Fault test', 1.0)
+        key('slash', 'Fault test', 0.5)  # # arms it
+        t0 = time.time()
+        while time.time() - t0 < 90 and status(qt, base)['ui_light'] != 2:
+            time.sleep(0.2)
+        result['went_dark_after_s'] = round(time.time() - t0, 1)
+        time.sleep(2)                   # the fault, the panel's 121 ms, the drawing
+        led = qt.read(0x82001220)
+        result['led_on_fault_dark'] = hex(led)
+        qmp.command('screendump', {'filename': str(out / 'fault-dark.png'), 'format': 'png'})
+        t0 = time.time()
+        while time.time() - t0 < 40 and status(qt, base)['ticks'] > 3000:
+            time.sleep(0.5)
+        result['restarted_dark_after_s'] = round(time.time() - t0, 1)
+        wait_for(qt, base, lambda s: s['ui_depth'] == 1, 60, 'no UI after the second restart')
+        result['request_after_dark_fault'] = hex(qt.read(0x82001148) >> 8 & 0xff)
+        time.sleep(2)
     finally:
         if qmp:
             qmp.close()
@@ -142,6 +175,10 @@ def main():
     result['kept'] = kept
     assert kept and 'undefined instruction' in kept[0] and '(FaultTest+0x' in kept[0], result
     assert result['restarted_after_s'] < 30, result
+    assert result['request_after_fault'] == '0xb1', result
+    assert result['request_after_dark_fault'] == '0xb1', result
+    assert len(kept) >= 2 and 'undefined instruction' in kept[1], result
+    assert int(result['led_on_fault_dark'], 16) & 0x60 == 0x40, result     # lit (stock: bit 6 on)
     print('test-fault: ok')
 
 

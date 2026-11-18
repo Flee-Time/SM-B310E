@@ -19,10 +19,6 @@
 /* The running stock codec pointer at 0x042354b0 contains 0x82001a00.
  * 0x82001280 in the older port belongs to a different register layout. */
 #define CODEC 0x82001a00u
-#define ADI_STS SC_AUDIO_REG(0x82000020)
-#define ADI_CMD SC_AUDIO_REG(0x82000018)
-#define ADI_DATA SC_AUDIO_REG(0x8200001c)
-#define ADI_BUDGET 100000u
 #define EIC_CLOCKS ((1u << 25) | (1u << 26))
 static bool initialized, adi_failed;
 static bool speaker_enabled;
@@ -36,43 +32,15 @@ static int current_volume = -1000;
 static int digital_volume = -1000;
 static int volume_left = -1000, volume_right = -1000;
 
-static bool adi_wait(uint32_t mask, bool set)
-{
-    unsigned budget = ADI_BUDGET;
-    while (!!(ADI_STS & mask) != set)
-        if (!--budget)
-        {
-            adi_failed = true;
-            return false;
-        }
-    return true;
-}
-
+/* The shared IRQ-safe ADI copy (system-sc6530c.c); a failure is sticky
+ * in adi_failed as before. */
 static bool adi_read_checked(uint32_t addr, uint16_t *value)
 {
-    int old = disable_irq_save();
     uint32_t data = 0;
-    unsigned budget = ADI_BUDGET;
-    bool valid = false;
-    if (!adi_wait(1u << 8, true))
-        goto done;
-    ADI_CMD = addr & 0xfff;
-    do
-    {
-        data = ADI_DATA;
-        if (!--budget)
-        {
-            adi_failed = true;
-            goto done;
-        }
-    } while (data & (1u << 31));
-    if (((data >> 16) & 0x1fff) != (addr & 0xfff))
+    bool valid = sc6530_adi_read_checked(addr, &data);
+    if (!valid)
         adi_failed = true;
-    else
-        valid = true;
-done:
     *value = data;
-    restore_irq(old);
     return valid;
 }
 
@@ -85,13 +53,8 @@ static uint16_t adi_read(uint32_t addr)
 
 static void adi_write(uint32_t addr, uint16_t value)
 {
-    int old = disable_irq_save();
-    if (adi_wait(1u << 9, false))
-    {
-        SC_AUDIO_REG(addr) = value;
-        adi_wait(1u << 8, true);
-    }
-    restore_irq(old);
+    if (!sc6530_adi_write(addr, value))
+        adi_failed = true;
 }
 
 static void adi_update(uint32_t addr, uint16_t mask, uint16_t bits)

@@ -8,12 +8,17 @@
 struct os_api;
 const struct os_api *os;
 
+/* Kept small (linked into every app): words when the two pointers share
+ * their alignment, after bytes up to it (they went bytewise before
+ * unless both started aligned), as the OS's lib/string.c does. */
 void *memcpy(void *dst, const void *src, size_t n)
 {
     uint8_t *d = dst;
     const uint8_t *s = src;
 
-    if (!(((uintptr_t)d | (uintptr_t)s) & 3)) {
+    if (!(((uintptr_t)d ^ (uintptr_t)s) & 3)) {
+        for (; n && ((uintptr_t)d & 3); n--)
+            *d++ = *s++;
         for (; n >= 4; n -= 4, d += 4, s += 4)
             *(uint32_t *)d = *(const uint32_t *)s;
     }
@@ -34,10 +39,16 @@ void *memmove(void *dst, const void *src, size_t n)
     return dst;
 }
 
+/* a word a store after the bytes up to alignment (a byte at a time before) */
 void *memset(void *dst, int c, size_t n)
 {
     uint8_t *d = dst;
+    uint32_t w = (uint8_t)c * 0x01010101u;
 
+    for (; n && ((uintptr_t)d & 3); n--)
+        *d++ = (uint8_t)c;
+    for (; n >= 4; n -= 4, d += 4)
+        *(uint32_t *)d = w;
     while (n--)
         *d++ = (uint8_t)c;
     return dst;

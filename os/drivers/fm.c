@@ -167,6 +167,9 @@ static void tuner_power(bool on)
         GPIO1_DATA &= ~FM_RST_BIT;
         arch_irq_restore(s);
         PIN_FM_32K = pin_saved;
+        /* the I2C1 APB clock: nothing else uses the bus; i2c_hw_init opens it
+         * again (left on until 2026-11-18: power audit A3) */
+        REG32(0x8b0000a4) = 0x80000000u;
     }
     powered = on;
 }

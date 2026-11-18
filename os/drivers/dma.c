@@ -42,3 +42,46 @@ void dma_quiesce(void)
     }
     arch_irq_restore(s);
 }
+
+/* The engine's AHB clock (bit 0), counted: the codec (audio.c) and the USB
+ * controller (usb.c, which never programs a channel but enables it as stock
+ * does) each take it while they run. Closed when neither does (power audit
+ * A3, 2026-11-18; before, open from boot). Every DMA register access is
+ * between a get and its put: a gated block stalls the bus for good. */
+static unsigned dma_users;
+/* dev (poked): 0 never closes it (the pre-2026-11-18 behaviour); the users
+ * are counted either way */
+volatile uint32_t dma_gate_dev = 1;
+
+void dma_clock_get(void)
+{
+    uint32_t s = arch_irq_save();
+
+    if (dma_users++ == 0)
+        REG32(DMA_AHB_EN) = 1;
+    arch_irq_restore(s);
+}
+
+void dma_clock_put(void)
+{
+    uint32_t s = arch_irq_save();
+
+    if (dma_users && --dma_users == 0 && dma_gate_dev)
+        REG32(DMA_AHB_EN + 0x10u) = 1;  /* the clear register, 0x20500070 */
+    arch_irq_restore(s);
+}
+
+/* the boot's quiesce done: closed until a user takes it */
+void dma_clock_idle(void)
+{
+    uint32_t s = arch_irq_save();
+
+    if (!dma_users && dma_gate_dev)
+        REG32(DMA_AHB_EN + 0x10u) = 1;
+    arch_irq_restore(s);
+}
+
+bool dma_clock_on(void)
+{
+    return (REG32(0x20500080u) & 1u) != 0;
+}

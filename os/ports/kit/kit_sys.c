@@ -456,17 +456,35 @@ int _link(const char *from, const char *to)
     return -1;
 }
 
-/* FatFs does not replace: the target goes first */
+/* FatFs does not replace (a case-only rename it does do). An existing
+ * target is moved aside, not deleted first, and put back if the rename
+ * fails: a save file is never lost to a failed one. */
 int rename(const char *from, const char *to)
 {
-    char a[PATH_MAX_], b[PATH_MAX_];
+    char a[PATH_MAX_], b[PATH_MAX_], c[PATH_MAX_];
     const char *pa = full_path(from, a), *pb = full_path(to, b);
+    unsigned long size;
+    int dir;
+    uint32_t mtime;
 
-    kos_unlink(pb);
-    if (kos_rename(pa, pb)) {
-        errno = ENOENT;
+    if (!kos_rename(pa, pb))
+        return 0;
+    if (kos_stat(pa, &size, &dir, &mtime) || kos_stat(pb, &size, &dir, &mtime) || dir ||
+        snprintf(c, sizeof(c), "%s.ren~", pb) >= (int)sizeof(c)) {
+        errno = ENOENT;                 /* no source, or no file in the way */
         return -1;
     }
+    kos_unlink(c);                      /* a leftover of an earlier try */
+    if (kos_rename(pb, c)) {
+        errno = EACCES;
+        return -1;
+    }
+    if (kos_rename(pa, pb)) {
+        kos_rename(c, pb);              /* the old target back */
+        errno = EACCES;
+        return -1;
+    }
+    kos_unlink(c);
     return 0;
 }
 

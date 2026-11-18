@@ -14,17 +14,24 @@
 #include "os/kernel.h"
 #include "os/lib.h"
 #include "os/media.h"
+#include "os/ui.h"
 #include "apps/wavio.h"
 
 #define MAX_TRACKS  512
 #define PATH_MAX_   160
 #define NAMES_BYTES (64 * 1024)
+#define TRACKS_MIN  64                  /* the first size of the arrays, doubled as needed */
+#define NAMES_MIN   (4 * 1024)
 #define M3U_MAX     (16 * 1024)         /* the part of an .m3u read */
 
+/* Both grow with the list and go when it is cleared: kept at their most
+ * (66 KB) from the first song on, they were part of the 368 KB that kept
+ * Wolf3D and Blood from starting after music (11-17). A 150-track folder
+ * takes about 12 KB. */
 static char **tracks;                   /* full paths */
 static char *names;                     /* one block for them */
-static size_t names_used;
-static int count;
+static size_t names_used, names_cap;
+static int count, tracks_cap;
 int music_cur = -1;                     /* the track playing (or last played); */
 bool music_on;                          /* the queue owns the playback (the tests read both) */
 static uint16_t order[MAX_TRACKS];      /* play order: shuffled or not */
@@ -35,13 +42,46 @@ static char source[48];                 /* where the list came from */
 static uint32_t seed = 0x2545f491;
 static const char *last_error;
 
-static bool alloc(void)
+/* Room for one more track of need bytes; the limits are the old fixed ones.
+ * The paths move with the names block: the pointers to them are rebased
+ * (the UI thread is the only user, and nobody keeps them across an add). */
+static bool reserve(size_t need)
 {
-    if (!tracks)
-        tracks = kmalloc(sizeof(char *) * MAX_TRACKS);
-    if (!names)
-        names = kmalloc(NAMES_BYTES);
-    return tracks && names;
+    if (count >= tracks_cap) {
+        int cap = tracks_cap ? tracks_cap * 2 : TRACKS_MIN;
+        char **t;
+
+        if (cap > MAX_TRACKS)
+            cap = MAX_TRACKS;
+        if (count >= cap || !(t = kmalloc(sizeof(char *) * (size_t)cap)))
+            return false;
+        if (tracks) {
+            memcpy(t, tracks, sizeof(char *) * (size_t)count);
+            kfree(tracks);
+        }
+        tracks = t;
+        tracks_cap = cap;
+    }
+    if (names_used + need > names_cap) {
+        size_t cap = names_cap ? names_cap : NAMES_MIN;
+        char *n;
+
+        while (cap < names_used + need)
+            cap *= 2;
+        if (cap > NAMES_BYTES)
+            cap = NAMES_BYTES;
+        if (names_used + need > cap || !(n = kmalloc(cap)))
+            return false;
+        if (names) {
+            memcpy(n, names, names_used);
+            for (int i = 0; i < count; i++)
+                tracks[i] = n + (tracks[i] - names);
+            kfree(names);
+        }
+        names = n;
+        names_cap = cap;
+    }
+    return true;
 }
 
 static const char *base_name(const char *path)
@@ -65,7 +105,8 @@ static bool add(const char *dir, const char *name)
     bool slash = dl && dir[dl - 1] != '/';
     size_t need = dl + slash + nl + 1;
 
-    if (!alloc() || count >= MAX_TRACKS || names_used + need > NAMES_BYTES || need > PATH_MAX_)
+    if (count >= MAX_TRACKS || names_used + need > NAMES_BYTES || need > PATH_MAX_ ||
+        !reserve(need))
         return false;
     tracks[count] = names + names_used;
     memcpy(names + names_used, dir, dl);
@@ -168,7 +209,11 @@ static int play_index(int i)
     if (wav_playing() || wav_recording())
         wav_stop();                     /* a recording playing */
     music_on = media_play(tracks[i]) == 0;
-    last_error = music_on ? NULL : "the player did not start";
+    last_error = music_on ? NULL : media_error()[0] ? media_error() :   /* "not enough memory" */
+                 "the player did not start";
+    if (music_on)
+        ui_refresh();                   /* the UI loop: dark it may sleep 30 s, and the
+                                         * queue and the status icon need it now */
     return music_on ? 0 : -1;
 }
 
@@ -209,7 +254,12 @@ void media_queue_clear(void)
     }
     count = 0;
     music_cur = -1;
-    names_used = 0;
+    kfree(tracks);                      /* the engine copied the path it plays */
+    kfree(names);
+    tracks = NULL;
+    names = NULL;
+    tracks_cap = 0;
+    names_used = names_cap = 0;
     source[0] = 0;
     failures = 0;
     last_error = NULL;
@@ -237,8 +287,6 @@ int media_queue_add_folder(const char *dir, int depth)
 {
     int before = count;
 
-    if (!alloc())
-        return 0;
     scan(dir, depth);
     if (!source[0])
         snprintf(source, sizeof(source), "%s", dir);
@@ -255,7 +303,7 @@ int media_queue_add_m3u(const char *path)
     UINT got = 0;
     int skipped = 0, before = count;
 
-    if (dl >= sizeof(dir) || !alloc())
+    if (dl >= sizeof(dir))
         return 0;
     memcpy(dir, path, dl);
     dir[dl] = 0;

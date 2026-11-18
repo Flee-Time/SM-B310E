@@ -10,6 +10,7 @@
  *                       keys' tactile feedback
  *   Power               CPU speed, deep idle, chip sleep
  *   Date & time         (apps/clock.c)
+ *   Text input          the editor's languages (ui/textlang.c), word completion
  *   USB                 what a data cable starts in the background
  *   Storage             the card, the cover cache
  *   About
@@ -17,6 +18,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/audio.h"
+#include "os/db.h"
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
@@ -24,6 +26,7 @@
 #include "os/rtc.h"
 #include "os/ui.h"
 #include "build_info.h"
+#include "ui/textlang.h"
 
 enum { S_PICK, S_SWITCH, S_ACTION };
 
@@ -33,6 +36,7 @@ typedef struct {
     int kind;
     const char *const *options;         /* S_PICK */
     int n;
+    int (*count)(void);                 /* S_PICK: n when the options change */
     int (*get)(void);                   /* the option's index, or 0/1 */
     void (*set)(int v);                 /* S_PICK, S_SWITCH */
     void (*act)(void);                  /* S_ACTION */
@@ -85,7 +89,7 @@ static int get_keylight(void) { return ui_settings.keylight; }
 static void set_keylight(int on)
 {
     ui_settings.keylight = on;
-    keylight_set(on);
+    ui_keylight_touch();                /* on for a few seconds, as after a key */
 }
 
 static const char *const volume_names[] = {
@@ -310,6 +314,121 @@ static const setting_t time_rows[] = {
     { .name = "From network", .icon = &icon_usb, .kind = S_SWITCH, .get = get_net_time, .set = set_net_time },
 };
 
+/* ---- text input ------------------------------------------------------------- */
+
+static const char *lang_names[16];
+static int lang_on[16], lang_n;
+
+static void langs_fill(void)
+{
+    lang_n = input_langs_on(lang_on);
+    for (int i = 0; i < lang_n; i++)
+        lang_names[i] = input_langs[lang_on[i]].name;
+}
+
+/* the editor's language now: one of those switched on */
+static int get_lang(void)
+{
+    char code[8];
+
+    langs_fill();
+    db_get_str(INPUT_LANG_KEY, code, sizeof(code), "");
+    for (int i = 0; i < lang_n; i++)
+        if (!strcmp(input_langs[lang_on[i]].code, code))
+            return i;
+    return 0;
+}
+static int count_langs(void)
+{
+    langs_fill();
+    return lang_n;
+}
+static void set_lang(int i)
+{
+    db_set_str(INPUT_LANG_KEY, input_langs[lang_on[i]].code);
+}
+
+static int get_completion(void) { return ui_settings.completion; }
+static void set_completion(int on) { ui_settings.completion = on; }
+
+static list_t langs_list;
+
+static bool lang_is_on(int i)
+{
+    for (int k = 0; k < lang_n; k++)
+        if (lang_on[k] == i)
+            return true;
+    return false;
+}
+
+static void langs_item(void *ctx, int i, char *text, int tn, char *detail, int dn)
+{
+    snprintf(text, (size_t)tn, "%s", input_langs[i].name);
+}
+
+static int langs_toggle(void *ctx, int i)
+{
+    return lang_is_on(i);
+}
+
+static void langs_draw(screen_t *s)
+{
+    langs_fill();
+    list_draw(&langs_list);
+}
+
+/* Center switches the language on or off; the last one stays on */
+static void langs_key(screen_t *s, const key_event_t *ev)
+{
+    char list[64] = "";
+    int sel = langs_list.sel;
+
+    if (list_key(&langs_list, ev))
+        return;
+    if (ev->code == KEY_RSOFT) {
+        ui_pop();
+        return;
+    }
+    if (ev->code != KEY_CENTER && ev->code != KEY_LSOFT)
+        return;
+    langs_fill();
+    if (lang_is_on(sel) && lang_n == 1)
+        return;
+    for (int i = 0; i < input_lang_count; i++)
+        if (lang_is_on(i) != (i == sel))
+            snprintf(list + strlen(list), sizeof(list) - strlen(list), "%s%s",
+                     list[0] ? "," : "", input_langs[i].code);
+    db_set_str(INPUT_LANGS_KEY, list);
+}
+
+static screen_t langs_screen = {
+    .title = "Languages", .left = "Change", .center = "OK", .right = "Back",
+    .draw = langs_draw, .key = langs_key,
+};
+
+static void open_langs(void)
+{
+    langs_list.count = input_lang_count;
+    langs_list.item = langs_item;
+    langs_list.toggle = langs_toggle;
+    ui_push(&langs_screen);
+}
+
+static void langs_detail(char *out, int n)
+{
+    langs_fill();
+    snprintf(out, (size_t)n, "%d on", lang_n);
+}
+
+static const setting_t input_rows[] = {
+    { .name = "Language", .icon = &icon_notes, .kind = S_PICK, .options = lang_names,
+      .count = count_langs, .get = get_lang, .set = set_lang },
+    { .name = "Languages", .icon = &icon_notes, .kind = S_ACTION, .act = open_langs,
+      .detail = langs_detail },
+    { .name = "Completion", .icon = &icon_notes, .kind = S_SWITCH, .get = get_completion,
+      .set = set_completion },
+};
+
 static void about(void)
 {
     ui_message("About", "B310E OS 0.3\n\nbuilt " BUILD_DATE "\n\nGPLv2 or later\nFatFs (C) ChaN\n"
@@ -321,6 +440,7 @@ static const category_t categories[] = {
     { .title = "Sound & touch", .icon = &icon_speaker, .rows = sound_rows, .n = 6 },
     { .title = "Power", .icon = &icon_power, .rows = power_rows, .n = 3 },
     { .title = "Date & time", .icon = &icon_clock, .rows = time_rows, .n = 3 },
+    { .title = "Text input", .icon = &icon_notes, .rows = input_rows, .n = 3 },
     { .title = "USB", .icon = &icon_usb, .rows = usb_rows, .n = 1 },
     { .title = "Storage", .icon = &icon_card, .rows = storage_rows, .n = 2 },
     { .title = "Developer", .icon = &icon_cpu, .rows = dev_rows, .n = 1 },
@@ -383,7 +503,11 @@ static void page_key(screen_t *s, const key_event_t *ev)
     r = &page_cat->rows[page_list.sel];
     switch (r->kind) {
     case S_PICK:
-        ui_choose(r->name, r->options, r->n, r->get(), picked, (void *)r);
+        {
+            int cur = r->get();
+
+            ui_choose(r->name, r->options, r->count ? r->count() : r->n, cur, picked, (void *)r);
+        }
         break;
     case S_SWITCH:
         r->set(!r->get());
@@ -454,6 +578,41 @@ static screen_t settings = {
     .draw = cat_draw, .key = cat_key,
 };
 
+/* Fixed lists: their keys redraw them, not the once-a-second check (it redrew
+ * Settings every second, 9 of menu-nav's 35 frames unchanged, bench 2026-11-17) */
+static uint32_t shown_fixed(screen_t *s)
+{
+    return 0;
+}
+
+/* A page's details may change by themselves (the clock's time, the card's
+ * free space): what its rows say */
+static uint32_t page_shown(screen_t *s)
+{
+    return list_shown(&page_list);
+}
+
+static uint32_t langs_shown(screen_t *s)
+{
+    langs_fill();
+    return list_shown(&langs_list);
+}
+
+static screen_t power;                  /* below */
+
+/* Settings' screens: each draw() is a list_draw, so only the rows that change */
+static void hooks(void)
+{
+    ui_screen_shown(&settings, shown_fixed);
+    ui_screen_partial(&settings);
+    ui_screen_shown(&page, page_shown);
+    ui_screen_partial(&page);
+    ui_screen_shown(&langs_screen, langs_shown);
+    ui_screen_partial(&langs_screen);
+    ui_screen_shown(&power, shown_fixed);
+    ui_screen_partial(&power);
+}
+
 screen_t *app_settings(void)
 {
     /* opened anew: from the top (back from a screen it opened, it stays) */
@@ -461,6 +620,7 @@ screen_t *app_settings(void)
     cat_list.count = ARRAY_SIZE(categories);
     cat_list.item = cat_item;
     cat_list.icon = cat_icon;
+    hooks();
     return &settings;
 }
 
@@ -536,5 +696,6 @@ screen_t *app_power(void)
 {
     /* opened anew: from the top (back from a screen it opened, it stays) */
     power_list.sel = power_list.top = 0;
+    hooks();
     return &power;
 }

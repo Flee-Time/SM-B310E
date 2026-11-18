@@ -46,9 +46,13 @@ void fs_sync(void);             /* write the store and the log; before power-off
 void fs_suspend(void);          /* write, stop the log, unmount (for USB) */
 int fs_resume(void);            /* mount again; 0 when mounted */
 
-/* The card log: lines with uptime, buffered in RAM, written once a
- * second by a low-priority thread (OS_LOG; rotated past 256 KB). */
+/* The card log: lines with uptime (up to KLOG_LINE bytes each), buffered in
+ * RAM, written by a low-priority thread a second after the first line waiting
+ * (OS_LOG; rotated past 256 KB). The thread sleeps while there is nothing to
+ * write: a line or the store (fs_kick) wakes it. */
+#define KLOG_LINE   320
 void klog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void fs_kick(void);             /* the log thread looks again at what is due (os/db.c) */
 /* The last 8 KB of the log in RAM, card or not (the network shell's
  * "log"): bytes since *pos, which moves on; klog_pos() is the end now. */
 size_t klog_read(uint32_t *pos, char *buf, size_t n);

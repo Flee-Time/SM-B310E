@@ -119,6 +119,14 @@ if [[ "$Boot" == "ours" && ! -f "$Os" ]]; then
   echo "FAIL: os image not found at $Os (boot=ours runs the B310E OS: build.sh os, or pass -Os)"
   exit 1
 fi
+# qemu runs with the log dir as its cwd (screendumps land there), so relative
+# -Nor/-Os/-Qemu paths given by the caller must be made absolute first.
+abs_path() {
+  printf '%s/%s' "$(cd "$(dirname "$1")" && pwd)" "$(basename "$1")"
+}
+Qemu="$(abs_path "$Qemu")"
+Nor="$(abs_path "$Nor")"
+if [[ "$Boot" == "ours" ]]; then Os="$(abs_path "$Os")"; fi
 
 # ---- log dir setup -----------------------------------------------------------
 case "$D" in
@@ -160,12 +168,12 @@ if [[ -f "$logFull" ]]; then
   echo "preserved prior log -> $logFull.prior-$stamp"
 fi
 
-# Kill zombie qemu (todo-17 lesson: stale qemu holds the chardev port).
-if command -v pkill >/dev/null 2>&1; then
-  pkill -f 'qemu-system-arm' 2>/dev/null || true
-  sleep 0.8
-else
-  echo "    note: pkill not found (Linux procps) - skipping zombie-qemu kill"
+# A stale qemu can hold the monitor port (todo-17 lesson). Other sessions run
+# their own QEMUs on this machine, so never kill by name: just refuse to start
+# when the port is already taken, and only ever stop the qemu started below.
+if (exec 3<>"/dev/tcp/127.0.0.1/$MonitorPort") 2>/dev/null; then
+  echo "FAIL: monitor port $MonitorPort is already in use (another qemu?) - pass a free -MonitorPort"
+  exit 1
 fi
 
 # ---- build the qemu command line ---------------------------------------------
@@ -196,6 +204,9 @@ cd "$logDir"
 "$Qemu" "${qargs[@]}" >/dev/null 2>&1 &
 qpid=$!
 echo "qemu pid=$qpid workdir=$logDir"
+# On any early exit (monitor never opened, set -e failure, Ctrl-C) stop the
+# qemu this script started - and only that one.
+trap 'if kill -0 "$qpid" 2>/dev/null; then kill -9 "$qpid" 2>/dev/null || true; fi' EXIT
 
 # ---- monitor helpers (HMP via /dev/tcp) --------------------------------------
 t0="$(date +%s)"

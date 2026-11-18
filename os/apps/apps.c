@@ -278,10 +278,17 @@ static void draw(screen_t *s)
 {
     level_t *l = (level_t *)s;
 
-    if (l->list.count)
+    if (l->list.count) {
         list_draw(&l->list);
-    else
+    } else {
+        ui_draw_base();                 /* a partial frame: the line on its own */
         gfx_text_centered(UI_TOP + 40, "no apps here", C_DIM, FONT_SMALL, 1);
+    }
+}
+
+static uint32_t level_shown(screen_t *s)
+{
+    return 0;                           /* read at enter: keys redraw it */
 }
 
 static void key(screen_t *s, const key_event_t *ev)
@@ -323,6 +330,9 @@ static screen_t *level_new(const char *dir, const char *title)
     l->list.item = item;
     l->list.icon = item_icon;
     l->list.ctx = l;
+    /* not drawn again every second; a key redraws the rows it changed */
+    ui_screen_shown(&l->s, level_shown);
+    ui_screen_partial(&l->s);
     return &l->s;
 }
 

@@ -125,11 +125,17 @@ void keypad_resume(void)
  * enable +8, the EIC is bit 5) raises INTC line 24. The handler here only
  * masks the line and wakes the END thread, which reads the levels, posts
  * the keys and arms again (clear IC, enable IE, retrigger TRIG). While a
- * key is held, or a headset is in (its + and - are ADC levels), the thread
- * polls every 20 ms as before; otherwise it sleeps until an edge, waking
- * once a second for the jack. At start the thread checks the interrupt
- * comes (the trigger set to the level now fires at once); when it does
- * not, as in QEMU, which does not model it, it keeps polling. */
+ * key is held, or a headset's buttons are in use (its + and - are ADC
+ * levels), the thread polls every 20 ms as before; otherwise it sleeps until
+ * an edge, waking once a second for the jack. Dark with nothing holding the
+ * clock up (nothing playing, no USB) the jack does not matter until the
+ * screen wakes or a sound starts, and the UI kicks the thread then
+ * (keypad_kick): it waits a minute, a safety net only. Until 2026-11-17 it
+ * woke every second there, and with headphones in polled every 100 ms, the
+ * END key too: about 1.9 PLL starts a second in dark idle were this and the
+ * UI's charger read. At start the thread checks the interrupt comes (the
+ * trigger set to the level now fires at once); when it does not, as in
+ * QEMU, which does not model it, it keeps polling. */
 #define EIC_IEV      0x82001914u        /* 1: trigger on high */
 #define EIC_IE       0x82001918u
 #define EIC_MIS      0x82001920u
@@ -137,14 +143,24 @@ void keypad_resume(void)
 #define EIC_TRIG     0x82001928u        /* restart the debounce */
 #define EIC_CTRL(n)  (0x82001940u + 4u * (n))
 #define EIC_KEYS     (1u << EIC_END | 1u << EIC_HOOK)
+#define EIC_CHARGER  2                  /* stock EIC 18: active high, 200 ms debounce */
+#define EIC_WATCH    (EIC_KEYS | 1u << EIC_CHARGER)
 #define ANA_INT_EN   0x82001588u
 #define ANA_INT_EIC  (1u << 5)
 #define IRQ_ANA      24
 #define IDLE_WAIT_MS 1000               /* the jack, and a safety net */
+#define DARK_WAIT_MS 60000              /* dark and silent: a safety net only */
+#define JACK_SETTLE_MS 1000             /* audio.c's button check: 300 + 100 ms after the plug */
 
 static sem_t eic_sem;
 static bool eic_irq;                    /* the interrupt works: wait for it */
 volatile uint32_t eic_irq_count;        /* diagnostics */
+/* The charger (analog EIC channel 2) changed: the UI runs its second's work
+ * (usb_auto_tick, the charge state) at once. Its trigger is armed with the
+ * keys', so a plug in the dark wakes the phone by interrupt instead of the
+ * UI's 10 s cable poll (power audit A7, 2026-11-18). */
+static volatile bool charger_changed;
+volatile uint32_t charger_events;       /* diagnostics */
 
 static void ana_isr(void)
 {
@@ -156,18 +172,18 @@ static void ana_isr(void)
 /* trigger when a key's level differs from level (the bits of EIC_DATA) */
 static void eic_arm(uint32_t iev)
 {
-    adi_write(EIC_IEV, (adi_read(EIC_IEV) & ~EIC_KEYS) | (iev & EIC_KEYS));
-    adi_write(EIC_IC, adi_read(EIC_IC) | EIC_KEYS);
-    adi_write(EIC_IE, adi_read(EIC_IE) | EIC_KEYS);
-    adi_write(EIC_TRIG, adi_read(EIC_TRIG) | EIC_KEYS);
+    adi_write(EIC_IEV, (adi_read(EIC_IEV) & ~EIC_WATCH) | (iev & EIC_WATCH));
+    adi_write(EIC_IC, adi_read(EIC_IC) | EIC_WATCH);
+    adi_write(EIC_IE, adi_read(EIC_IE) | EIC_WATCH);
+    adi_write(EIC_TRIG, adi_read(EIC_TRIG) | EIC_WATCH);
     irq_enable_line(IRQ_ANA);
 }
 
 static void eic_disarm(void)
 {
     irq_disable_line(IRQ_ANA);
-    adi_write(EIC_IE, adi_read(EIC_IE) & ~EIC_KEYS);
-    adi_write(EIC_IC, adi_read(EIC_IC) | EIC_KEYS);
+    adi_write(EIC_IE, adi_read(EIC_IE) & ~EIC_WATCH);
+    adi_write(EIC_IC, adi_read(EIC_IC) | EIC_WATCH);
 }
 
 static void eic_irq_setup(void)
@@ -175,6 +191,8 @@ static void eic_irq_setup(void)
     sem_init(&eic_sem, 0);
     for (unsigned ch = EIC_END; ch <= EIC_HOOK; ch++)   /* debounce 50, on */
         adi_write(EIC_CTRL(ch), (adi_read(EIC_CTRL(ch)) & ~0xfffu) | 50u | 1u << 14);
+    adi_write(EIC_CTRL(EIC_CHARGER),    /* stock's 200 ms (gpio_prod, NOR 0xc4dc4) */
+              (adi_read(EIC_CTRL(EIC_CHARGER)) & ~0xfffu) | 200u | 1u << 14);
     adi_write(EIC_IE, adi_read(EIC_IE) & ~EIC_KEYS);
     adi_write(ANA_INT_EN, ANA_INT_EIC); /* only the EIC (stock clears it at boot) */
     irq_register(IRQ_ANA, ana_isr);
@@ -183,11 +201,12 @@ static void eic_irq_setup(void)
 /* the trigger set to the levels now: a working interrupt comes at once */
 static bool eic_irq_check(void)
 {
-    uint32_t level = adi_read(EIC_DATA);
+    uint32_t level = adi_read(EIC_DATA), count = eic_irq_count;
     bool ok;
 
     eic_arm(level);
-    ok = sem_wait(&eic_sem, 100) == WAIT_OK;
+    /* the interrupt's count, not the semaphore: a keypad_kick is not one */
+    ok = sem_wait(&eic_sem, 100) == WAIT_OK && eic_irq_count != count;
     eic_disarm();
     while (sem_wait(&eic_sem, 0) == WAIT_OK)
         ;
@@ -202,16 +221,23 @@ static void end_key_main(void *arg)
         { AUDIO_HS_CENTER, KEY_HS_CENTER }, { AUDIO_HS_PLUS, KEY_HS_PLUS },
         { AUDIO_HS_MINUS, KEY_HS_MINUS },
     };
-    bool was = false;
+    bool was = false, jack_was = false, chg_was;
     unsigned hs_was = 0;
-    uint32_t end_since = 0;
+    uint32_t end_since = 0, jack_since = 0;
 
     eic_irq = eic_irq_check();
+    chg_was = (adi_read(EIC_DATA) >> EIC_CHARGER) & 1;
     for (;;) {
         uint32_t eic = adi_read(EIC_DATA), t = kernel_ticks();
-        bool now = (eic >> EIC_END) & 1;
+        bool now = (eic >> EIC_END) & 1, quiet, jack, buttons, chg = (eic >> EIC_CHARGER) & 1;
         unsigned held = audio_headset_tick((eic >> EIC_HOOK) & 1, t);
 
+        if (chg != chg_was) {
+            chg_was = chg;
+            charger_events++;
+            charger_changed = true;
+            post(0, false);             /* wakes the UI loop */
+        }
         if (now != was) {
             was = now;
             end_since = t;
@@ -233,21 +259,46 @@ static void end_key_main(void *arg)
             if ((held ^ hs_was) & hs[i].bit)
                 post(hs[i].code, (held & hs[i].bit) != 0);
         hs_was = held;
-        if (eic_irq && !now && !(eic & 1u << EIC_HOOK) && !audio_headphones()) {
-            /* nothing held, no headset: until an edge, or a second */
+        /* dark with no clock hold: nothing plays (the codec holds it), so a
+         * headset's buttons are off (audio_headset_idle) and only END counts */
+        quiet = lcd_asleep() && !cpufreq_holds();
+        /* Headphones without buttons (3-pole: audio.c finds no mic line,
+         * about 400 ms after the plug) need no 20 ms poll either: until
+         * 2026-11-18 any headphones kept it polling while lit. A second
+         * after the plug the check is long done; the buttons, once found,
+         * stay enabled while plugged. */
+        jack = audio_headphones();
+        if (jack && !jack_was)
+            jack_since = t;
+        jack_was = jack;
+        if (jack && !held && t - jack_since >= JACK_SETTLE_MS) {
+            audio_headset_info_t hi;
+
+            audio_headset_info(&hi);
+            buttons = hi.buttons;
+        } else {
+            buttons = jack;
+        }
+        if (eic_irq && !now && !(eic & 1u << EIC_HOOK) &&
+            (!buttons || (quiet && !held))) {
+            /* nothing held, no headset in use: until an edge, a kick, or the time */
             static unsigned idle_wakes;
+            uint32_t count = eic_irq_count;
+            int r;
+            bool irq;
 
             eic_arm(~eic);
-            if (sem_wait(&eic_sem, IDLE_WAIT_MS) == WAIT_OK &&
-                !((adi_read(EIC_DATA) ^ eic) & EIC_KEYS)) {
+            r = sem_wait(&eic_sem, quiet ? DARK_WAIT_MS : IDLE_WAIT_MS);
+            irq = eic_irq_count != count;
+            if (r == WAIT_OK && irq && !((adi_read(EIC_DATA) ^ eic) & EIC_WATCH)) {
                 /* woken with nothing changed: a bounce, once; many in a
                  * row would starve the UI (this thread is high priority) */
                 if (++idle_wakes >= 8) {
                     eic_irq = false;
                     klog("end key: EIC interrupts without a change, polled from now");
                 }
-            } else {
-                idle_wakes = 0;
+            } else if (irq || r != WAIT_OK) {
+                idle_wakes = 0;         /* a kick alone says nothing of bounces */
             }
             eic_disarm();
             continue;
@@ -286,12 +337,32 @@ void keypad_init(void)
 
     adi_write(0x820010e4, 0x20);         /* EIC clocks, END channel */
     adi_write(0x820010e0, 0x80);
-    adi_write(EIC_DMSK, adi_read(EIC_DMSK) | 1u << EIC_END | 1u << EIC_HOOK);
+    adi_write(EIC_DMSK, adi_read(EIC_DMSK) | EIC_WATCH);  /* the charger's too:
+                                         * its level reads 0 without (battery.c) */
     eic_irq_setup();
 
     irq_register(IRQ_KEYPAD, keypad_isr);
     irq_enable_line(IRQ_KEYPAD);
     thread_create("endkey", PRIO_HIGH, 1024, end_key_main, NULL);
+}
+
+/* The charger plugged or unplugged since the last call (irq-safe). */
+bool keypad_charger_event(void)
+{
+    uint32_t s = arch_irq_save();
+    bool c = charger_changed;
+
+    charger_changed = false;
+    arch_irq_restore(s);
+    return c;
+}
+
+/* The screen woke, or a sound started: the END thread looks at the jack and
+ * the headset again now, not at the end of its dark wait (irq-safe). */
+void keypad_kick(void)
+{
+    if (eic_irq)
+        sem_post(&eic_sem);
 }
 
 int keypad_get(key_event_t *ev, uint32_t timeout_ms)

@@ -1028,7 +1028,7 @@ void usb_test_stall(int how)
  * verified on the phone); no DMA channel is ever programmed. */
 static void hw_start(void)
 {
-    REG32(AHB_EB_SET) = AHB_DMA_EB;
+    dma_clock_get();                    /* AHB_DMA_EB, counted (dma.c) */
     usb_ldo(false);
     REG32(AHB_EB_SET) = AHB_USB_EB2;
     REG32(APB_MISC_CTL0) &= ~APB_USB_PD;
@@ -1050,9 +1050,12 @@ static void hw_connect(void)
     usb_ldo(true);
 }
 
-/* The AHB clock stays on: reaching a gated block stalls the bus for good,
- * and nothing must be able to touch it late. The LDO is what the bus and
- * the battery care about. */
+/* The USB AHB clocks stay on: reaching a gated block stalls the bus for
+ * good, and nothing must be able to touch it late (bit 8 is not USB's
+ * alone: closing it froze the phone). The LDO is what the bus and the
+ * battery care about; the PHY goes back to power-down (hw_start clears it,
+ * as stock's vcom_usb init; left on until 2026-11-18, power audit A4), and
+ * the DMA engine's clock is given back (no channel was ever programmed). */
 static void hw_stop(void)
 {
     uint32_t i;
@@ -1064,8 +1067,10 @@ static void hw_stop(void)
     bulk_cancel();
     cancel(&ep0);
     configured = false;
+    REG32(APB_MISC_CTL0) |= APB_USB_PD;
     arch_irq_restore(i);
     usb_ldo(false);
+    dma_clock_put();
 }
 
 static void session(void *arg)
@@ -1144,7 +1149,9 @@ int usb_start_function(int which)
     sem_init(&cfg_sem, 0);
     sem_init(&exited, 0);
     gen++;
-    session_thread = thread_create("usb", PRIO_HIGH, 4096, session, NULL);
+    /* 2 KB: about 600 B from the code (the function's run, a klog, the
+     * class callbacks under udc_service), 588 B seen with the network up */
+    session_thread = thread_create("usb", PRIO_HIGH, 2048, session, NULL);
     if (!session_thread) {
         fn->exit();
         usb_stat.state = USB_OFF;

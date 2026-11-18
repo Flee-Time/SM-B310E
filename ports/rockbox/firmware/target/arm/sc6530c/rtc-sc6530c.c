@@ -67,35 +67,9 @@
 #define DAY_MAX       43829u          /* 2099-12-31 */
 #define ACK_WAIT_TICKS (HZ * 2)       /* the stock firmware's 100 x 20 ms */
 
-/* Bounded ADI mailbox (fpdoom/B310E-OS pattern). */
-#define ADI_RD_CMD      0x82000018
-#define ADI_RD_DATA     0x8200001C
-#define ADI_FIFO_STS    0x82000020
-#define ADI_FIFO_FULL   (1 << 9)
-#define ADI_FIFO_EMPTY  (1 << 8)
-#define ADI_BUDGET      1000000u
-
-static uint32_t adi_read(uint32_t addr)
-{
-    uint32_t a = 0, n = ADI_BUDGET;
-
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)
-        if (--n == 0) break;
-    return a & 0xffffu;
-}
-
-static void adi_write(uint32_t addr, uint32_t val)
-{
-    uint32_t n = ADI_BUDGET;
-
-    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) return;
-    REG32(addr) = val;
-    n = ADI_BUDGET;
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return;
-}
+/* Bounded ADI mailbox: the shared IRQ-safe copy (system-sc6530c.c). */
+#define adi_read(addr)       sc6530_adi_read(addr)
+#define adi_write(addr, val) sc6530_adi_write(addr, val)
 
 /* ---- calendar ----------------------------------------------------------- */
 

@@ -34,6 +34,8 @@ static void draw_char(int col, int row, char c)
     const uint8_t *g;
     uint16_t *p = lcd_fb + row * 8 * LCD_WIDTH + col * 6;
 
+    /* not gfx_*: the rows are marked for the UI's lcd_update_drawn() */
+    lcd_dirty(row * 8, row * 8 + 8);
     if ((unsigned char)c < 0x20 || (unsigned char)c > 0x7e)
         c = '?';
     g = font5x7[c - 0x20];
@@ -44,6 +46,7 @@ static void draw_char(int col, int row, char c)
 
 static void clear_rows(int from, int to)
 {
+    lcd_dirty(from * 8, to * 8);        /* not gfx_*: see draw_char */
     for (int y = from * 8; y < to * 8; y++)
         for (int x = 0; x < LCD_WIDTH; x++)
             lcd_fb[y * LCD_WIDTH + x] = bg;
@@ -53,6 +56,7 @@ static void scroll(void)
 {
     int rows = CON_ROWS - top_row;
 
+    lcd_dirty(top_row * 8, CON_ROWS * 8);   /* not gfx_*: see draw_char */
     if (rows > 1)
         memmove(lcd_fb + top_row * 8 * LCD_WIDTH,
                 lcd_fb + (top_row + 1) * 8 * LCD_WIDTH,

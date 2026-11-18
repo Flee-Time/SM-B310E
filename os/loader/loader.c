@@ -76,24 +76,6 @@ void app_cpufreq_release(void)
     }
 }
 
-/* ---- CRC-32 (IEEE), four bits at a time ---------------------------------- */
-static uint32_t crc32_update(uint32_t crc, const void *data, size_t n)
-{
-    static const uint32_t t[16] = {
-        0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac, 0x76dc4190, 0x6b6b51f4,
-        0x4db26158, 0x5005713c, 0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
-        0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c,
-    };
-    const uint8_t *p = data;
-
-    while (n--) {
-        crc ^= *p++;
-        crc = (crc >> 4) ^ t[crc & 15];
-        crc = (crc >> 4) ^ t[crc & 15];
-    }
-    return crc;
-}
-
 /* ---- memory owned by an app ---------------------------------------------- */
 /* (allocs_lock held) */
 static void track(app_t *a, void *p)
@@ -314,11 +296,6 @@ static void unload(app_t *a)
 #define PART (64u * 1024)               /* the log's CRCs are per 64 KB */
 #define PARTS (APP_MAX_SIZE / PART)
 
-static uint32_t crc_of(const void *p, size_t n)
-{
-    return ~crc32_update(0xffffffffu, p, n);
-}
-
 /* The CRC of each 64 KB of the image and of the relocations, as read
  * first (part[], relocs) and as the file reads now, a piece at a time into
  * a small block: parts that differ between the reads point at the read or
@@ -376,22 +353,27 @@ static void crc_report(FIL *f, const app_t *a, const app_file_t *h,
 static const char *load(FIL *f, app_t *a, const app_file_t *h)
 {
     uint32_t reloc[RELOC_CHUNK], crc = 0xffffffffu, left = h->reloc_count;
-    uint32_t part[PARTS], rcrc = 0xffffffffu;
+    uint32_t at[PARTS + 1], image_crc;
     UINT n;
 
     if (f_read(f, a->image, h->image_size, &n) != FR_OK || n != h->image_size)
         return "read error";
-    crc = crc32_update(crc, a->image, h->image_size);
-    for (uint32_t i = 0; i * PART < h->image_size; i++)     /* for crc_report */
-        part[i] = crc_of(a->image + i * PART,
-                         h->image_size - i * PART < PART ? h->image_size - i * PART : PART);
+    /* One pass: the running CRC at each 64 KB is kept, and crc_report's
+     * per-part CRCs are worked out from those only when the check fails
+     * (the image CRC'd a second time per part was 44% of Doom's load). */
+    at[0] = crc;
+    for (uint32_t i = 0; i * PART < h->image_size; i++) {
+        crc = crc32_update(crc, a->image + i * PART,
+                           h->image_size - i * PART < PART ? h->image_size - i * PART : PART);
+        at[i + 1] = crc;
+    }
+    image_crc = crc;
     while (left) {
         uint32_t k = left > RELOC_CHUNK ? RELOC_CHUNK : left;
 
         if (f_read(f, reloc, k * 4, &n) != FR_OK || n != k * 4)
             return "read error";
         crc = crc32_update(crc, reloc, k * 4);
-        rcrc = crc32_update(rcrc, reloc, k * 4);
         for (uint32_t i = 0; i < k; i++) {
             uint32_t off = reloc[i], v;
 
@@ -415,7 +397,11 @@ static const char *load(FIL *f, app_t *a, const app_file_t *h)
         left -= k;
     }
     if (~crc != h->crc32) {
-        crc_report(f, a, h, part, ~rcrc);
+        /* each part's CRC as first read; at[i] is used before it is replaced */
+        for (uint32_t i = 0; i * PART < h->image_size; i++)
+            at[i] = crc32_part(at[i], at[i + 1],
+                               h->image_size - i * PART < PART ? h->image_size - i * PART : PART);
+        crc_report(f, a, h, at, crc32_part(image_crc, crc, h->reloc_count * 4u));
         return "damaged (CRC)";
     }
     memset(a->image + h->image_size, 0, h->bss_size);

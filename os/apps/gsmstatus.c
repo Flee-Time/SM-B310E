@@ -732,6 +732,7 @@ static void tick(screen_t *s)
     if (!radio_status.busy && !radio_status.runs &&
         dsp_info.state != DSP_BOOTING && dsp_info.state != DSP_RUNNING)
         start();
+    ui_redraw();                        /* the worker's results, as they come */
 }
 
 static void key(screen_t *s, const key_event_t *ev)

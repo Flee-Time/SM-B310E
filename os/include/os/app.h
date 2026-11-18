@@ -88,13 +88,25 @@
  * channel, receive only). */
 /* 2.14 (2026-11-09): ui_is_dark, so a game can stop while the panel is asleep; ui_depth;
  * settings: awake_limit_s, player_idle_s; key_event_t.repeat. */
+/* 2.15 (2026-11-09): l1_api_t: tx_min_power, tx_min_power_on, cal_readback,
+ * access_post, uplink_post, dm_est, after dm_sched (the minimum-power transmit
+ * test, the RACH and uplink bursts; os/dsp.h). */
 /* 2.16 (2026-11-10): app_on_fault, after ui_depth. The NOR window is read-only:
  * a store there (a NULL pointer's) by an app's thread no longer stops the OS;
  * the thread goes to the handler it set, or ends. */
 /* 2.17 (2026-11-17): the data store (os/db.h), after app_on_fault: the app's own
  * settings and tables, kept under "app/<its name>/" (it reaches no others), and
  * the UTF-8 helpers. */
-#define OS_API_MINOR 17
+/* 2.18 (2026-11-17): ui_text_edit_ex, after utf8_from_latin1: the editor with
+ * UI_TEXT_* flags (a field with no word completion, one for numbers). Nothing
+ * else moved: ui_text_edit types in several languages now, ui_settings gained
+ * completion at its end, ui_screen_mode UI_MODE_HOLD_KEYS (long presses), and
+ * the fonts draw Latin-1, Latin Extended-A, Cyrillic and common signs. */
+/* 2.19 (2026-11-18): nothing new in the table; a screen's tick() asks for its
+ * frame with ui_redraw() when it changed what draw() shows, and a screen with
+ * a tick() is no longer drawn again every second for nothing. Apps built for
+ * 2.18 or older are still redrawn after every tick (ui/ui.c tick_redraws). */
+#define OS_API_MINOR 19
 
 #define APP_MAGIC   0x50413342u         /* "B3AP" */
 #define APP_DIR     "/b310e-os/apps"
@@ -397,6 +409,10 @@ struct os_api {
     bool (*utf8_valid)(const char *s, size_t n);
     size_t (*utf8_cut)(const char *s, size_t n);
     size_t (*utf8_from_latin1)(const char *in, size_t n, char *out, size_t size);
+
+    /* 2.18 */
+    void (*ui_text_edit_ex)(const char *title, const char *initial, int max, unsigned flags,
+                            void (*done)(const char *text, void *ctx), void *ctx);
 };
 
 /* ---- the OS side (os/loader) -------------------------------------------- */

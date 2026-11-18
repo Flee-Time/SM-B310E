@@ -217,10 +217,22 @@ static void sc6530_uart_init(Object *obj)
     sysbus_init_mmio(sbd, &s->iomem);
 }
 
+/* line_len indexes line_buf: refuse a snapshot that puts it out of range. */
+static int sc6530_uart_post_load(void *opaque, int version_id)
+{
+    Sc6530UartState *s = SC6530_UART(opaque);
+
+    if (s->line_len < 0 || s->line_len > (int)sizeof(s->line_buf)) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
 static const VMStateDescription sc6530_uart_vmsd = {
     .name = "sc6530_uart",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = sc6530_uart_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32(ien, Sc6530UartState),
         VMSTATE_UINT32(iclr, Sc6530UartState),

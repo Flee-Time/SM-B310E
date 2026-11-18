@@ -121,6 +121,7 @@ def measure(s, ohms, seconds, csv_path=None):
         out.append((time.monotonic(), ma, ma_lo, ma_hi, r))
         if writer:
             writer.writerow((round(time.time(), 2), round(ma, 3), round(ma_lo, 2), round(ma_hi, 2), r))
+            f.flush()                   # a killed run keeps its samples
     s.write(b'stop\n')
     time.sleep(0.2)
     s.reset_input_buffer()

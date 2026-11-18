@@ -11,7 +11,8 @@
  *  - DMA targets must be IRAM (sd.c bounces through 0x40004000);
  *  - the probe runs with interrupts masked (sd.c).
  * Long data waits (the card programming a block, up to 250-500 ms by the
- * SD spec) sleep 1 ms at a time once the scheduler runs.
+ * SD spec) sleep 1 ms at a time once the scheduler runs, after a spin of
+ * about the transfer's own time (SPIN_*).
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
@@ -92,6 +93,15 @@ enum {
 #define DATA_SPIN_BUDGET  2000u      /* ~40 us: the data clocks out */
 #define DATA_WAIT_BUDGET  20000000u  /* without a scheduler */
 #define DATA_WAIT_MS      1500
+/* Then a spin with the scheduler running, before and once after the first
+ * 1 ms sleep: a 4 KB read ran at 2.0 MB/s with the CPU 98% idle (11-17),
+ * as each transfer, well under 1 ms of bus time at 24 MHz 4-bit (about
+ * 45 us a block), paid a whole tick or two. Bounded in udelay steps. */
+#define SPIN_STEP_US      10
+#define SPIN_BASE_US      150        /* the card's access time */
+#define SPIN_BLOCK_US     50
+#define SPIN_MAX_US       600
+#define SPIN_TAIL_US      300        /* a transfer that ends just past a tick */
 
 unsigned sdio_shl;                   /* 0 block-addressed, 9 byte-addressed */
 uint32_t sdio_num_blocks;
@@ -130,9 +140,28 @@ static void busy_ms(uint32_t ms)    /* interrupts may be off: no timer */
     DELAY(ms * 40000u);
 }
 
-void sdio_init(void)
+/* The card's power-up wait. Until 2026-11-18 a fixed 350 ms at every boot
+ * (QEMU: 70 M instructions, 86% of boot, the tick stopped through it). The SD
+ * spec wants the supply ramped (at most 35 ms) and 74 clocks before CMD0.
+ * Booted by our loader the supply is on already: it has just read this OS
+ * from the card. The recovery from a wedged card (sd.c) keeps the old wait:
+ * the card's state is unknown there. */
+#define POWER_WARM_MS     1         /* on already: the 74 clocks (0.1 ms at 750 kHz) */
+#define POWER_COLD_MS     40        /* switched on here: the spec's 35 ms ramp */
+#define POWER_RECOVER_MS  350       /* the old wait, as verified on the phone */
+#define ACMD41_MS         5
+#define ACMD41_TRIES      600       /* 3 s, as 150 x 20 ms before */
+uint32_t sdio_acmd41_tries;         /* the last probe's, for the log */
+
+/* The SD LDO (bit 0 of the analog die's LDO pair, as USB's bit 4 and the
+ * SIM's bit 1): 0x82001184 power-down (set = off), 0x820011a4 power-up
+ * (set = on). It counts as on only when both read so: a failed ADI read is 0,
+ * which takes the cold wait. Returns true when it was on; *ldo the two
+ * values read (power-down low half, power-up high half), for the log. */
+bool sdio_init(bool recover, uint32_t *ldo)
 {
-    uint32_t addr = 0x8c000250u, tmp;
+    uint32_t addr = 0x8c000250u, tmp, pd, up;
+    bool on;
 
     REG32(0x20500060) = 0x400;          /* SDIO0 clock */
     ahb_reset();
@@ -151,18 +180,36 @@ void sdio_init(void)
     }
     DELAY(100);
 
-    adi_write(0x82001184, adi_read(0x82001184) & ~1u);   /* SD LDO on */
-    adi_write(0x820011a4, adi_read(0x820011a4) | 1u);
+    /* the same reads and writes in the same order as before; the values
+     * read also say whether the supply was on */
+    pd = adi_read(0x82001184);
+    adi_write(0x82001184, pd & ~1u);    /* SD LDO on */
+    up = adi_read(0x820011a4);
+    adi_write(0x820011a4, up | 1u);
+    on = !(pd & 1u) && (up & 1u);
+    if (ldo)
+        *ldo = (pd & 0xffffu) | up << 16;
 
     SDIO->ctrl2 = (SDIO->ctrl2 & ~(0xffu << 8)) | 0x40u << 8;   /* 750 kHz */
     clk_wait(1);
     clk_wait(4);
-    busy_ms(350);                       /* card power-up */
+    busy_ms(recover ? POWER_RECOVER_MS : on ? POWER_WARM_MS : POWER_COLD_MS);
 
     tmp = SDIO->int_en;                 /* data timeout count 14 */
     SDIO->int_en = tmp & ~(1u << 20);
     SDIO->ctrl2 = (SDIO->ctrl2 & ~(15u << 16)) | 14u << 16;
     SDIO->int_en = tmp;
+    return on;
+}
+
+/* int_st polled for up to us; interrupts stay on (a tick may preempt it) */
+static uint32_t data_spin(uint32_t done, unsigned us)
+{
+    uint32_t st;
+
+    for (us /= SPIN_STEP_US; !((st = SDIO->int_st) & done) && us; us--)
+        udelay(SPIN_STEP_US);
+    return st;
 }
 
 /* One command; returns int_st. resp is filled when no error occurred. */
@@ -193,18 +240,27 @@ static uint32_t command(uint32_t tr, uint32_t arg, uint32_t ints, void *data,
     if (data && !(st & done)) {
         bool sched = kernel_running() && !arch_in_irq();
         uint32_t end = kernel_ticks() + DATA_WAIT_MS;
+        unsigned spin = SPIN_BASE_US + count * SPIN_BLOCK_US;
+        bool slept = false;
 
         if (sched && count == 1)
             keypad_resume();            /* only the card's programming left */
+        if (sched)
+            st = data_spin(done, spin < SPIN_MAX_US ? spin : SPIN_MAX_US);
         n = DATA_WAIT_BUDGET;
-        do {
+        while (!(st & done) && --n) {
             if (sched) {
                 if ((int32_t)(kernel_ticks() - end) >= 0)
                     break;
                 thread_sleep(1);
+                if (!slept) {
+                    slept = true;
+                    st = data_spin(done, SPIN_TAIL_US);
+                    continue;
+                }
             }
             st = s->int_st;
-        } while (!(st & done) && --n);
+        }
         if (sched && count == 1)
             keypad_pause();
     }
@@ -265,7 +321,11 @@ int sdcard_init(void)
             return 1;
         }
     }
-    for (tries = 0; tries < 150; tries++) {
+    /* The card's own init after CMD0 (OCR busy). Asked every 5 ms, not 20: a
+     * card the loader had just used is ready within a few tries, and each
+     * try past that was up to 20 ms more of the probe. The same 3 s bound
+     * (the spec's limit is 1 s; any interval up to 50 ms is allowed). */
+    for (tries = 0; tries < ACMD41_TRIES; tries++) {
         st = command(CMD55, 0, INT_COMMON, NULL, 0, NULL);
         if (st & INT_CMD_COMPLETE)
             st = command(ACMD41, 0xff8000u | ver << 30, INT_ACMD41, NULL, 0, r);
@@ -275,11 +335,13 @@ int sdcard_init(void)
             if ((int32_t)r[0] < 0)
                 goto ready;
         }
-        busy_ms(20);
+        busy_ms(ACMD41_MS);
     }
+    sdio_acmd41_tries = (uint32_t)tries;
     return 2;
 
 ready:
+    sdio_acmd41_tries = (uint32_t)tries + 1;
     sdio_shl = (r[0] & (1u << 30)) ? 0 : 9;     /* OCR CCS */
     if (!(command(CMD2, 0, INT_R2, NULL, 0, r) & INT_CMD_COMPLETE))
         return 3;
@@ -311,6 +373,34 @@ int sdio_card_status(uint32_t *status)
         return -1;
     *status = r[0];
     return 0;
+}
+
+/* CMD7: select the card (its RCA) or deselect it (0: stand-by, no response
+ * expected; the timeout that follows is harmless). */
+int sdio_select(bool on)
+{
+    uint32_t r[4], st = command(CMD7, on ? rca : 0, INT_COMMON, NULL, 0, r);
+
+    return on && ((st & INT_ERR) || !(st & INT_CMD_COMPLETE)) ? -1 : 0;
+}
+
+/* The SD LDO off (sdio_init switches it on again, the cold wait then). */
+void sdio_power_off(void)
+{
+    uint32_t s = arch_irq_save();       /* other drivers share the pair */
+
+    adi_write(0x820011a4, adi_read(0x820011a4) & ~1u);
+    adi_write(0x82001184, adi_read(0x82001184) | 1u);
+    arch_irq_restore(s);
+}
+
+void sdio_power_on(void)
+{
+    uint32_t s = arch_irq_save();
+
+    adi_write(0x82001184, adi_read(0x82001184) & ~1u);
+    adi_write(0x820011a4, adi_read(0x820011a4) | 1u);
+    arch_irq_restore(s);
 }
 
 void sdio_stop(void)

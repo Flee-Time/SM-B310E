@@ -173,6 +173,7 @@ static void enter(screen_t *s)
 
 static void tick(screen_t *s)
 {
+    ui_redraw();                        /* the reader thread's results, as they come */
 }
 
 static void key(screen_t *s, const key_event_t *ev)

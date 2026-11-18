@@ -294,6 +294,15 @@ static void sc6530_dma_write(void *opaque, hwaddr offset,
         /* Software requests are bounded by the programmed transfer length. */
         if (c->remaining <= 16 * 1024 * 1024) {
             sc6530_dma_transfer(s, ch, c->remaining);
+        } else {
+            /* More than all of PSRAM in one MMIO write: refuse it the way
+             * an unsupported config is refused (error flag, channel off,
+             * interrupt) instead of leaving the guest waiting forever. */
+            qemu_log_mask(LOG_UNIMP, "sc6530_dma: transfer of %u bytes "
+                          "over 16 MiB refused ch=%u\n", c->remaining, ch + 1);
+            c->reg[CH_INT] |= 1u << 12;
+            c->reg[CH_CFG] &= ~1u;
+            sc6530_dma_irq(s);
         }
         c->reg[CH_REQ] = 0;
     }

@@ -93,6 +93,12 @@ $(BUILD)/%.o: %.c $(BUILD)/build_info.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+# Hot loops built ARM -O2 (the later flags win over -mthumb -Os). A list-
+# scroll redraw spent 74% in gfx.c's blend/fill/round/alpha_map and 16% in
+# memcpy plus lcd_update's row compare (memcmp now); prof, 2026-11-17.
+# Costs about 3.3 KB (gfx.o) and 1.2 KB (string.o) of image.
+$(BUILD)/ui/gfx.o $(BUILD)/lib/string.o: CFLAGS += -marm -O2
+
 $(BUILD)/fatfs/%.o: $(FATFS)/%.c fs/ffconf.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -w -MMD -MP -c $< -o $@

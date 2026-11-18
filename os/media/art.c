@@ -465,6 +465,25 @@ static int extend(int v, int n)
     return n && v < 1 << (n - 1) ? v - (1 << n) + 1 : v;
 }
 
+/* Damaged data must not overflow the sums. A valid 8-bit picture keeps
+ * its DC prediction within +-2048 and its coefficients within a few
+ * thousand, far inside these bounds, so its pixels do not change. */
+#define DC_LIMIT    32767
+#define COEF_LIMIT  16383               /* 8 of these times cos16 still fit an int32 */
+
+static int dc_add(int dc, int diff)
+{
+    dc += diff;                         /* |dc| <= DC_LIMIT, |diff| < 65536: no overflow */
+    return dc < -DC_LIMIT ? -DC_LIMIT : dc > DC_LIMIT ? DC_LIMIT : dc;
+}
+
+static int dequant(int v, int q)
+{
+    int32_t p = v * q;                  /* |v| <= 32767, q <= 65535: fits */
+
+    return p < -COEF_LIMIT ? -COEF_LIMIT : p > COEF_LIMIT ? COEF_LIMIT : (int)p;
+}
+
 /* one block into the plane at (bx, by), scale N pixels a side */
 static bool block(jpeg_t *j, comp_t *c, int bx, int by, int N)
 {
@@ -472,10 +491,10 @@ static bool block(jpeg_t *j, comp_t *c, int bx, int by, int N)
     int s = decode_huff(j, &j->dc[c->td]), k;
     const uint16_t *q = j->q[c->tq];
 
-    if (s < 0)
-        return false;
-    c->dc += extend(bits_n(j, s), s);
-    coef[0] = c->dc * q[0];
+    if (s < 0 || s > 16)
+        return false;                   /* a damaged table: 16 bits at most */
+    c->dc = dc_add(c->dc, extend(bits_n(j, s), s));
+    coef[0] = dequant(c->dc, q[0]);
     for (k = 1; k < 64; ) {
         int rs = decode_huff(j, &j->ac[c->ta]), r, sz;
 
@@ -498,7 +517,7 @@ static bool block(jpeg_t *j, comp_t *c, int bx, int by, int N)
             int pos = zigzag[k];
 
             if ((pos >> 3) < N && (pos & 7) < N)    /* only the N x N corner */
-                coef[pos] = extend(bits_n(j, sz), sz) * q[k];
+                coef[pos] = dequant(extend(bits_n(j, sz), sz), q[k]);
             else
                 bits_n(j, sz);
         }
@@ -599,9 +618,9 @@ static bool dc_unit(jpeg_t *j, comp_t *c, int16_t *dcv, int bx, int by, int ah, 
     if (!ah) {
         int s = decode_huff(j, &j->dc[c->td]);
 
-        if (s < 0)
-            return false;
-        c->dc += extend(bits_n(j, s), s);
+        if (s < 0 || s > 16)
+            return false;               /* a damaged table: 16 bits at most */
+        c->dc = dc_add(c->dc, extend(bits_n(j, s), s));
         if (p)
             *p = (int16_t)(c->dc * (1 << al));
     } else if (bit(j) && p) {
@@ -1003,14 +1022,14 @@ static void itable(itable_t *t, const uint8_t *len, int n)
 
     memset(t->count, 0, sizeof(t->count));
     for (int i = 0; i < n; i++)
-        t->count[len[i]]++;
+        t->count[len[i] & 15]++;        /* lengths are 0..15: never past count[] */
     t->count[0] = 0;
     offs[1] = 0;
     for (int i = 1; i < 15; i++)
         offs[i + 1] = (uint16_t)(offs[i] + t->count[i]);
     for (int i = 0; i < n; i++)
-        if (len[i])
-            t->sym[offs[len[i]]++] = (uint16_t)i;
+        if (len[i] & 15)
+            t->sym[offs[len[i] & 15]++] = (uint16_t)i;
 }
 
 static int isym(inflate_t *z, const itable_t *t)
@@ -1103,6 +1122,8 @@ static bool inflate_run(inflate_t *z)
             for (int i = 0; i < hlit + hdist && !z->err; ) {
                 int sym = isym(z, ct), rep = 0, val = 0;
 
+                if (sym < 0)
+                    break;              /* -1 is no length: it was stored as 255 */
                 if (sym < 16) {
                     l[i++] = (uint8_t)sym;
                     continue;
@@ -1119,6 +1140,8 @@ static bool inflate_run(inflate_t *z)
                 while (rep-- && i < hlit + hdist)
                     l[i++] = (uint8_t)val;
             }
+            if (z->err)
+                break;                  /* no tables from a broken header */
             itable(lt, l, hlit);
             itable(dt, l + hlit, hdist);
         } else {
@@ -1391,11 +1414,20 @@ static const char *const folder_names[] = {
 };
 static const char *const folder_exts[] = { ".jpg", ".jpeg", ".png" };
 
+/* The pixels are on the heap only while a cover is wanted: the two 18 KB
+ * static buffers (37.6 KB of BSS) were held for good (11-17). The thread
+ * decodes into a buffer of side * side that then becomes the result (no
+ * second copy); a new request frees the old result, and ART_IDLE_MS after
+ * the last art_get() or request the thread frees it and ends. */
+#define ART_IDLE_MS 30000
+
 static struct {
     mutex_t lock;
     sem_t wake;
-    thread_t *thread;
+    bool inited;
+    thread_t *thread;                   /* under lock: NULL once it ends */
     volatile uint32_t gen;              /* a new request cancels the decode */
+    uint32_t used_at;                   /* the last request or art_get() */
     /* the request */
     char path[160];
     media_info_t info;
@@ -1403,7 +1435,7 @@ static struct {
     bool pending;
     /* the result */
     char done_path[160];
-    uint16_t px[MAX_SIDE * MAX_SIDE];
+    uint16_t *px;                       /* done_side * done_side, or NULL */
     int done_side;
     int state;                          /* 0 none yet, 1 ready, 2 no cover */
 } art;
@@ -1507,10 +1539,33 @@ static bool cover_from(const char *path, uint32_t pos, uint32_t size, uint32_t f
 }
 
 
+/* Nothing asked for in ART_IDLE_MS (Now playing asks ten times a second
+ * while it shows): the result goes and the thread may end; false if a
+ * request came. The request is forgotten too, so the same cover asked for
+ * again is read again (from the cache, at once). */
+static bool art_idle(void)
+{
+    uint16_t *px;
+
+    mutex_lock(&art.lock, WAIT_FOREVER);
+    if (art.pending || kernel_ticks() - art.used_at < ART_IDLE_MS) {
+        mutex_unlock(&art.lock);
+        return false;
+    }
+    px = art.px;
+    art.px = NULL;
+    art.state = 0;
+    art.done_path[0] = 0;
+    art.path[0] = 0;
+    art.side = 0;
+    art.thread = NULL;                  /* art_request() starts one again */
+    mutex_unlock(&art.lock);
+    kfree(px);
+    return true;
+}
+
 static void art_main(void *arg)
 {
-    static uint16_t px[MAX_SIDE * MAX_SIDE];
-
     for (;;) {
         char path[160], cover[200], from[240];
         const char *how = "";
@@ -1518,8 +1573,15 @@ static void art_main(void *arg)
         int side;
         uint32_t gen, t0, csize;
         bool ok = false;
+        uint16_t *px;
+        uint32_t since = kernel_ticks() - art.used_at;
 
-        sem_wait(&art.wake, WAIT_FOREVER);
+        /* to ART_IDLE_MS after the last use: it ends then, not up to twice that */
+        if (sem_wait(&art.wake, since < ART_IDLE_MS ? ART_IDLE_MS - since : 1) != WAIT_OK) {
+            if (art_idle())
+                thread_exit();          /* the idle thread frees the 6 KB stack */
+            continue;
+        }
         mutex_lock(&art.lock, WAIT_FOREVER);
         if (!art.pending) {
             mutex_unlock(&art.lock);
@@ -1534,13 +1596,15 @@ static void art_main(void *arg)
 
         t0 = kernel_ticks();
         from[0] = 0;
-        if (info.art_type != MEDIA_ART_NONE && info.art_size) {
+        /* decoded into the buffer that becomes the result */
+        px = kmalloc(sizeof(uint16_t) * (size_t)side * (size_t)side);
+        if (px && info.art_type != MEDIA_ART_NONE && info.art_size) {
             ok = cover_from(path, info.art_pos, info.art_size, info.art_flags, side, px, gen,
                             &how);
             if (ok)
                 snprintf(from, sizeof(from), "the tags (%s)", how);
         }
-        if (!ok && art.gen == gen && folder_cover(path, cover, sizeof(cover), &csize)) {
+        if (px && !ok && art.gen == gen && folder_cover(path, cover, sizeof(cover), &csize)) {
             ok = cover_from(cover, 0, csize, 0, side, px, gen, &how);
             if (ok)
                 snprintf(from, sizeof(from), "%s (%s)", cover, how);
@@ -1550,34 +1614,52 @@ static void art_main(void *arg)
             memcpy(art.done_path, path, sizeof(path));
             art.done_side = side;
             art.state = ok ? 1 : 2;
-            if (ok)
-                memcpy(art.px, px, sizeof(uint16_t) * (size_t)side * (size_t)side);
-            klog("art: %s: %s%s, %lu ms", path, ok ? "cover from " : "no cover",
-                 ok ? from : "", (unsigned long)(kernel_ticks() - t0));
+            klog("art: %s: %s%s, %lu ms", path, ok ? "cover from " : px ? "no cover" :
+                 "no memory for the cover", ok ? from : "", (unsigned long)(kernel_ticks() - t0));
+            if (ok) {
+                kfree(art.px);          /* NULL: the request freed the last one */
+                art.px = px;
+                px = NULL;
+            }
         }
         mutex_unlock(&art.lock);
+        kfree(px);                      /* no cover, or a newer request */
         ui_refresh();                   /* the cover (or its placeholder) now */
     }
 }
 
 void art_request(const char *path, const media_info_t *info, int side)
 {
+    uint16_t *old;
+
     if (side > MAX_SIDE)
         side = MAX_SIDE;
-    if (!art.thread) {
+    if (!art.inited) {
         mutex_init(&art.lock);
         sem_init(&art.wake, 0);
-        art.thread = thread_create("art", PRIO_NORMAL - 3, 6144, art_main, NULL);
-        if (!art.thread)
-            return;
+        art.inited = true;
     }
     mutex_lock(&art.lock, WAIT_FOREVER);
+    art.used_at = kernel_ticks();
     /* the last one asked for is waiting, being decoded or done: asking
      * again (Now playing draws ten times a second) must not restart it */
     if (art.side == side && !strcmp(art.path, path)) {
         mutex_unlock(&art.lock);
         return;
     }
+    /* under the lock: the thread clears it under it as it ends, so the
+     * request goes to a thread that sees it */
+    if (!art.thread) {
+        /* 6 KB for a measured peak of 2540 bytes (11-17): kept, it ends at idle */
+        art.thread = thread_create("art", PRIO_NORMAL - 3, 6144, art_main, NULL);
+        if (!art.thread) {
+            mutex_unlock(&art.lock);
+            return;
+        }
+    }
+    old = art.px;                       /* valid until this request (os/art.h) */
+    art.px = NULL;
+    art.done_path[0] = 0;
     snprintf(art.path, sizeof(art.path), "%s", path);
     art.info = *info;
     art.side = side;
@@ -1585,6 +1667,7 @@ void art_request(const char *path, const media_info_t *info, int side)
     art.state = 0;
     art.gen++;                          /* the decode under way gives up */
     mutex_unlock(&art.lock);
+    kfree(old);
     sem_post(&art.wake);
 }
 
@@ -1593,9 +1676,10 @@ const uint16_t *art_get(const char *path, int side, int *state)
     const uint16_t *r = NULL;
     int st = 0;
 
-    if (!art.thread)
+    if (!art.inited)
         return NULL;
     mutex_lock(&art.lock, WAIT_FOREVER);
+    art.used_at = kernel_ticks();       /* in use: the thread keeps the pixels */
     if (!strcmp(art.done_path, path) && art.done_side == side && !art.pending) {
         st = art.state;
         if (st == 1)

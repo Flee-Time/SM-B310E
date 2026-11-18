@@ -252,35 +252,16 @@ void sdio_init(void)
 
     logf("sdio: 4 ldo");
     /* SD power LDOs: adi_write 0x82001184 &= ~1 ; 0x820011a4 |= 1 (bounded
-     * ADI mailbox, same as the B310E-OS keypad driver). */
+     * ADI mailbox: the shared IRQ-safe copy in system-sc6530c.c; a read
+     * that fails its echo check skips that write instead of storing
+     * another register's value). */
     {
-        uint32_t a, n;
+        uint32_t a;
 
-        REG32(0x82000018) = 0x82001184u & 0xfffu;
-        a = 0; n = SDIO_WAIT_BUDGET;
-        while ((a = REG32(0x8200001cu)) >> 31)
-            if (--n == 0) break;
-        a &= 0xffffu;
-        n = SDIO_WAIT_BUDGET;
-        while (REG32(0x82000020u) & (1u << 9))
-            if (--n == 0) break;
-        REG32(0x82001184u) = a & ~1u;
-        n = SDIO_WAIT_BUDGET;
-        while (!(REG32(0x82000020u) & (1u << 8)))
-            if (--n == 0) break;
-
-        REG32(0x82000018) = 0x820011a4u & 0xfffu;
-        a = 0; n = SDIO_WAIT_BUDGET;
-        while ((a = REG32(0x8200001cu)) >> 31)
-            if (--n == 0) break;
-        a &= 0xffffu;
-        n = SDIO_WAIT_BUDGET;
-        while (REG32(0x82000020u) & (1u << 9))
-            if (--n == 0) break;
-        REG32(0x820011a4u) = a | 1u;
-        n = SDIO_WAIT_BUDGET;
-        while (!(REG32(0x82000020u) & (1u << 8)))
-            if (--n == 0) break;
+        if (sc6530_adi_read_checked(0x82001184u, &a))
+            sc6530_adi_write(0x82001184u, a & ~1u);
+        if (sc6530_adi_read_checked(0x820011a4u, &a))
+            sc6530_adi_write(0x820011a4u, a | 1u);
     }
 
     sdio_sdfreq_val(sdio, 0x40);            /* 750 kHz for card init */

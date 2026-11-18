@@ -35,7 +35,30 @@
 #define CLK_HALF    4u
 #define PLL_CTL     0x8b000020u
 #define PLL_EN      1u
-#define PLL_LOCK_US 2000u               /* as tried on the phone; not a measured minimum */
+/* No flag says the PLL is locked after a software enable. The status word
+ * 0x8b000120 is the sleep controller's (APB_SLP_STS0): its bit 9, the PLL's
+ * count done, reports that controller's own wake only and never set after an
+ * enable here (phone; stock's code agrees). Stock never stops the PLL in
+ * software: only the sleep controller drops it in a deep sleep.
+ *
+ * The hardware holds the PLL's clock back itself after the enable: 320
+ * slow-clock cycles, 9.77 ms on the phone. An analog read right after the
+ * enable comes back right but only 9.83 ms later, at any delay from 0 to
+ * 2 ms, and the switch up onto the PLL stalls the same way (Sleep test,
+ * 2026-11-18). The
+ * 2 ms waited here before then only moved part of the stall into a counted
+ * wait: the rest, interrupts off and the CPU stalled, was lost from the
+ * kernel's time (8.9 ms a restart). So the wait covers the gate, plus a
+ * margin.
+ *
+ * The gate is not the PLL_WAIT field (0x8b000024 [9:0], 320 at reset, never
+ * written by stock): written to 64 (the SC6530 SDK's figure, read back so),
+ * and XTL_WAIT (0x8b000000 [9:0], also 320) to 64 as well, each left the gate
+ * at 9.76 ms, every read right (Sleep test, 2026-11-18). A wait taken from
+ * the register then ended 7.7 ms early and the switch up stalled for the
+ * rest, so the wait is the measured figure, whatever the register holds. */
+#define PLL_GATE_US    9766u            /* 320 cycles of 32768 Hz */
+#define PLL_MARGIN_US  100u
 
 static const struct {
     uint8_t sel, half, shift;           /* shift: udelay loops per us, log2 */
@@ -90,13 +113,21 @@ void clock_pll_stop(void)
         REG32(PLL_CTL) &= ~PLL_EN;
 }
 
-/* Interrupts off: back, and locked. The wait is at the crystal's speed. */
+uint32_t clock_pll_lock_us(void)
+{
+    return PLL_GATE_US + PLL_MARGIN_US;
+}
+
+/* Interrupts off: back, and given out by the hardware (dark idle: about 0.1
+ * restarts a second on the phone, 2026-11-18). Timed on timer 2, which keeps
+ * the kernel's time across it: udelay's loops are a power of two a us, 8 at
+ * 26 MHz where 6.5 are needed, so its 2 ms were about 2.46 ms. */
 void clock_pll_need(void)
 {
     if (!(REG32(PLL_CTL) & PLL_EN)) {
         REG32(PLL_CTL) |= PLL_EN;
         pll_starts++;
-        udelay(PLL_LOCK_US);
+        timer_wait_us(clock_pll_lock_us());
     }
 }
 
@@ -144,10 +175,16 @@ int clock_level_mhz(int l)
  * often enough that the 32-bit cycle count cannot wrap between calls. */
 void clock_account(void)
 {
-    uint32_t now = timer_cycles();
+    uint32_t now = timer_cycles(), d = now - level_mark;
 
+    /* A read a few cycles behind the last one is not 2^32 cycles (165 s)
+     * later: with music in bursts (many level changes a second) a 540 s
+     * bench once summed 2853 s of levels (phone, 2026-11-18). Real gaps are
+     * far below 2^31 cycles (the tickless cap is 60 s). */
+    if ((int32_t)d < 0)
+        return;
     if (level >= 0)
-        level_cycles[level] += now - level_mark;
+        level_cycles[level] += d;
     level_mark = now;
 }
 

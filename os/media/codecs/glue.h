@@ -27,6 +27,12 @@ extern struct mp3entry glue_id3;
 int glue_probe(struct codec_api *api, int fd, codec_track_t *out,
                const int *formats, glue_parser_t parse);
 void glue_start_at(unsigned long ms);
+/* codec_start and codec_run with a way out: a panicf in the codec (rt.c)
+ * jumps back here and the call ends with CODEC_ERROR, so nothing more of
+ * the codec runs on the heap it found broken */
+enum codec_status glue_start(enum codec_entry_call_reason reason);
+enum codec_status glue_run(void);
+void glue_panic(void);                  /* returns only outside those two */
 
 #define CODEC_MODULE(name_, exts_, desc_, arena_, formats_, parser_)        \
     static int module_probe_(struct codec_api *api, int fd,                 \
@@ -37,6 +43,6 @@ void glue_start_at(unsigned long ms);
     const codec_module_t codec_module                                       \
         __attribute__((section(".codec_module"), used)) = {                 \
         CODEC_ABI_MAJOR, CODEC_ABI_MINOR, name_, exts_, desc_, arena_,      \
-        module_probe_, glue_start_at, codec_start, codec_run }
+        module_probe_, glue_start_at, glue_start, glue_run }
 
 #endif

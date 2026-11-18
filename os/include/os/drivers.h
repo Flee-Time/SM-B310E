@@ -21,12 +21,21 @@ extern uint16_t lcd_back[LCD_WIDTH * LCD_HEIGHT];
 
 void lcd_init(void);
 void lcd_update(void);          /* push the whole frame (not while asleep) */
+/* Only the rows written through ui/gfx.c or marked with lcd_dirty() since
+ * the last update are compared (drivers/lcd.c); a writer of lcd_fb that is
+ * not gfx_* marks its rows, or the next push is a full lcd_update(). */
+void lcd_update_drawn(void);
+void lcd_dirty(int y0, int y1);     /* rows y0 .. y1-1 written, clipped */
+extern int lcd_dirty_y0, lcd_dirty_y1;  /* the rows written (gfx.c widens them) */
 uint32_t lcd_busy_ms(void);     /* the last push: how long it still takes */
+bool lcd_holding(void);         /* a transfer holds the clock (cpufreq_lit_low) */
+void lcd_tick(void);            /* the UI loop: that hold back once done */
 void lcd_present(const uint16_t *px);  /* a whole frame, sent where it lies; NULL: as it is */
 const uint16_t *lcd_source(void);    /* what it shows: a game's frame, or the OS's */
 void lcd_sleep(void);           /* display off, panel sleep, LCDC clock off */
 void lcd_wake(void);            /* back on, then pushes the frame */
 bool lcd_asleep(void);
+void lcd_fault_wake(void);      /* the fault screen: the panel on, polled */
 uint32_t lcd_transfer_ms(void);     /* the spacing between transfers */
 extern volatile uint32_t lcd_kicks; /* transfers started */
 uint32_t lcd_measure(void);         /* one transfer by the done flag, us */
@@ -38,6 +47,10 @@ void vibrator_set(int level);       /* 0 off, 1..7 */
 
 /* ---- system DMA (drivers/dma.c) ------------------------------------------ */
 void dma_quiesce(void);             /* every channel off, every request unbound */
+void dma_clock_get(void);           /* the engine's AHB clock, counted */
+void dma_clock_put(void);
+void dma_clock_idle(void);          /* closed now unless taken */
+bool dma_clock_on(void);
 
 /* ---- GPIO, torch (drivers/gpio.c) --------------------------------------- */
 void gpio_clock_on(void);
@@ -65,6 +78,8 @@ typedef struct {
 void keypad_init(void);
 int keypad_get(key_event_t *ev, uint32_t timeout_ms);
 void keypad_inject(uint8_t code, bool down);    /* code 0: a wake-up only */
+void keypad_kick(void);             /* END thread: the jack again now (screen woke, sound started) */
+bool keypad_charger_event(void);    /* the charger's level changed since the last call */
 const char *keypad_name(uint8_t code);
 /* Stop / restart the matrix scan around SDIO DMA (a held key during it
  * hangs the phone); resume first collects edges that came meanwhile. */
@@ -93,6 +108,9 @@ uint32_t sd_sectors(void);      /* 512-byte blocks */
 int sd_read(uint32_t lba, void *buf, unsigned count);
 int sd_write(uint32_t lba, const void *buf, unsigned count);
 void sd_get_stats(sd_stats_t *out);
+void sd_hold(void);             /* no transfer until sd_release() (thread) */
+void sd_idle_tick(void);        /* the UI's second: an idle card deselected or off (dev) */
+void sd_release(void);
 
 /* ---- text console on the LCD ------------------------------------------- */
 #define CON_COLS (LCD_WIDTH / 6)    /* 21 */

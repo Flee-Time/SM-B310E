@@ -46,36 +46,13 @@
 #define TX_COUNT()     ((SIM_STS2 >> 8) & 0x7f)
 #define ETU_CLOCKS     0xba0       /* 8 x 372: 26 MHz / 8 = 3.25 MHz, F=372 D=1 */
 
-/* ANA (through the ADI bridge) */
-#define ADI_RD_CMD   0x82000018u
-#define ADI_RD_DATA  0x8200001cu
-#define ADI_FIFO_STS 0x82000020u
+/* ANA (through the ADI bridge: the shared IRQ-safe copy, system-sc6530c.c) */
 #define LDO_PD_SET   0x82001184u   /* VSIM power-down: set = off */
 #define LDO_PD_CLR   0x820011a4u   /* set = on */
 #define LDO_VSIM_V   0x820011c8u   /* VSIM0 bits 7:4, VSIM1 bits 11:8 */
 
-static uint32_t adi_read(uint32_t addr)
-{
-    uint32_t a = 0, n = 1000000;
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)
-        if (!--n)
-            break;
-    return a & 0xffff;
-}
-
-static void adi_write(uint32_t addr, uint32_t value)
-{
-    uint32_t n = 1000000;
-    while (REG32(ADI_FIFO_STS) & (1u << 9))
-        if (!--n)
-            return;
-    REG32(addr) = value;
-    n = 1000000;
-    while (!(REG32(ADI_FIFO_STS) & (1u << 8)))
-        if (!--n)
-            return;
-}
+#define adi_read(addr)       sc6530_adi_read(addr)
+#define adi_write(addr, val) sc6530_adi_write(addr, val)
 
 static void vsim(int slot, bool on, bool three_volt)
 {

@@ -245,6 +245,7 @@ void *memset(void *dst, int c, size_t n);
 #define utf8_valid             (os->utf8_valid)
 #define utf8_cut               (os->utf8_cut)
 #define utf8_from_latin1       (os->utf8_from_latin1)
+#define ui_text_edit_ex        (os->ui_text_edit_ex)
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 

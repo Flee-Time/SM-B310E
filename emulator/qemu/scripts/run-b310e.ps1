@@ -70,7 +70,9 @@ if (-not $Trace) {
   if ($Boot -eq "ours") { $Trace = @("sc6530_lcdc_refresh", "sc6530_ana_*", "sc6530_aux_*") }
   else                  { $Trace = @("sc6530_ana_*", "sc6530_aux_*", "sc6530_dsp_cmd") }
 }
-if (-not $Keys) {
+# Defaults only when -Keys was not given at all: -Keys "" means "no keys"
+# (a bare `-not $Keys` is also true for @(""), which sent the defaults).
+if (-not $PSBoundParameters.ContainsKey('Keys')) {
   if ($Boot -eq "ours") { $Keys = @('ret','up','down','left','right','1','5','f1','kp_enter','esc') }
   else                  { $Keys = @('ret','1','2','3','4','f1','f2','kp_enter','up','down','left','right','5','6','7') }
 }
@@ -89,7 +91,13 @@ if (-not (Test-Path -LiteralPath $Nor)) { Write-Host "FAIL: NOR image not found 
 if ($Boot -eq "ours" -and -not (Test-Path -LiteralPath $Os)) {
   Write-Host "FAIL: os image not found at $Os (boot=ours runs the B310E OS: build.ps1 os, or pass -Os)"; exit 1
 }
-$logFull = [IO.Path]::GetFullPath($D)
+# qemu runs with the log dir as its working directory, so make the caller's
+# (possibly relative) paths absolute against the PowerShell location; .NET's
+# own current directory ([IO.Path]::GetFullPath) need not match $PWD.
+$Qemu = (Resolve-Path -LiteralPath $Qemu).ProviderPath
+$Nor  = (Resolve-Path -LiteralPath $Nor).ProviderPath
+if ($Boot -eq "ours") { $Os = (Resolve-Path -LiteralPath $Os).ProviderPath }
+$logFull = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($D)
 $logDir  = Split-Path $logFull -Parent
 if (-not $logDir) { $logDir = $PWD.Path }
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
@@ -114,9 +122,12 @@ if (Test-Path -LiteralPath $logFull) {
   Write-Host "preserved prior log -> $logFull.prior-$stamp"
 }
 
-# Kill zombie qemu (todo-17 lesson: stale qemu holds the chardev port).
-Get-Process qemu-system-arm -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 800
+# A stale qemu can hold the monitor port (todo-17 lesson). Other sessions run
+# their own QEMUs on this machine, so never stop qemu by name: refuse to start
+# when the port is already taken, and only ever stop the qemu started below.
+$portBusy = $false
+try { $c = New-Object Net.Sockets.TcpClient("127.0.0.1", $MonitorPort); $c.Close(); $portBusy = $true } catch { }
+if ($portBusy) { Write-Host "FAIL: monitor port $MonitorPort is already in use (another qemu?) - pass a free -MonitorPort"; exit 1 }
 
 # ---- build the qemu command line --------------------------------------------
 
@@ -134,7 +145,15 @@ $qargs = @(
 foreach ($t in $Trace) { $qargs += @("--trace", $t) }
 if ($Boot -eq "ours") { $qargs += @("-drive", "file=$Os,format=raw,if=none,id=os") }
 
-$p = Start-Process -FilePath $Qemu -ArgumentList $qargs -WorkingDirectory $logDir -PassThru -WindowStyle Hidden
+# Windows PowerShell 5.1 joins -ArgumentList with plain spaces, so quote any
+# argument with spaces or quotes (Windows command-line rules: double the
+# backslashes that precede a quote or the closing quote).
+function Quote-Arg([string]$a) {
+  if ($a -ne '' -and $a -notmatch '[\s"]') { return $a }
+  return '"' + (($a -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+$argLine = ($qargs | ForEach-Object { Quote-Arg $_ }) -join ' '
+$p = Start-Process -FilePath $Qemu -ArgumentList $argLine -WorkingDirectory $logDir -PassThru -WindowStyle Hidden
 Write-Host "qemu pid=$($p.Id) workdir=$logDir"
 
 function Wait-Port($port, $ms) {
@@ -161,7 +180,11 @@ function HMP($cmd) {
   } catch { return "" }
 }
 
-if (-not (Wait-Port $MonitorPort 15000)) { Write-Host "FAIL: monitor port never opened"; exit 1 }
+if (-not (Wait-Port $MonitorPort 15000)) {
+  Write-Host "FAIL: monitor port never opened"
+  if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+  exit 1
+}
 Write-Host "monitor port up ($MonitorPort)"
 $t0 = [DateTime]::UtcNow
 $keyOut = @()

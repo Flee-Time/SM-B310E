@@ -3,7 +3,8 @@
  * thread to the handler it set (app_on_fault); the handler's own store then
  * ends the thread, and the OS goes on. The test reads fault_stage. LSoft
  * runs an undefined instruction in the UI's thread: the fault screen, a restart,
- * and the next boot's log names it.
+ * and the next boot's log names it. # does the same from the screen's tick once
+ * the screen has gone dark (the fault screen must wake the panel).
  *
  *   make PYTHON=python ../build/os/tests/faultapp.app      (from os/)
  *
@@ -33,6 +34,16 @@ static void worker(void *arg)
     fault_stage = 98;
 }
 
+static volatile bool dark_armed;
+
+/* the UI's thread too: the fault once the panel is asleep */
+static void tick(screen_t *s)
+{
+    (void)s;
+    if (dark_armed && ui_is_dark())
+        __asm__ volatile(".short 0xde01");      /* undefined in Thumb */
+}
+
 static void draw(screen_t *s)
 {
     (void)s;
@@ -44,6 +55,8 @@ static void key(screen_t *s, const key_event_t *ev)
     (void)s;
     if (ev->code == KEY_RSOFT)
         ui_pop();
+    else if (ev->code == KEY_HASH && ev->down)
+        dark_armed = true;
     else if (ev->code == KEY_LSOFT)     /* the UI's thread, not the app's: the
                                          * fault screen, a restart, the record */
         __asm__ volatile(".short 0xde00");      /* undefined in Thumb */
@@ -51,6 +64,7 @@ static void key(screen_t *s, const key_event_t *ev)
 
 static screen_t screen = {
     .title = "Fault test", .left = "Fault", .right = "Close", .draw = draw, .key = key,
+    .tick = tick, .tick_ms = 500,
 };
 
 static screen_t *start(void)

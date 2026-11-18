@@ -234,6 +234,7 @@ static void select_output(bool speaker)
 }
 
 static void codec_close(void);
+static bool clock_held;                 /* codec_init's hold (not in burst mode) */
 
 /* Power the codec up (stock 0x80982 order, regulator table 0xca38c). Only
  * audio and DMA clocks; no OS-wide clock ladder, no unrelated rails. */
@@ -241,8 +242,10 @@ static void codec_init(void)
 {
     if (initialized)
         return;
-    cpufreq_hold();                     /* audio DMA and codec at a fixed AHB */
-    REG32(0x20500060) = 1;              /* DMA AHB clock */
+    clock_held = !power_burst_dev;      /* burst mode: the decoder holds it */
+    if (clock_held)
+        cpufreq_hold();                 /* audio DMA and codec at a fixed AHB */
+    dma_clock_get();                    /* DMA AHB clock (dma.c counts its users) */
     REG32(0x8b0000a0) = 1u << 28;       /* audio APB clock */
     adi_write(0x82001440, 4);           /* analog audio clock (0x81562) */
     REG32(0x8b000060) = (1u << 21) | (1u << 18);
@@ -326,7 +329,10 @@ static void codec_close(void)
     adi_write(0x82001444, 7);           /* DAC paths + audio clock off */
     REG32(0x8b0000a4) = 1u << 28;
     initialized = false;
-    cpufreq_release();
+    dma_clock_put();                    /* pcm.c's channels are stopped (pcm_busy) */
+    if (clock_held)
+        cpufreq_release();
+    clock_held = false;
 }
 
 /* ---- the public side ---------------------------------------------------- */

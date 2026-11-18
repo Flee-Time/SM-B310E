@@ -27,6 +27,13 @@
  * Sound screen's tone, the alarm) stopping our DMA or replacing our fill
  * callback ends the track as MEDIA_STOPPED.
  *
+ * Nothing is held while the music is not in use: UNLOAD_MS after a track
+ * (nothing playing or paused) the decoder thread frees the codec, the file
+ * window and the ring and ends, so its 32 KB stack goes too; the next
+ * media_play() allocates them again. Kept for good, these 288 KB (with
+ * the queue's 66 KB, 368 KB) made Wolf3D and Blood fail to start after a
+ * song (11-17), and the thread woke the phone once a second in dark idle.
+ *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "os/arch.h"
@@ -44,12 +51,14 @@
 #define PREBUFFER_MS    300
 #define FBUF_MIN        (64u * 1024)
 #define FBUF_MAX        (512u * 1024)
+/* MP3's peak was 9532 bytes on the phone (11-17); Vorbis and Opus, not
+ * measured, use deeper stacks: it stays, and goes with the thread at idle */
 #define STACK_BYTES     (32u * 1024)
 #define MAX_CODECS      16
 #define CHUNK           256             /* frames converted at a time */
 #define STOLEN_MS       500             /* our fill not called: someone else plays */
 #define RESCAN_MS       5000
-#define UNLOAD_MS       30000           /* idle: the codec module is freed */
+#define UNLOAD_MS       30000           /* idle: everything is freed, the thread ends */
 
 /* What the QEMU tests read (tests/test-codecs.py). */
 typedef struct {
@@ -71,7 +80,8 @@ volatile media_status_t media_status;
 static thread_t *thread;
 static mutex_t lock;
 static sem_t wake, room;
-static bool ready;
+static bool inited;                     /* the lock and the semaphores */
+static bool ready;                      /* the thread and the ring (under lock) */
 
 static char req_path[160];
 static volatile bool req_play, req_stop;
@@ -89,7 +99,9 @@ static uint32_t scanned_at;
 static char ext_list[MAX_CODECS * 24];
 
 /* ---- the ring (thread writes head, interrupt reads tail) ---------------- */
-static uint32_t *ring;                  /* L | R << 16 */
+/* L | R << 16. NULL from the idle unload to the next play: a fill() of
+ * ours the PCM might still call then (a stall taken for a steal) ends */
+static uint32_t *volatile ring;
 static volatile uint32_t head, tail;
 static volatile uint32_t want_room;     /* frames the thread waits for; 0: none */
 static volatile uint32_t underruns, played, last_fill;
@@ -97,6 +109,7 @@ static volatile bool codec_done;        /* nothing more comes: end at the empty 
 static volatile bool audio_on;          /* our DMA runs */
 static volatile bool stolen;
 static volatile bool no_rate;           /* the codec gave PCM without a sample rate */
+static volatile bool codec_panic;       /* the codec called panicf: its heap or state is bad */
 static uint32_t base_ms;                /* the position when played was 0 */
 static volatile int32_t seek_target = -1;
 
@@ -115,9 +128,12 @@ static uint32_t in_rate, out_rate;
 static uint32_t frames_in, last_elapsed;
 static uint32_t rs_step, rs_phase;      /* resampler, Q16 */
 static int32_t rs_prev[2];
-static uint32_t cycles0, wall0, status_at;
+/* 64-bit sums of 32-bit deltas: the 26 MHz counters wrap after 165 s, and
+ * a 190 s track's line said 254.8% (11-17) */
+static uint64_t cyc_sum, wall_sum;
+static uint32_t cyc_last, wall_last, status_at;
+static bool timing;
 
-static bool start(void);
 static void init(void);
 
 static void barrier(void)
@@ -128,11 +144,14 @@ static void barrier(void)
 /* ---- the DMA interrupt ------------------------------------------------------ */
 static unsigned fill(int16_t *lr, unsigned frames, void *ctx)
 {
+    const uint32_t *r = ring;           /* read once: the thread may clear it */
     uint32_t t = tail, avail = head - t, n = avail < frames ? avail : frames;
 
+    if (!r)
+        return 0;                       /* freed: the DMA drains and stops */
     last_fill = kernel_ticks();
     for (uint32_t i = 0; i < n; i++) {
-        uint32_t v = ring[(t + i) & RING_MASK];
+        uint32_t v = r[(t + i) & RING_MASK];
 
         lr[2 * i] = (int16_t)v;
         lr[2 * i + 1] = (int16_t)(v >> 16);
@@ -235,28 +254,77 @@ static uint32_t prebuffer_frames(void)
     return out_rate * PREBUFFER_MS / 1000;
 }
 
-/* Put n frames into the ring, waiting for room; false if a command came. */
-static bool ring_put(const uint32_t *frames, uint32_t n)
+/* the decoder thread's CPU and the wall time since the last call, into the
+ * sums; called at least every 100 ms while a track runs (paused too) */
+static void account(void)
 {
-    while (RING_FRAMES - (head - tail) < n) {
+    uint32_t c = thread_self()->cycles, w = kernel_cycles();
+
+    cyc_sum += c - cyc_last;
+    wall_sum += w - wall_last;
+    cyc_last = c;
+    wall_last = w;
+}
+
+/* Burst mode (power_burst_dev, power audit B2): the decoder holds the clock
+ * only while it fills the ring; full, it lets go and waits until half of it
+ * has played, then fills it again in one go. */
+static bool burst_held;
+
+static void burst_hold(bool on)
+{
+    if (on == burst_held)
+        return;
+    burst_held = on;
+    if (on)
+        cpufreq_hold();
+    else
+        cpufreq_release();
+}
+
+/* Wait for room for n frames in the ring; false if a command came. */
+static bool ring_wait(uint32_t n)
+{
+    bool burst = power_burst_dev != 0;
+    uint32_t need = n;
+
+    /* full: let go, and fill again only once half of it has played (not
+     * while it merely has room: the first try waited for half of it while
+     * still holding, and the clock never came down) */
+    if (burst && RING_FRAMES - (head - tail) < n) {
+        burst_hold(false);
+        if (audio_on && need < RING_FRAMES / 2)
+            need = RING_FRAMES / 2;
+    }
+    while (RING_FRAMES - (head - tail) < need) {
         if (aborting())
             return false;
         if (!audio_on && !paused) {     /* a full ring that does not play */
             mutex_lock(&lock, WAIT_FOREVER);
             audio_start_locked();
             mutex_unlock(&lock);
+            if (!audio_on)
+                need = n;               /* not playing: no half to wait for */
         }
-        want_room = n;
+        want_room = need;
         sem_wait(&room, 100);
+        account();
     }
-    for (uint32_t i = 0, h = head; i < n; i++)
-        ring[(h + i) & RING_MASK] = frames[i];
+    if (burst)
+        burst_hold(true);
+    return true;
+}
+
+/* n frames written at head: the interrupt may play them now */
+static void ring_commit(uint32_t n)
+{
     barrier();
     head += n;
     if (kernel_ticks() - status_at >= 100) {   /* for the tests and the System screen */
         media_stats_t st;
 
         status_at = kernel_ticks();
+        account();
         media_stats(&st);
     }
     if (!audio_on && !paused && head - tail >= prebuffer_frames()) {
@@ -264,6 +332,21 @@ static bool ring_put(const uint32_t *frames, uint32_t n)
         audio_start_locked();
         mutex_unlock(&lock);
     }
+}
+
+/* Put n frames into the ring, waiting for room; false if a command came. */
+static bool ring_put(const uint32_t *frames, uint32_t n)
+{
+    uint32_t *r, h, first;
+
+    if (!ring_wait(n))
+        return false;
+    r = ring;
+    h = head & RING_MASK;
+    first = RING_FRAMES - h < n ? RING_FRAMES - h : n;
+    memcpy(r + h, frames, first * 4);
+    memcpy(r, frames + first, (n - first) * 4);
+    ring_commit(n);
     return true;
 }
 
@@ -272,6 +355,109 @@ static inline int32_t to16(int32_t v, int shift)
     if (shift > 0)
         v = (v + (1 << (shift - 1))) >> shift;
     return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+}
+
+/* ---- the formats without resampling, straight into the ring -------------- */
+/* The generic loop below tests the format and the depth for every sample:
+ * it was 17% of the MP3 decoder's time on the phone (11-17). Here the test
+ * is made once per chunk, and each loop is in ARM state (the OS is Thumb;
+ * ARM has conditional moves for the clipping). The words are the same as
+ * the generic loop's: L | R << 16, each to16(), rounded and clipped. */
+enum { F16_LR, F16_PLANES, F16_MONO, F32_LR, F32_PLANES, F32_MONO };
+
+/* to16(v, shift) of a wide sample (shift > 0), as the frame's halfword */
+#define WIDE16(v) ({ int32_t v_ = ((v) + round) >> shift; \
+                     (uint32_t)(uint16_t)(v_ > 32767 ? 32767 : v_ < -32768 ? -32768 : v_); })
+
+__attribute__((target("arm"), noinline))
+static void convert(uint32_t *dst, const void *ch1, const void *ch2, uint32_t i, uint32_t n,
+                    int fmt, int shift)
+{
+    int32_t round = shift > 0 ? 1 << (shift - 1) : 0;
+
+    switch (fmt) {
+    case F16_LR: {                      /* word-aligned ones are copied by put() */
+        const uint16_t *s = (const uint16_t *)ch1 + 2 * i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = s[2 * k] | (uint32_t)s[2 * k + 1] << 16;
+        break;
+    }
+    case F16_PLANES: {
+        const uint16_t *l = (const uint16_t *)ch1 + i, *r = (const uint16_t *)ch2 + i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = l[k] | (uint32_t)r[k] << 16;
+        break;
+    }
+    case F16_MONO: {
+        const uint16_t *m = (const uint16_t *)ch1 + i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = m[k] * 0x10001u;
+        break;
+    }
+    case F32_LR: {
+        const int32_t *s = (const int32_t *)ch1 + 2 * i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = WIDE16(s[2 * k]) | WIDE16(s[2 * k + 1]) << 16;
+        break;
+    }
+    case F32_PLANES: {
+        const int32_t *l = (const int32_t *)ch1 + i, *r = (const int32_t *)ch2 + i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = WIDE16(l[k]) | WIDE16(r[k]) << 16;
+        break;
+    }
+    default: {
+        const int32_t *m = (const int32_t *)ch1 + i;
+
+        for (uint32_t k = 0; k < n; k++)
+            dst[k] = WIDE16(m[k]) * 0x10001u;
+        break;
+    }
+    }
+}
+
+static void put(uint32_t *dst, const void *ch1, const void *ch2, uint32_t i, uint32_t n,
+                int fmt, int shift)
+{
+    const uint16_t *s = (const uint16_t *)ch1 + 2 * i;
+
+    /* 16-bit L, R pairs on a word: little-endian, each is the frame's word */
+    if (fmt == F16_LR && !((uintptr_t)s & 3))
+        memcpy(dst, s, n * 4);
+    else
+        convert(dst, ch1, ch2, i, n, fmt, shift);
+}
+
+static void insert_direct(const void *ch1, const void *ch2, uint32_t count)
+{
+    bool wide = sample_depth > 16;
+    int shift = wide ? (int)sample_depth - 15 : 0;
+    int fmt = stereo == STEREO_INTERLEAVED ? F16_LR :
+              stereo == STEREO_NONINTERLEAVED ? F16_PLANES : F16_MONO;
+
+    if (wide)
+        fmt += F32_LR;
+    for (uint32_t i = 0; i < count; ) {
+        /* the generic loop's chunks: the same waits for room */
+        uint32_t n = count - i < CHUNK * 2 ? count - i : CHUNK * 2, h, first;
+        uint32_t *r;
+
+        if (!ring_wait(n))
+            return;                     /* a command: get_command() tells the codec */
+        r = ring;
+        h = head & RING_MASK;
+        first = RING_FRAMES - h < n ? RING_FRAMES - h : n;
+        put(r + h, ch1, ch2, i, first, fmt, shift);
+        if (first < n)
+            put(r, ch1, ch2, i + first, n - first, fmt, shift);
+        ring_commit(n);
+        i += n;
+    }
 }
 
 static void pcmbuf_insert(const void *ch1, const void *ch2, int count)
@@ -285,7 +471,14 @@ static void pcmbuf_insert(const void *ch1, const void *ch2, int count)
         no_rate = true;
         return;
     }
+    if (codec_panic)
+        return;                         /* nothing more from a broken codec */
     frames_in += (uint32_t)count;
+    if (!rs_step) {
+        if (count > 0)
+            insert_direct(ch1, ch2, (uint32_t)count);
+        return;
+    }
     while (i < count) {
         uint32_t n = 0;
 
@@ -341,8 +534,10 @@ static void set_rate(uint32_t rate)
         out = rate % 11025 == 0 ? 44100 : 48000;
     if (out != out_rate && audio_on) {
         /* a new rate mid-stream: let the old one play out first */
-        while (head != tail && !aborting())
+        while (head != tail && !aborting()) {
             thread_sleep(10);
+            account();                  /* paused here, it can be long */
+        }
         mutex_lock(&lock, WAIT_FOREVER);
         audio_stop_locked();
         mutex_unlock(&lock);
@@ -516,7 +711,7 @@ static long fd_size(int fd)
 /* ---- commands and time ------------------------------------------------------ */
 static long get_command(intptr_t *param)
 {
-    if (req_stop || req_play || no_rate || audio_taken())
+    if (req_stop || req_play || no_rate || codec_panic || audio_taken())
         return CODEC_ACTION_HALT;
     if (req_seek >= 0) {
         *param = req_seek;
@@ -658,6 +853,7 @@ static void rb_panicf(const char *fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     klog("media: codec panic: %s", buf);
+    codec_panic = true;                 /* the codec's panicf then jumps out of it (glue_run) */
 }
 
 static void api_init(void)
@@ -794,6 +990,16 @@ static void unload_codec(void)
     arena = NULL;
 }
 
+/* A codec that panicked (it jumped out of glue_run or glue_start): its heap
+ * is set up once at CODEC_LOAD and is broken, so the next track must not
+ * run it again. Unloaded without CODEC_UNLOAD (no more of its code); what
+ * it had is in the arena, freed here. */
+static void drop_broken_codec(void)
+{
+    codec_started = false;
+    unload_codec();
+}
+
 static bool try_codec(const char *name, codec_track_t *t)
 {
     if (!codec || strcmp(codec->name, name)) {
@@ -859,6 +1065,8 @@ static void drain_track(void)
     for (;;) {
         if (req_stop || req_play || audio_taken())
             return;
+        if (req_seek >= 0 && codec_panic)
+            req_seek = -1;              /* a broken codec is not run again */
         if (req_seek >= 0) {
             mutex_lock(&lock, WAIT_FOREVER);
             audio_stop_locked();
@@ -885,7 +1093,9 @@ static void drain_track(void)
             return;                     /* played out */
         if (!audio_on && !paused && head == tail)
             return;                     /* nothing was decoded */
+        burst_hold(false);              /* the end: only the ring plays out */
         sem_wait(&room, 50);
+        account();
     }
 }
 
@@ -939,6 +1149,8 @@ static void play_track(const char *path)
         mutex_unlock(&lock);
         f_close(&file);
         file_open = false;
+        if (codec_panic)                /* in its CODEC_LOAD (or the parser) */
+            drop_broken_codec();
         return;
     }
 
@@ -960,6 +1172,7 @@ static void play_track(const char *path)
     codec_done = false;
     stolen = false;
     no_rate = false;
+    codec_panic = false;
     underruns = 0;
     mutex_unlock(&lock);
 
@@ -980,8 +1193,10 @@ static void play_track(const char *path)
     frames_in = last_elapsed = 0;
     set_rate(t.frequency);
     media_status.length_ms = t.length_ms;
-    cycles0 = self->cycles;
-    wall0 = kernel_cycles();
+    cyc_sum = wall_sum = 0;
+    cyc_last = self->cycles;
+    wall_last = kernel_cycles();
+    timing = true;
     klog("media: playing %s (%s, %lu Hz, %lu kbit/s, %lu s) with %s: \"%s\" by \"%s\"",
          path, t.codec, (unsigned long)t.frequency, (unsigned long)t.bitrate,
          (unsigned long)(t.length_ms / 1000), codec->name, t.title, t.artist);
@@ -1001,6 +1216,9 @@ static void play_track(const char *path)
         else if (no_rate) {
             state = MEDIA_ERROR;
             error_text = "no sample rate";
+        } else if (codec_panic) {
+            state = MEDIA_ERROR;
+            error_text = "codec failed";
         } else if (st != CODEC_OK && !frames_in) {
             state = MEDIA_ERROR;
             error_text = "decoding failed";
@@ -1009,8 +1227,12 @@ static void play_track(const char *path)
     }
     mutex_unlock(&lock);
     {
-        uint32_t cyc = self->cycles - cycles0, wall = kernel_cycles() - wall0;
+        uint64_t cyc, wall;
         uint32_t ms = in_rate ? (uint32_t)((uint64_t)frames_in * 1000 / in_rate) : 0;
+
+        account();
+        cyc = cyc_sum;
+        wall = wall_sum;
 
         klog("media: %s %s after %lu ms of audio: decoder %lu ms CPU in %lu ms (%lu.%lu%%), "
              "%lu underruns, %d MHz, stack %lu of %lu bytes used", path,
@@ -1024,8 +1246,44 @@ static void play_track(const char *path)
     }
     f_close(&file);
     file_open = false;
+    if (codec_panic)
+        drop_broken_codec();
     if (!req_play)
         audio_power(false);             /* only when nothing else uses it */
+}
+
+/* UNLOAD_MS after the music: the codec (and its arena), the file window and
+ * the ring are freed and the thread may end; false if a play came first.
+ * Only this thread uses the codec and the window. Here no track runs, so
+ * nothing plays or is paused: play_track() stopped our DMA (audio_on
+ * false), or it was taken and runs someone else's fill. The ring is
+ * emptied under the lock (media_pause() resumes only a ring with frames)
+ * and freed after; fill() reads the pointer once, in the interrupt, so it
+ * sees the ring or NULL, never freed memory. */
+static bool idle_unload(void)
+{
+    uint32_t *r;
+
+    mutex_lock(&lock, WAIT_FOREVER);
+    if (req_play || audio_on) {
+        mutex_unlock(&lock);
+        return false;
+    }
+    unload_codec();
+    kfree(fbuf);
+    fbuf = NULL;
+    fcap = flen = 0;
+    r = ring;
+    ring = NULL;
+    tail = head;                        /* empty; `played` stays: the position shown */
+    want_room = 0;
+    timing = false;
+    thread = NULL;
+    ready = false;                      /* media_play() starts a thread again */
+    mutex_unlock(&lock);
+    kfree(r);
+    klog("media: idle, the codec, the ring and the decoder thread freed");
+    return true;
 }
 
 static void decoder_main(void *arg)
@@ -1034,16 +1292,16 @@ static void decoder_main(void *arg)
     uint32_t idle_since = kernel_ticks();
 
     for (;;) {
+        uint32_t idle = kernel_ticks() - idle_since;
         bool go;
 
-        if (sem_wait(&wake, 1000) != WAIT_OK) {
-            /* free the codec (and its arena) and the file window a while
-             * after the music; only this thread uses the window */
-            if ((codec || fbuf) && kernel_ticks() - idle_since > UNLOAD_MS) {
-                unload_codec();
-                kfree(fbuf);
-                fbuf = NULL;
-                fcap = flen = 0;
+        /* no polling: the first wait without a request is the unload's
+         * (a 1 s poll woke the phone from chip sleep for ever, 11-17) */
+        if (sem_wait(&wake, idle < UNLOAD_MS ? UNLOAD_MS - idle : 1) != WAIT_OK) {
+            if (kernel_ticks() - idle_since >= UNLOAD_MS) {
+                if (idle_unload())
+                    thread_exit();      /* the idle thread frees the stack */
+                idle_since = kernel_ticks();    /* not now: again in UNLOAD_MS */
             }
             continue;
         }
@@ -1062,6 +1320,7 @@ static void decoder_main(void *arg)
         mutex_unlock(&lock);
         if (go)
             play_track(path);
+        burst_hold(false);
         idle_since = kernel_ticks();
     }
 }
@@ -1069,8 +1328,6 @@ static void decoder_main(void *arg)
 /* the lock and the codec list only: no playback buffers, no thread */
 static void init(void)
 {
-    static bool inited;
-
     if (inited)
         return;
     mutex_init(&lock);
@@ -1080,18 +1337,27 @@ static void init(void)
     inited = true;
 }
 
-static bool start(void)
+/* The ring and the thread, at the first play and again after an idle
+ * unload. Under the lock: the thread clears `ready` under it as it ends,
+ * so a play either sees it running (and it sees req_play) or starts a new
+ * one. With no thread nothing plays from the ring, so it may go here. */
+static bool start_locked(void)
 {
+    uint32_t *r;
+
     if (ready)
         return true;
-    init();
     if (!ring)
         ring = kmalloc(RING_FRAMES * sizeof(uint32_t));
     if (!ring)
         return false;
     thread = thread_create("decoder", PRIO_NORMAL - 1, STACK_BYTES, decoder_main, NULL);
-    if (!thread)
+    if (!thread) {
+        r = ring;
+        ring = NULL;
+        kfree(r);
         return false;
+    }
     ready = true;
     return true;
 }
@@ -1099,9 +1365,17 @@ static bool start(void)
 /* ---- the UI's side --------------------------------------------------------- */
 int media_play(const char *path)
 {
-    if (!start())
-        return -1;
+    init();
     mutex_lock(&lock, WAIT_FOREVER);
+    if (!start_locked()) {
+        state = MEDIA_ERROR;
+        error_text = "not enough memory";
+        info_valid = false;
+        mutex_unlock(&lock);
+        klog("media: %s: not enough memory for the player (%lu KB free)", path,
+             (unsigned long)(heap_free_bytes() / 1024));
+        return -1;
+    }
     snprintf(req_path, sizeof(req_path), "%s", path);
     seq++;
     req_play = true;
@@ -1120,9 +1394,11 @@ int media_play(const char *path)
     return 0;
 }
 
+/* These go by `inited`, not `ready`: the state and the info stay what they
+ * were after the thread ended at an idle unload. */
 void media_stop(void)
 {
-    if (!ready)
+    if (!inited)
         return;
     mutex_lock(&lock, WAIT_FOREVER);
     seq++;
@@ -1139,7 +1415,7 @@ void media_stop(void)
 
 void media_pause(bool pause)
 {
-    if (!ready)
+    if (!inited)
         return;
     mutex_lock(&lock, WAIT_FOREVER);
     if (pause && !paused && (state == MEDIA_PLAYING || state == MEDIA_LOADING)) {
@@ -1162,7 +1438,7 @@ void media_pause(bool pause)
 
 void media_seek(uint32_t ms)
 {
-    if (!ready)
+    if (!inited)
         return;
     mutex_lock(&lock, WAIT_FOREVER);
     if (state == MEDIA_PLAYING || state == MEDIA_PAUSED || state == MEDIA_LOADING) {
@@ -1204,7 +1480,7 @@ bool media_info(media_info_t *out)
 {
     bool ok;
 
-    if (!ready)
+    if (!inited)
         return false;
     mutex_lock(&lock, WAIT_FOREVER);
     ok = info_valid;
@@ -1225,12 +1501,14 @@ void media_stats(media_stats_t *out)
 
     out->underruns = underruns;
     out->decoded_ms = in_rate ? (uint32_t)((uint64_t)frames_in * 1000 / in_rate) : 0;
-    out->decode_cycles = thread ? thread->cycles - cycles0 : 0;
+    /* the low words, as before (they wrap after 165 s; the tests take
+     * differences over a few seconds); the done line uses the sums */
+    out->decode_cycles = timing ? (uint32_t)cyc_sum : 0;
     out->ring_ms = out_rate ? in_ring * 1000 / out_rate : 0;
     media_status.underruns = out->underruns;
     media_status.decoded_ms = out->decoded_ms;
     media_status.decode_cycles = out->decode_cycles;
-    media_status.wall_cycles = wall0 ? kernel_cycles() - wall0 : 0;
+    media_status.wall_cycles = timing ? (uint32_t)wall_sum : 0;
     media_status.ring_frames = in_ring;
     media_status.cpu_mhz = (uint32_t)clock_mhz();
 }

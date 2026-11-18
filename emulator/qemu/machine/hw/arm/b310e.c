@@ -52,9 +52,11 @@
  *           by tools/stockram).
  *   stock - full boot: start at 0x0 (vector table -> PBL 0x46e4 -> full
  *           init path), magic NOT written.
- *   ours  - load -drive if=none,id=os at 0x34000000 and start at
- *           0x34000010 (our os.bin entry; start.s runs in ARM state, so the
- *           PC is even/bit0=0).
+ *   ours  - the old name of rockbox below, kept for existing command lines:
+ *           our OS image now has the same entry contract (vectors at offset
+ *           0, entered at its first word in ARM state with V=1; see
+ *           os/arch/sc6530c/cpu.S). The old entry 0x34000010 is now the
+ *           data-abort slot of that vector table.
  *   rockbox - load -drive if=none,id=os at 0x34000000 and start at
  *           0x34000000 (Rockbox's own vector table — the boot menu branches
  *           there in ARM state). ALSO sets CP15 SCTLR V=1 (high vectors):
@@ -254,7 +256,6 @@
 #define B310E_WARM_MAGIC         0xFE519C04u   /* PBL warm-boot magic */
 #define B310E_WARM_PC            0x00010000u   /* stock main-OS entry */
 #define B310E_STOCK_PC           0x00000000u   /* vector table */
-#define B310E_OURS_PC            0x34000010u   /* os.bin entry (ARM state) */
 #define B310E_ROCKBOX_PC         0x34000000u   /* Rockbox vector table */
 
 #define TYPE_B310E_MACHINE MACHINE_TYPE_NAME("b310e")
@@ -398,9 +399,11 @@ static void b310e_reset(void *opaque)
         /* Warm-boot fast path magic at the PSRAM base (alias 0x04000000). */
         stl_le_p(memory_region_get_ram_ptr(machine->ram), B310E_WARM_MAGIC);
         pc = B310E_WARM_PC;
-    } else if (strcmp(s->boot_mode, "ours") == 0) {
-        pc = B310E_OURS_PC;
-    } else if (strcmp(s->boot_mode, "rockbox") == 0) {
+    } else if (strcmp(s->boot_mode, "ours") == 0 ||
+               strcmp(s->boot_mode, "rockbox") == 0) {
+        /* "ours" is the old name: our OS now has Rockbox's entry contract
+         * (vectors first, entered at the image's first word, V=1). Its
+         * old entry 0x34000010 is the data-abort slot of that table. */
         /* Rockbox's crt0 builds its high-vector map BECAUSE the real boot
          * chain leaves CP15 V=1 (our menu's start.s); the QEMU CPU resets
          * with V=0, so set the SCTLR V bit here (post-CPU-reset, it sticks)

@@ -94,7 +94,12 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
     0x8b000020 with the ARM on the crystal sets the word's bit 3 at once, and
     setting it again brings the PLL back. The analog die's bus needs it: reads
     return 0 without it. So the idle loop stops it just before sleeping and any
-    ADI access or clock rise starts it again (`clock_pll_need()`);
+    ADI access or clock rise starts it again (`clock_pll_need()`). A restart
+    takes 320 slow cycles (9.77 ms): the hardware holds the PLL's clock back
+    that long after the enable, and analog reads or the switch up stall until
+    then (2026-11-18), so the wait is that, timed on timer 2. It is not the
+    PLL_WAIT field (0x8b000024 [9:0], also 320) nor XTL_WAIT (0x8b000000
+    [9:0]): the Sleep test wrote each to 64 and the gate stayed at 9.76 ms;
   - the idle loop takes the system sleep (`sleep_idle()`) at 26 MHz with no hold.
     Settings -> Power -> Chip sleep turns both off, to compare. Timer 2 runs
     through it, so it cannot oversleep a timeout. In QEMU this only shows the
@@ -143,8 +148,10 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
     gone.
   - END and the headset button by the analog EIC's interrupt when it works
     (checked at boot, see the card log's "end key:" line): no polling
-    while nothing is held and no headset is in. QEMU does not model it and
-    polls. Registers from the stock firmware: `docs/eic-interrupt.md`.
+    while nothing is held and no headset is in. QEMU models it too since
+    2026-11-18 (`sc6530_adi` property `eic-irq`, on by default; off, the OS
+    polls as it did there before). Registers from the stock firmware:
+    `docs/eic-interrupt.md`.
   - Music (Sound → Music, or Center on a .wav or .m3u in Files): a WAV
     player with a playlist, shuffle, playing on in the background; copy
     and paste in Files.
@@ -391,8 +398,11 @@ Open Font License 1.1 ([ui/fonts/OFL.txt](ui/fonts/OFL.txt)).
 | Power | power-off (LEDs off, supplies cut), restart to the boot menu |
 | Faults | undefined instruction and aborts show the registers on screen; an app's store into the NOR window (a NULL pointer's) stops only that thread: it goes to the handler it set (API 2.16 `app_on_fault`: a kit game ends with the error and Back) or ends, and the OS goes on (`arch_data_abort`, `loader/loader.c`; `os/tests/test-fault.py`) |
 
-On start the console shows the card and a self-test (kernel objects and a
-32 KB card write and read), then the UI starts on the home screen.
+On start the console shows the card, then the UI starts on the home screen.
+The self-test (kernel objects and a 32 KB card write and read, behind the
+UI) runs at boot only in developer mode (`ui.dev_mode`) or on a card new to
+the OS (the store made at this boot, as on every QEMU test card); else the
+shell's `selftest` runs it. Until 2026-11-17 it ran at every boot.
 
 **Keys:** Center or LSoft opens and selects, RSoft goes back, the D-pad
 moves (Up/Down repeat when held, Left/Right page), END goes home, END
@@ -405,7 +415,8 @@ headset's buttons arrive as KEY_HS_CENTER, KEY_HS_PLUS, KEY_HS_MINUS
 extension: `log` (rotated to `log-old` past 256 KB), `data` (the data store:
 settings, alarms, volumes, the apps' keys and tables such as Notes'; `data-new`
 for a moment while it is written anew, `data-bad` if one was found damaged), the
-album art cache in `cache/art/` and `selftest` (32 KB, rewritten at every boot).
+album art cache in `cache/art/` and `selftest` (32 KB, rewritten whenever the
+self-test runs).
 The files of before 2026-11-17 (`log.txt`, `settings.txt`, `volumes.txt`,
 `alarms.txt`, `clock.txt`, `radio.txt`, `recorder.txt`, `gsm-*.txt`,
 `notes/NOTE*.TXT`) are read into the store once and then left alone. Reports for
@@ -459,8 +470,9 @@ the only one that carries binary transfers. Three sessions at a time.
 | `put PATH SIZE`, `get PATH`, `shot` | upload, download, the screen as RGB565, a game's own frame when it shows one (raw port; the helper does these) |
 | `run APP`, `close` | close the app that is open, load and start APP (a path, or a name or file name in `/b310e-os/apps/` or its folders); close it |
 | `bench SECONDS [dark] [nosleep]` | USB off that long with the cable in, so the phone can reach dark idle (USB holds the clock up); `dark` darkens the screen at once, `nosleep` turns chip sleep off for the run, to compare. This connection ends; USB comes back by itself. The log gets a `bench:` line: time at each clock speed, sleeps, PLL starts, interrupts |
+| `selftest` | the self-test of the boot (kernel objects, a 32 KB card write and read) now; prints what passed and the card's write and read KB/s when it is done |
 | `prof SECONDS [FILE]` | where the CPU is at each 1 ms tick, that long (1-60 s; 8 bytes a sample from the OS heap, so a game that leaves little gets a few seconds), to FILE (`/prof.bin`); `get` it, then `python os/tools/prof-report.py prof.bin build/os/ports/GAME.elf` lists the functions (`--callers`, `--lines`) |
-| `key NAME...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #) |
+| `key NAME[:hold]...` | press keys (up down left right center lsoft rsoft end dial 0-9 * #); `:hold` keeps one down 1 s, a long press (`key 2:hold`: the digit in the text editor) |
 | `db [list]`, `db keys [PREFIX]`, `db get KEY`, `db set KEY VALUE [int\|bool\|str]`, `db del KEY` | the data store: its tables with records and bytes; settings keys (UTF-8, quote values with spaces); a set is written a second later |
 | `db dump TABLE [N]`, `db export [FILE]`, `db import FILE`, `db compact`, `db sync` | the newest N records; the whole store as text (`/b310e-os/data.txt`), and back (it replaces the store, and changes nothing when a line is wrong); the file written anew now; everything written now |
 | `reboot [soft\|menu\|os\|stock]` | a hard reset; `menu`, `os`, `stock`: with that request to the boot loader; `soft`: `/payloads/b310e-os.bin` again with no reset, which keeps the clock. Plain `reboot` comes back to this OS through the loader |
@@ -529,6 +541,11 @@ since the new UI (`gfx_round`, `gfx_icon`, `gfx_bar`, `gfx_switch`,
 `gfx_shade`, `gfx_text_height` and the fonts FONT_SMALL, FONT_BODY,
 FONT_LARGE, FONT_HUGE; 1.x apps are refused, rebuild them). A screen
 with `tick_ms` set gets `tick()` that often (the stopwatch uses 100 ms).
+Since API 2.19 a tick does not redraw by itself: `tick()` calls
+`ui_redraw()` when it changed what `draw()` shows (apps built for 2.18 or
+older are still redrawn after every tick, `ui/ui.c` tick_redraws). Lists
+redraw only the rows that changed and scroll by moving rows in the back
+buffer; the LCD compares only the rows `gfx_*` wrote (`lcd_update_drawn`).
 Close your files before your last screen goes; memory from `malloc` is
 freed for you, also what a thread of the app's (`thread_create`) took.
 
@@ -577,6 +594,63 @@ db_value_t v[2] = { DB_STRV("Merhaba"), DB_INTV(0) };
 uint32_t id = db_insert(t, v, 2);
 db_set_int("volume", 5);                           /* app/<name>/volume */
 ```
+
+## Text input
+
+*2026-11-17, in QEMU (`os/tests/test-text.py`); not yet on the phone.*
+
+- **Fonts** (`ui/font_montserrat.c`, made by `tools/mkfont.py`): the 9, 10 and
+  12 px Montserrat hold Basic Latin, Latin-1, Latin Extended-A, Ș ș Ț ț, Cyrillic
+  U+0400-045F with Ґ ґ, π, and the common punctuation, money, letterlike, arrow
+  and maths signs (– — ‘ ’ “ ” „ … • € ₺ ₽ ₴ ™ № ≤ ≥ ≠ ...), 484 glyphs each; the
+  24 px font is digits, space and `: . - + %` (since 2026-11-18 the last four
+  draw at full size; before, they fell back to the 12 px font). Glyphs are found by code point: ASCII by
+  index, the rest by binary search. A character with no glyph draws as '?' and
+  is counted in `os_status.ui_missing_glyphs` (the tests check it stays 0).
+  Montserrat lacks ‛ ‟ ‼ ₠ ₢ ₥ ₨ ₪ ₯ ₰ ₳ ₶ ₷ ₻ ₾: left out.
+- **Cutting:** `snprintf` never ends a cut string in half a UTF-8 character
+  (nor `%.*s`), list rows and the text view's lines are cut on characters,
+  `utf8_trim()` (`lib/utf8.c`) for text cut another way.
+- **The editor** (`ui/textedit.c`, `ui_text_edit`, `ui_text_edit_ex` with
+  `UI_TEXT_*` flags, API 2.18). Keys, short / held 0.6 s:
+
+  | Key | Short (abc, Abc, ABC) | Held | In 123 |
+  |---|---|---|---|
+  | 2-9 | the language's letters, tapped within 0.9 s | the digit | the digit |
+  | 1 | punctuation `. , ? ! ' " - ( ) @ / : _ ; + & % * = < > 1` | 1 | 1 |
+  | 0 | space, 0 | 0 (not the torch while editing) | 0 |
+  | * | mode: Abc, abc, ABC, 123 | the symbol picker | as short |
+  | # | a new line (multi-line fields) | the next input language | as short |
+  | Dial | takes the word offered; again: the next, then the word as typed | | |
+  | Left/Right, Up/Down | cursor by character, by line | | |
+  | LSoft / Center / RSoft | delete the character before / save / back | | |
+
+  Long presses come from `UI_MODE_HOLD_KEYS` (`ui_screen_mode`): the UI passes
+  0-9, * and # on at their release, or once as `UI_KEY_LONG` when held.
+- **Input languages** (`ui/textlang.c`, a table: adding one is adding an entry):
+  English, Türkçe, Deutsch, Français, Español, Русский; each has its multi-tap
+  letters (Turkish 2 `abcç2`, 4 `ghıiğ4`, 6 `mnoö6`, 7 `pqrsş7`, 8 `tuvü8`;
+  German 2 `abcä2`, 6 `mnoö6`, 7 `pqrsß7`, 8 `tuvü8`; Russian `абвг деёжз ийкл
+  мноп рсту фхцч шщъы ьэюя`), the letters its picker offers first, and its case
+  rules (Turkish i/İ and ı/I; ß stays ß). The store's `ui.input_langs` (the codes
+  switched on, default `en,tr`) and `ui.input_lang` (the last used); Settings →
+  Text input chooses them. The editor shows them as `TR abc` at the bottom
+  right (and the bytes left, under 100).
+- **Completion** (`ui/words.c`; `ui.completion`, Settings → Text input): from
+  two letters on, up to three words in the bottom line, the next one Dial takes
+  in amber; looked up a tick after the key was drawn. First the user's own
+  words: learned (three letters or more) when a space or sign follows them, in
+  small letters, with a use count and the language, in the store's `words`
+  table (word, lang, uses) and in RAM while an editor is open (8 KB, 500
+  words; past that the least used goes); written once when the editor
+  closes, and with the last editor the 8 KB go too (read again at the next). Then a word list on the
+  card, `/b310e-os/words/<lang>.wl`, made by `tools/mkwords.py` from a plain
+  frequency list: RAM keeps 8 bytes per 32 index entries, a query reads one
+  512-byte index chunk and one bucket of at most 512 bytes (both kept for the
+  next letter). No lists are shipped: the frequency lists we know of
+  (OpenSubtitles-based FrequencyWords, wordfreq) are CC-BY-SA, which GPL-2.0
+  cannot take. Not offered and not learned in 123, in `UI_TEXT_PLAIN` fields
+  (Files' Rename) or with completion off.
 
 ## Codec modules
 
@@ -1044,6 +1118,46 @@ time to its first frame: the same for the same code, for comparing
 builds (not the phone's: no cache, no PSRAM waits; QEMU's card costs
 real time a command).
 
+```
+python os/tests/bench-instr.py [--phase NAME ...] [--json out.json]
+python os/tests/bench-instr.py --compare before.json after.json
+python os/tests/bench-instr.py --image OLD.bin --elf OLD.elf --modules OLD-MODULES-DIR --json old.json
+```
+
+`bench-instr.py` counts the OS's instructions exactly, per scenario (boot,
+idle Home lit, 60 s dark, menu moves, a list scroll in a 150-file folder,
+a dialog, a picker, the quick panel, typing a note, an app opened and
+closed, a setting set) and per function, with QEMU's `-icount` and the
+`b310e-prof` TCG plugin (`emulator/qemu/plugins/b310e-prof.c`, built on
+demand by `emulator/qemu/scripts/build-prof-plugin.py`): two runs of the
+same image count the same, so "fewer instructions for the same pixels" has
+a number. `--compare` prints the change per phase and the functions that
+moved most. Results and a screenshot per phase in `build/os/bench-instr/`.
+
+### Host tests (no QEMU)
+
+```
+python os/tests/test-host.py [--prove] [CASE ...]
+python os/tests/test-gfx.py [--ref git:REV | --ref FILE]
+python os/tests/stack-audit.py
+```
+
+`test-host.py` builds OS sources with the PC's gcc (UBSan traps on) against
+the cases in `os/tests/host/`: the data store through power cuts at every
+write and an allocation failing at every point (`db-power-cut`, `db-oom`),
+crc32, the string functions at every alignment, printf against the C
+library, UTF-8 and the editor's letter case, the GSM message parsers, and
+mutated album-art covers through the PNG/JPEG decoders. `--prove` runs each
+case against a deliberately broken reference: every case must then fail.
+`test-gfx.py` draws random calls through `ui/gfx.c` and a reference copy of
+it (a git revision or a file) and compares every pixel, and that every
+changed row lies inside the rows marked for `lcd_update_drawn()`; it tests
+the C paths (the ARM assembly in `fill_span` and `memcmp` only runs on the
+target). `stack-audit.py` compiles the OS with `-fstack-usage
+-fcallgraph-info` and prints each thread's deepest direct-call chain
+against its stack (indirect calls, such as a screen's `draw()`, are not
+followed: the real worst case can be deeper).
+
 ## Layout
 
 ```
@@ -1067,6 +1181,7 @@ ports/          games as apps: kit/ (the game kit: newlib's system calls, the
                 Boy, the NES), wolf4sdl/ (Wolf3D: its SDL of ours),
                 sources.py (the pinned sources)
 tools/          mkfont.py (Montserrat -> ui/font_montserrat.c), mkicons.py,
+                mkwords.py (a word-frequency list -> a completion word list),
                 b310e-shell.py (the PC side of the shell)
 lib/            string functions, printf
 include/os/     interfaces
@@ -1080,6 +1195,23 @@ main.c          start-up; selftest.c: the boot self-test
 - Every assembly routine needs `.type name, %function`: C is built as
   Thumb, and without the type the linker calls ARM routines with `bl`
   instead of `blx` (the first boot in QEMU ran ARM code as Thumb).
+- C is Thumb `-Os` except the hot loops, ARM `-O2`: `ui/gfx.c` and
+  `lib/string.c` whole (per-file flags in `os/Makefile`), and by function
+  attribute `crc32_update` (`lib/crc32.c`) and the media engine's sample
+  conversion (`convert`, `media/engine.c`). A list-scroll redraw spent 74%
+  in the drawing primitives and 16% in memcpy and the LCD's row compare,
+  and the nibble-table CRC was 44% of an app's load (prof, 2026-11-17).
+- Few wake-ups in dark idle (2026-11-17; before, about 4 a second): with
+  the screen dark and nothing holding the clock up, the UI's once-a-second
+  work (alarm check, charger, notifications, USB on the plug) runs every
+  30 s (10 s when USB starts by itself on the plug) and just past the
+  minute of the next alarm; the card log's thread sleeps until a line
+  waits (written a second after the first) or the store has a write due;
+  the END thread waits for its interrupt (a minute at most); the decoder
+  thread ends when idle. Lit, Home and the menu are redrawn only when what
+  they show changes (`ui_screen_shown`), not every second. `os_status`
+  fields the UI fills (ticks, idle share, heap free) are as old as that
+  dark interval.
 - Threads run in SYS mode; interrupts and `svc` save the same 17-word
   frame on the thread's stack (`cpu.S`).
 - The LCD transfer is started, not waited for: the LCDC's done flag does
@@ -1090,6 +1222,19 @@ main.c          start-up; selftest.c: the boot self-test
   (RASET) and the LCDC's LCM crop (`lcm_start`, `lcm_size`), as the stock
   firmware does; the QEMU model follows the crop. A band of most of the
   screen goes whole; the spacing between transfers scales with the rows.
+  Since 2026-11-18 `ui/gfx.c` marks the rows each call may change
+  (`lcd_dirty_y0`/`lcd_dirty_y1`), and the UI's frames go out with
+  `lcd_update_drawn()`, which compares only those rows (none when nothing
+  was drawn). Other writers of the back buffer mark theirs with
+  `lcd_dirty()` (the console) or push with the full `lcd_update()` (the
+  UI's first frame, full-screen screens, the fault screen).
+- The card's power-up wait (`drivers/sdio.c`, 2026-11-18): 1 ms when the
+  card's supply is on already (the boot loader's or the last init's), 40 ms
+  when it is switched on here, the old 350 ms only after failures; ACMD41 is
+  asked every 5 ms. The boot log's "sd: probe ..." line says which, how long
+  and the LDO registers. `lcd_measure()` (one transfer timed by the done
+  flag, for the log) runs after Home is drawn, in a one-shot "bootlog"
+  thread (`main.c`).
 - QEMU on Windows loses about 0.25 ms per timer period (its periodic
   ptimer restarts each period from the late host callback), so with the
   1 ms tick time in QEMU runs some 26% slow; tickless, with about 50
@@ -1097,7 +1242,11 @@ main.c          start-up; selftest.c: the boot self-test
   and stays right. The chip reloads in hardware.
 - Tickless idle (`kernel/thread.c`): with only the idle thread ready and
   the next timeout three or more ticks away, the idle thread loads timer 2
-  with that many ticks (a second at most) before WFI. Ticks follow the
+  with that many ticks before WFI: at most 60 s at clock level 0 (26 MHz),
+  a second above it, and a second again if a long load ever read back cut
+  short (`timer_long_ok()`, `arch/sc6530c/timer.c`; until 2026-11-18 a
+  second everywhere). The tick reads the timer once and divides by
+  nothing; the governor is fed every window a sleep covered. Ticks follow the
   timer's cycle total (`timer_cycles()`), so any interrupt first catches
   them up (`kernel_irq_entry()`), then loads the rest of the tick and,
   when that ends, the tick again: the reload repeats the last load. A
@@ -1244,7 +1393,13 @@ main.c          start-up; selftest.c: the boot self-test
   --info`), linked by `media/codecs/codec.ld` with `--pic-veneer` (the
   interworking stubs to libgcc's ARM code would otherwise hold absolute
   addresses no relocation fixes). The loader keeps one module; the next
-  track of the same format reuses it, an idle one is freed after 30 s.
+  track of the same format reuses it. 30 s after the music (nothing playing
+  or paused) the module, the file window and the PCM ring are freed and the
+  decoder thread ends (its 32 KB stack goes); the next play makes them
+  again. The play queue's arrays grow with the list and go when it is
+  cleared; the album art's pixels and thread go 30 s after the last cover
+  was asked for. Until 2026-11-17 all this (368 KB) was kept after the
+  first song, and Wolf3D and Blood could not start after music.
   For an extension several modules claim (.m4a: AAC and ALAC; .ogg:
   Vorbis and Opus) each one's parser is asked in turn (the file's first
   bytes pick the likely one first); a module refuses a format it does

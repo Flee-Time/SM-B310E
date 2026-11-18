@@ -169,6 +169,10 @@ typedef struct {
 
 static tap_t taps[KIT_LCD_H];
 static bool halved;                     /* across, the frame is exactly twice what it shows as */
+/* Across, the shapes that have a loop of their own (classify): */
+static bool u_pairs;                    /* screen pixel u is frame pixels 2u and 2u + 1, from at[lo]
+                                         * (the 320-wide games to 160) */
+static bool u_one;                      /* taps of one pixel each, side by side (a 1:1 row) */
 
 static void make_taps(const axis_t *a, int src, int dst, int scaled, bool smooth)
 {
@@ -201,6 +205,20 @@ static void make_taps(const axis_t *a, int src, int dst, int scaled, bool smooth
 }
 
 static axis_t ax_u, ax_v;
+
+static void classify(void)
+{
+    int lo = ax_u.lo, hi = ax_u.hi;
+
+    u_pairs = u_one = lo < hi;
+    for (int u = lo; u < hi; u++) {
+        if (ax_u.at[u] != ax_u.at[lo] + 2 * (u - lo) || ax_u.next[u] != ax_u.at[u] + 1)
+            u_pairs = false;
+        if (taps[u].w0 != 16 || taps[u].x != taps[lo].x + (u - lo))
+            u_one = false;
+    }
+}
+
 static uint32_t kit_sound_cycles(void);
 static uint32_t launched_ms, fps_since, fps_frames, scale_ms;
 static uint32_t frame_at, worst_ms, slow_frames, heap_low = ~0u;
@@ -328,6 +346,7 @@ static void geometry(int w, int h, int *base, int *du, int *dv, int *gw, int *gh
         if (k.view.smooth && kit_game.row_grid)
             grid_rows(&ax_v, h, *gh, sh, kit_game.row_grid);
         make_taps(&ax_u, w, *gw, sw, k.view.smooth);
+        classify();
         halved = k.view.smooth && w == 2 * sw;
     }
     last_w = w;
@@ -365,6 +384,38 @@ static void wait_if_paused(void)
     sound_back();
 }
 
+/* The u_pairs rows (Doom, Wolf3D, Quake, the Build games: 320 to 160).
+ * Pointers stepped, no tap table: 19 instructions a pixel from two rows,
+ * 13 from one, against 21 and 15 through at[]/next[]. no-ivopts: without
+ * it GCC kept an index and a compare instead of post-incremented loads. The
+ * sums are the same words added in another order (mod 2^32: the same). */
+__attribute__((noinline, optimize("no-ivopts")))
+static void pairs_two_rows(const uint8_t *a, const uint8_t *b, uint16_t *d, int n, int du,
+                           const uint32_t *pal)
+{
+    do {
+        uint32_t s = pal[a[1]] + pal[b[1]];
+
+        s += pal[*a] + pal[*b];
+        a += 2;
+        b += 2;
+        *d = mean4(s);
+        d += du;
+    } while (--n);
+}
+
+__attribute__((noinline, optimize("no-ivopts")))
+static void pairs_one_row(const uint8_t *a, uint16_t *d, int n, int du, const uint32_t *pal)
+{
+    do {
+        uint32_t s = pal[a[1]] + pal[a[0]];
+
+        a += 2;
+        *d = mean4(s * 2);
+        d += du;
+    } while (--n);
+}
+
 void kit_present8(const uint8_t *src, int w, int h, int pitch)
 {
     int base, du, dv, gw, gh;
@@ -380,7 +431,13 @@ void kit_present8(const uint8_t *src, int w, int h, int pitch)
             const uint8_t *r0 = src + ax_v.at[v] * pitch, *r1 = src + ax_v.next[v] * pitch;
             uint16_t *d = k.frame + base + v * dv + ax_u.lo * du;
 
-            if (r0 == r1) {                     /* one row: half the look-ups */
+            if (u_pairs) {
+                if (r0 == r1)
+                    pairs_one_row(r0 + ax_u.at[ax_u.lo], d, ax_u.hi - ax_u.lo, du, pal);
+                else
+                    pairs_two_rows(r0 + ax_u.at[ax_u.lo], r1 + ax_u.at[ax_u.lo], d,
+                                   ax_u.hi - ax_u.lo, du, pal);
+            } else if (r0 == r1) {              /* one row: half the look-ups */
                 for (int u = ax_u.lo; u < ax_u.hi; u++, d += du)
                     *d = mean4((pal[r0[ax_u.at[u]]] + pal[r0[ax_u.next[u]]]) * 2);
             } else {
@@ -438,11 +495,30 @@ static const uint16_t *keep_detail(const uint16_t *r0, const uint16_t *r1, const
     return row_mean;
 }
 
+/* u_one rows (the Game Boy's 160 across, any 1:1 view): 4 instructions a
+ * pixel, against 11 through the taps (the index, the weight tested). The
+ * read and the step apart: so GCC posts the increment into the load. */
+__attribute__((noinline, optimize("no-ivopts")))
+static void copy_row(const uint16_t *s, uint16_t *d, int n, int du)
+{
+    do {
+        uint16_t c = *s;
+
+        s++;
+        *d = c;
+        d += du;
+    } while (--n);
+}
+
 /* A row to the screen, across as the taps say */
 static inline void row_out(const uint16_t *row, uint16_t *d, int du)
 {
     const tap_t *t = &taps[ax_u.lo], *end = &taps[ax_u.hi];
 
+    if (u_one) {
+        copy_row(row + t->x, d, ax_u.hi - ax_u.lo, du);
+        return;
+    }
     for (; t < end; t++, d += du) {
         if (t->w0 == 16)
             *d = row[t->x];
@@ -455,17 +531,28 @@ static inline void row_out(const uint16_t *row, uint16_t *d, int du)
 }
 
 /* Two rows, each pair of pixels to one (exactly half): a word's two pixels at
- * a time, green's lowest bit left out, for room (InfoNES's flag is there) */
-static inline void half_out(const uint32_t *a, const uint32_t *b, uint16_t *d, int du)
+ * a time, green's lowest bit left out, for room (InfoNES's flag is there).
+ * 15 instructions a pixel, against 16 with an index and a compare. */
+__attribute__((noinline, optimize("no-ivopts")))
+static void half_run(const uint32_t *a, const uint32_t *b, uint16_t *d, int n, int du)
 {
-    for (int u = ax_u.lo; u < ax_u.hi; u++, d += du, a++, b++) {
+    do {
         uint32_t p = *a, q = *b, c;
 
+        a++;
+        b++;
         c = (p & 0x07c0f81fu) + (q & 0x07c0f81fu) +
             ((p >> 16 | p << 16) & 0x07c0f81fu) + ((q >> 16 | q << 16) & 0x07c0f81fu);
         c = (c + 0x00801002u) >> 2 & 0x07c0f81fu;       /* rounded */
         *d = (uint16_t)(c | c >> 16);
-    }
+        d += du;
+    } while (--n);
+}
+
+static inline void half_out(const uint32_t *a, const uint32_t *b, uint16_t *d, int du)
+{
+    if (ax_u.lo < ax_u.hi)
+        half_run(a, b, d, ax_u.hi - ax_u.lo, du);
 }
 
 void kit_present565(const uint16_t *src, int w, int h, int pitch)

@@ -418,6 +418,7 @@ static void list_key_(screen_t *s, const key_event_t *ev)
 static void list_tick(screen_t *s)
 {
     /* redrawn every second: the next alarm's countdown, one that rang */
+    ui_redraw();
 }
 
 static screen_t list_screen = {

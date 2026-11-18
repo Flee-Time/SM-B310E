@@ -139,6 +139,38 @@ bool sc6530_dsp_arm_audio_owned(Object *obj);
 #define SC6530_ADI_EIC_DMSK_OFF  0x904
 #define SC6530_ADI_EIC_PB_CH     3
 
+/* Analog debounce EIC interrupt block (docs/eic-interrupt.md section 1,
+ * the stock eic_phy_v5.c and os/drivers/keypad.c), 16 channels, 16-bit:
+ *   +0x914 IEV   trigger level per channel: 1 = high, 0 = low       [C]
+ *   +0x918 IE    interrupt enable                                   [C]
+ *   +0x91c RIS   raw (latched) status, read only                    [L]
+ *   +0x920 MIS   RIS & IE, read only                                [C]
+ *   +0x924 IC    write 1 to clear a channel's RIS; reads 0          [C/G]
+ *   +0x928 TRIG  write 1 to start one detection; reads 0            [C/G]
+ *   +0x940+4n CTRL0(n): [11:0] debounce time, bit 14 debounce on    [C]
+ * Behaviour modelled (the parts marked GUESS are not read anywhere):
+ *   - level triggered: a channel detects while its input (the EIC_DATA
+ *     level the guest reads, DMSK gating included) equals its IEV bit;
+ *   - GUESS: a detection runs only after a TRIG write, and ends at the
+ *     first latch (stock and the OS write TRIG every time they arm);
+ *   - GUESS: with CTRL0 bit 14 set the level must hold for CTRL0[11:0]
+ *     milliseconds (Linux gpio-eic-sprd programs the field in ms) before
+ *     RIS latches; with bit 14 clear it latches at once;
+ *   - RIS latches whether or not IE is set (raw), IC clears it;
+ *   - ANA_INT (+0x580 masked / +0x584 raw) bit 5 is MIS != 0, and with
+ *     ANA_INT_EN (+0x588) bit 5 it raises the analog line (INTC 24).
+ * Off with eic-irq=off: no detection ever latches (the model before
+ * 2026-11-18, where the OS falls back to polling END). */
+#define SC6530_ADI_EIC_IEV_OFF   0x914
+#define SC6530_ADI_EIC_IE_OFF    0x918
+#define SC6530_ADI_EIC_RIS_OFF   0x91c
+#define SC6530_ADI_EIC_MIS_OFF   0x920
+#define SC6530_ADI_EIC_IC_OFF    0x924
+#define SC6530_ADI_EIC_TRIG_OFF  0x928
+#define SC6530_ADI_EIC_CTRL0_OFF 0x940
+#define SC6530_ADI_EIC_CHANNELS  16
+#define SC6530_ANA_INT_EIC       (1u << 5)
+
 /* ADI_ARM_RD_DATA fields (adi_reg_v5.h:55-57). */
 #define SC6530_ADI_RD_BUSY_MASK  (1u << 31)
 #define SC6530_ADI_RD_ADDR_MASK  0x1FFF0000u   /* [28:16] index echo */
@@ -216,6 +248,13 @@ struct Sc6530AdiState {
      * in sc6530_adi_ana_effective, not when the level is set. */
     uint32_t eic_pb_phys;
 
+    /* EIC interrupt state (see SC6530_ADI_EIC_IEV_OFF above). */
+    bool eic_irq;                 /* property: model the interrupt */
+    uint32_t eic_ris;             /* latched raw status */
+    uint32_t eic_armed;           /* channels with a detection running */
+    int64_t eic_since[SC6530_ADI_EIC_CHANNELS]; /* ms the level matched, -1 */
+    QEMUTimer *eic_timer;         /* debounce ends, headset bounce end */
+
     /* Watchdog (ANA +0x480): LOAD_LOW +0x0, LOAD_HIGH +0x4, CTRL +0x8
      * (bit 3 reset enable, bit 1 run), LOCK +0x20 (0xe551 unlocks, any
      * other value locks; locked writes are ignored). It counts LOAD ticks
@@ -230,8 +269,14 @@ struct Sc6530AdiState {
 static uint32_t sc6530_analog_pending(const Sc6530AdiState *s)
 {
     /* Stock IRQ context at 0x0422ca4c uses ANA +0x580 for masked
-     * status and +0x588 for enables; RTC is analog source bit 2. */
-    return (s->ana_regs[0x634 / 4] & s->ana_regs[0x630 / 4]) ? 4 : 0;
+     * status and +0x588 for enables; RTC is analog source bit 2, the
+     * analog debounce EIC bit 5 (logic 37, EICA_DbncIsr). */
+    uint32_t pending = (s->ana_regs[0x634 / 4] & s->ana_regs[0x630 / 4]) ? 4 : 0;
+
+    if (s->eic_ris & s->ana_regs[SC6530_ADI_EIC_IE_OFF / 4] & 0xffffu) {
+        pending |= SC6530_ANA_INT_EIC;
+    }
+    return pending;
 }
 
 static void sc6530_analog_irq(Sc6530AdiState *s)
@@ -439,15 +484,72 @@ static uint32_t sc6530_adi_ana_effective(const Sc6530AdiState *s,
             word |= 1u << 4;      /* side-button bounce trips the comparator */
         }
         /* e52q7a 0x663d4: logical EIC18 = analog channel2, active high.
-         * External power cannot be written by the guest. Only polling
-         * is modeled here; debounce/edge interrupts remain unsupported. */
+         * External power cannot be written by the guest. Its interrupt
+         * follows this level like every channel's (sc6530_eic_update). */
         word &= ~(1u << 2);
         if (s->charger_present &&
             (s->ana_regs[SC6530_ADI_EIC_DMSK_OFF / 4] & (1u << 2))) {
             word |= 1u << 2;
         }
+    } else if (offset == SC6530_ADI_EIC_RIS_OFF) {
+        word = s->eic_ris;
+    } else if (offset == SC6530_ADI_EIC_MIS_OFF) {
+        word = s->eic_ris & s->ana_regs[SC6530_ADI_EIC_IE_OFF / 4] & 0xffffu;
+    } else if (offset == SC6530_ADI_EIC_IC_OFF ||
+               offset == SC6530_ADI_EIC_TRIG_OFF) {
+        word = 0;                 /* pulse registers (GUESS: read 0) */
     }
     return word;
+}
+
+/* Run the EIC's detections against the input levels now: called after
+ * every input change (END, headset button, charger), every write to the
+ * ANA bank, and from eic_timer when a debounce time or a headset bounce
+ * ends. Raises or lowers the analog line. */
+static void sc6530_eic_update(Sc6530AdiState *s)
+{
+    int64_t now = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL), next = INT64_MAX;
+    uint32_t level = sc6530_adi_ana_effective(s, SC6530_ADI_EIC_DATA_OFF);
+    uint32_t iev = s->ana_regs[SC6530_ADI_EIC_IEV_OFF / 4];
+
+    for (unsigned n = 0; n < SC6530_ADI_EIC_CHANNELS; n++) {
+        uint32_t bit = 1u << n;
+        uint32_t ctrl = s->ana_regs[(SC6530_ADI_EIC_CTRL0_OFF + 4 * n) / 4];
+        int64_t dbnc = (ctrl & 0x4000u) ? (ctrl & 0xfffu) : 0;
+
+        if (!s->eic_irq || !(s->eic_armed & bit)) {
+            s->eic_since[n] = -1;
+            continue;
+        }
+        if ((level ^ iev) & bit) {
+            s->eic_since[n] = -1;     /* not at the trigger level */
+            continue;
+        }
+        if (s->eic_since[n] < 0) {
+            s->eic_since[n] = now;
+        }
+        if (now - s->eic_since[n] >= dbnc) {
+            s->eic_ris |= bit;
+            s->eic_armed &= ~bit;
+            s->eic_since[n] = -1;
+        } else {
+            next = MIN(next, s->eic_since[n] + dbnc);
+        }
+    }
+    if (s->eic_armed && now < s->headset_bounce_until) {
+        next = MIN(next, s->headset_bounce_until);
+    }
+    if (next != INT64_MAX) {
+        timer_mod(s->eic_timer, next);
+    } else {
+        timer_del(s->eic_timer);
+    }
+    sc6530_analog_irq(s);
+}
+
+static void sc6530_eic_tick(void *opaque)
+{
+    sc6530_eic_update(opaque);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -649,8 +751,25 @@ static void sc6530_adi_ana_write(void *opaque, hwaddr offset,
     } else if (aligned == 0x638) {
         s->ana_regs[0x634 / 4] &= ~(value << ((offset & 3) * 8));
         s->ana_regs[0x638 / 4] = 0;
+    } else if (aligned == SC6530_ADI_EIC_IC_OFF ||
+               aligned == SC6530_ADI_EIC_TRIG_OFF) {
+        /* the word is kept 0, so what is in it now is what was written */
+        uint32_t bits = s->ana_regs[aligned / 4] & 0xffffu;
+
+        s->ana_regs[aligned / 4] = 0;
+        if (aligned == SC6530_ADI_EIC_IC_OFF) {
+            s->eic_ris &= ~bits;
+        } else {
+            s->eic_armed |= bits;
+            for (unsigned n = 0; n < SC6530_ADI_EIC_CHANNELS; n++) {
+                if (bits & (1u << n)) {
+                    s->eic_since[n] = -1;   /* restart the debounce */
+                }
+            }
+        }
     }
-    sc6530_analog_irq(s);
+    /* EIC detections and the analog line (it includes the RTC's bit) */
+    sc6530_eic_update(s);
     /* Stock 0x20ef6 samples channel 5 via ADC_CTL +0x680, channel +0x684,
      * result +0x6cc, clear +0x6d4 and raw status +0x6dc. Conversion is
      * immediate for now. The dump calibrates raw 950 as 4200 mV. */
@@ -938,6 +1057,7 @@ void sc6530_adi_set_headset_button(Object *adi_obj, unsigned button, bool held)
     }
     qemu_log("sc6530_adi: headset button %u %s\n", button,
              held ? "held" : "released");
+    sc6530_eic_update(s);         /* channel 4, and the bounce on it */
 }
 
 void sc6530_adi_set_eic_pb(Object *adi_obj, bool held)
@@ -957,6 +1077,7 @@ void sc6530_adi_set_eic_pb(Object *adi_obj, bool held)
                  held ? "held" : "released");
         trace_sc6530_ana_write(SC6530_ADI_ANA_BASE + SC6530_ADI_EIC_DATA_OFF,
                                phys, sc6530_adi_guest_pc());
+        sc6530_eic_update(s);     /* channel 3 */
     }
 }
 
@@ -1002,6 +1123,14 @@ static void sc6530_adi_reset(DeviceState *dev)
     timer_mod(s->rtc_timer, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1000);
     timer_del(s->wdg_timer);
     s->wdg_unlocked = false;
+    /* EIC: no detection running, nothing latched (IE/IEV/CTRL0 are 0
+     * with the rest of ana_regs). */
+    s->eic_ris = s->eic_armed = 0;
+    for (unsigned n = 0; n < SC6530_ADI_EIC_CHANNELS; n++) {
+        s->eic_since[n] = -1;
+    }
+    timer_del(s->eic_timer);
+    sc6530_analog_irq(s);
     /* eic_pb_phys is the KEYPAD's domain (its reset asserts/releases the
      * hold-end level) - the ADI reset must NOT zero it (the keypad reset
      * runs BEFORE this one, so zeroing here would wipe the hold). */
@@ -1011,6 +1140,7 @@ static void sc6530_adi_charger_input(void *opaque, int pin, int level)
 {
     Sc6530AdiState *s = opaque;
     s->charger_present = level != 0;
+    sc6530_eic_update(s);         /* channel 2 */
 }
 
 static void sc6530_adi_init(Object *obj)
@@ -1038,6 +1168,10 @@ static void sc6530_adi_init(Object *obj)
     s->rec_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_rec_tick, s);
     s->rtc_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sc6530_rtc_tick, s);
     s->wdg_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, sc6530_wdg_expired, s);
+    s->eic_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL, sc6530_eic_tick, s);
+    for (unsigned n = 0; n < SC6530_ADI_EIC_CHANNELS; n++) {
+        s->eic_since[n] = -1;
+    }
     sysbus_init_irq(sbd, &s->analog_irq);
     object_property_add_link(obj, "dma", "sc6530_dma", &s->dma,
                              object_property_allow_set_link, OBJ_PROP_LINK_STRONG);
@@ -1093,6 +1227,7 @@ static void sc6530_adi_finalize(Object *obj)
     timer_free(SC6530_ADI(obj)->audio_timer);
     timer_free(SC6530_ADI(obj)->rec_timer);
     timer_free(SC6530_ADI(obj)->rtc_timer);
+    timer_free(SC6530_ADI(obj)->eic_timer);
 }
 
 static const Property sc6530_adi_properties[] = {
@@ -1101,6 +1236,9 @@ static const Property sc6530_adi_properties[] = {
     DEFINE_PROP_UINT32("headset-bounce-ms", Sc6530AdiState, headset_bounce_ms, 0),
     DEFINE_PROP_BOOL("charger-present", Sc6530AdiState, charger_present, false),
     DEFINE_PROP_BOOL("watchdog", Sc6530AdiState, watchdog, false),
+    /* the analog EIC interrupt (END, headset button, charger); off gives
+     * the polled END path of the model before 2026-11-18 */
+    DEFINE_PROP_BOOL("eic-irq", Sc6530AdiState, eic_irq, true),
     DEFINE_PROP_UINT32("mic-tone-hz", Sc6530AdiState, mic_tone_hz, 1000),
     DEFINE_PROP_UINT16("mic-level", Sc6530AdiState, mic_level, 8192),
     DEFINE_PROP_UINT32("line-left-hz", Sc6530AdiState, line_tone_hz[0], 600),

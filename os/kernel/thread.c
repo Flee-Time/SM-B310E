@@ -40,7 +40,21 @@ static bool tickless = true;
  * after a sleep, so the tick lines up on the tick boundary again. */
 static enum { PHASE_TICK, PHASE_SLEEP, PHASE_ALIGN } phase;
 
-#define MAX_SLEEP_TICKS 1000        /* a tickless sleep, at most */
+/* A tickless sleep, at most. Until 2026-11-18 a second everywhere: in dark
+ * idle with nothing due for 10-60 s that was the one wake-up a second left
+ * (phone: 1 timer interrupt a second, the only line counting). Now 60 s on
+ * the crystal: 1.56e9 cycles, well inside what the arithmetic allows (a
+ * sleep's cycles must stay below 2^31, 82 s, for advance() and account(); the
+ * cycle count wraps at 2^32, 165 s, and only differences are used). Above
+ * 26 MHz a second as before: the governor's step down is counted in windows,
+ * and nothing chip-sleeps there anyway. And a second if the timer cut a long
+ * load short (timer_long_ok). */
+#define MAX_SLEEP_TICKS      60000
+#define MAX_SLEEP_TICKS_FAST 1000
+#define GOV_WINDOW_TICKS     50     /* the governor's window */
+#define GOV_WINDOWS_MAX      24     /* windows fed at once: 208 -> 104 (4) -> 26 (20) */
+_Static_assert((uint64_t)MAX_SLEEP_TICKS * (TIMER_HZ / 1000u) < (3ull << 29),
+               "a tickless sleep must stay well below 2^31 cycles");
 
 #define SLICE_TICKS 10
 #define FRAME_WORDS 17
@@ -202,9 +216,9 @@ void k_set_prio(thread_t *t, int prio)
 
 /* ---- scheduler ----------------------------------------------------------- */
 
-static void account(void)
+/* now: a timer_cycles() read by the caller (each read is two MMIO reads) */
+static void account_at(uint32_t now)
 {
-    uint32_t now = timer_cycles();
     int32_t d = (int32_t)(now - acct_mark);
 
     if (d <= 0)                         /* never count backwards */
@@ -224,7 +238,7 @@ void kernel_reschedule(void)
     need_resched = false;
     next = ready[highest_ready()];
     if (next != cur) {
-        account();
+        account_at(timer_cycles());
         slice_left = SLICE_TICKS;
         kernel_current = next;
     }
@@ -236,22 +250,58 @@ void kernel_irq_exit(void)
         kernel_reschedule();
 }
 
+/* The high word of a * b: UMULL is ARM code only (in Thumb this was a call
+ * to __aeabi_lmul). */
+__attribute__((target("arm"), noinline)) static uint32_t mul_hi(uint32_t a, uint32_t b)
+{
+    return (uint32_t)(((uint64_t)a * b) >> 32);
+}
+
+/* since / p, since >= p, below 2^31. It was a plain division: __udivsi3,
+ * 40-80 instructions (the ARM926 has no divide), at every tick and every
+ * wake from a tickless sleep. One period is the usual tick; otherwise a
+ * multiply by recip = (2^32 - 1) / p, which is at most one period short:
+ * recip >= (2^32 - p) / p, so since * recip / 2^32 >= since / p - since / 2^32
+ * > since / p - 1/2 for since < 2^31, and never over since / p. The same
+ * result as the division (old and new advance() run side by side on the
+ * host, 2026-11-18: random steps, long sleeps, the 2^32 wrap). */
+static uint32_t periods(uint32_t since, uint32_t p)
+{
+    static uint32_t recip_p, recip;
+    uint32_t n, r;
+
+    if (since - p < p)
+        return 1;
+    if (p != recip_p) {                 /* once: the period is fixed at init */
+        recip = 0xffffffffu / p;
+        recip_p = p;
+    }
+    n = mul_hi(since, recip);
+    r = since - n * p;
+    while (r >= p) {
+        n++;
+        r -= p;
+    }
+    return n;
+}
+
 /* Ticks follow the timer's cycle count, so a tickless sleep advances them
- * by however many periods it lasted. Interrupts off. */
+ * by however many periods it lasted. Interrupts off. The timer is read once:
+ * the accounting read it again (each read two MMIO reads). */
 static void advance(void)
 {
     thread_t *cur = kernel_current;
-    uint32_t p = timer_load();
-    int32_t since = (int32_t)(timer_cycles() - tick_mark);
+    uint32_t p = timer_load(), now = timer_cycles();
+    int32_t since = (int32_t)(now - tick_mark);
     uint32_t n;
 
     if (since < (int32_t)p)             /* not a tick yet, or a read behind the
                                          * mark: never 2^32 cycles ahead */
         return;
-    n = (uint32_t)since / p;
+    n = periods((uint32_t)since, p);
     tick_mark += n * p;
     ticks += n;
-    account();
+    account_at(now);
     while (timeouts && (int32_t)(ticks - timeouts->wake) >= 0)
         k_wake(timeouts, WAIT_TIMEOUT);
 
@@ -270,12 +320,25 @@ static void advance(void)
         static uint32_t win_idle, win_total;
         uint32_t idle = idle_thread->cycles - win_idle;
         uint32_t all = total_cycles - win_total;
+        unsigned k = 1;
 
-        next_window = ticks + 50;
+        /* A tickless sleep spans many windows but ends only one: the
+         * governor's 20 quiet windows at 104 MHz took 20 wake-ups, and after
+         * a card write in dark idle the phone stayed 13-30 s at 104 MHz
+         * without chip sleep (bench 120 dark, 2026-11-18). Each window that
+         * passed counts, with the span's share (a sleep's: nearly all idle). */
+        while (k < GOV_WINDOWS_MAX &&
+               (int32_t)(ticks - (next_window + k * GOV_WINDOW_TICKS)) >= 0)
+            k++;
+        next_window = ticks + GOV_WINDOW_TICKS;
         win_idle = idle_thread->cycles;
         win_total = total_cycles;
-        if (all >= 1000)
-            cpufreq_window(idle >= all ? 0 : 1000 - idle / (all / 1000));
+        if (all >= 1000) {
+            uint32_t busy = idle >= all ? 0 : 1000 - idle / (all / 1000);
+
+            while (k--)
+                cpufreq_window(busy);
+        }
     }
 
     if ((int32_t)(ticks - next_stats) >= 0) {   /* idle share of the cycles counted */
@@ -324,12 +387,13 @@ void kernel_tick(void)
 /* Any interrupt: ending a tickless sleep early, the ticks catch up first,
  * so handlers and woken threads see the time, and the tick comes back for
  * the threads that run now. */
-void kernel_irq_entry(void)
+bool kernel_irq_entry(void)
 {
-    if (phase == PHASE_SLEEP) {
-        advance();
-        align();
-    }
+    if (phase != PHASE_SLEEP)
+        return false;
+    advance();
+    align();
+    return true;
 }
 
 void kernel_set_tickless(bool on)
@@ -532,11 +596,12 @@ void thread_set_priority(thread_t *t, int prio)
 }
 
 /* Nothing ready but the idle thread: when the next timeout is at least
- * three ticks away, let the timer run until it (a second at most) instead
+ * three ticks away, let the timer run until it (MAX_SLEEP_TICKS at most) instead
  * of interrupting every millisecond. Interrupts off. */
 static void tickless_sleep(void)
 {
-    uint32_t delta = MAX_SLEEP_TICKS;
+    uint32_t max = clock_level() == 0 && timer_long_ok() ? MAX_SLEEP_TICKS : MAX_SLEEP_TICKS_FAST;
+    uint32_t delta = max;
     int32_t rest;
 
     /* from the align phase too: a thread woken by a sleep's end mostly runs
@@ -550,7 +615,7 @@ static void tickless_sleep(void)
     if (timeouts) {
         int32_t d = (int32_t)(timeouts->wake - ticks);
 
-        delta = d < 1 ? 1 : (uint32_t)d < MAX_SLEEP_TICKS ? (uint32_t)d : MAX_SLEEP_TICKS;
+        delta = d < 1 ? 1 : (uint32_t)d < max ? (uint32_t)d : max;
     }
     rest = (int32_t)(tick_mark + delta * timer_load() - timer_cycles());
     if (delta >= 3 && rest >= 2 * (int32_t)timer_load()) {

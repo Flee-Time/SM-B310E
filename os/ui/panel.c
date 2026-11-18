@@ -200,23 +200,141 @@ static void draw_control(int y, int c, bool selected)
     }
 }
 
+/* Everything a row's pixels depend on but where it is (zeroed, then filled:
+ * compared whole) */
+typedef struct {
+    const void *icon, *name;
+    char title[24], text[40];
+    const char *action[NOTIFY_ACTIONS];
+    int kind, a, b, c;
+    bool selected;
+} snap_t;
+
+#define MAX_ROWS (NOTIFY_MAX + P_COUNT)
+
+/* The rows as drawn last: with the frame still the panel's (ui_partial) a
+ * move redraws the two rows it changed, and the tick a row whose text did.
+ * The panel was redrawn whole twice a second (9 of 16 frames of opening it
+ * and moving 6 times unchanged, bench 2026-11-17). */
+static struct {
+    bool valid;
+    int scroll, n, rows;
+    int y[MAX_ROWS], h[MAX_ROWS];
+    snap_t row[MAX_ROWS];
+} drawn;
+
+static void snap(int r, int n, snap_t *p)
+{
+    memset(p, 0, sizeof(*p));
+    p->selected = r == sel;
+    if (r < n) {
+        const notify_t *no = notify_get(r);
+
+        p->icon = no->icon;
+        memcpy(p->title, no->title, sizeof(p->title));
+        memcpy(p->text, no->text, sizeof(p->text));
+        for (int i = 0; i < NOTIFY_ACTIONS; i++)
+            p->action[i] = no->action[i];
+        p->a = no->progress;
+        p->b = p->selected ? act_sel : -2;
+        p->kind = -1;
+    } else {
+        int c = r - n, cat = volume_current();
+
+        p->kind = c;
+        if (c == P_TORCH) {
+            p->a = torch_get();
+        } else if (c == P_BRIGHT) {
+            p->a = ui_settings.brightness;
+        } else {
+            p->a = cat;
+            p->b = volume_level(cat);
+            p->c = level_max(cat);
+            p->name = volume_name(cat);
+        }
+    }
+}
+
+/* Where the rows are now, and whether each looks as drawn: the rows that
+ * differ get changed[r]; false when the layout moved (all of it again) */
+static bool compare(bool *changed)
+{
+    int n = notes(), nr = rows();
+
+    if (!drawn.valid || drawn.scroll != scroll || drawn.n != n || drawn.rows != nr)
+        return false;
+    for (int r = 0; r < nr; r++) {
+        int h, y = row_top(r, &h);
+        snap_t now;
+
+        if (y != drawn.y[r] || h != drawn.h[r])
+            return false;
+        snap(r, n, &now);
+        changed[r] = memcmp(&now, &drawn.row[r], sizeof(now)) != 0;
+    }
+    return true;
+}
+
+static void draw_one(int r, int n, int y)
+{
+    if (r < n)
+        draw_note(y, notify_get(r), r == sel);
+    else
+        draw_control(y, r - n, r == sel);
+}
+
 static void draw(screen_t *s)
 {
     int n = notes(), top = UI_TOP + 2, bottom = UI_BOTTOM - 2;
+    bool changed[MAX_ROWS];
 
     follow_sel();
+    if (ui_partial() && compare(changed)) {
+        bool inside = true;
+
+        /* a changed row must be wholly in the content area: the bars are
+         * not drawn over it again */
+        for (int r = 0; r < rows(); r++) {
+            int y = top - scroll + drawn.y[r], hh = drawn.h[r] - 2;
+
+            if (changed[r] && !(y + drawn.h[r] < top || y > bottom) &&
+                (y < UI_TOP || y + hh > UI_BOTTOM))
+                inside = false;
+        }
+        if (inside) {
+            for (int r = 0; r < rows(); r++) {
+                int y = top - scroll + drawn.y[r];
+
+                if (!changed[r])
+                    continue;
+                snap(r, n, &drawn.row[r]);
+                if (y + drawn.h[r] < top || y > bottom)
+                    continue;       /* not on screen: nor in a full draw */
+                gfx_fill(UI_PAD, y, LCD_WIDTH - 2 * UI_PAD, drawn.h[r] - 2, C_BG);
+                draw_one(r, n, y);
+            }
+            return;
+        }
+    }
+    ui_draw_base();
+    drawn.valid = rows() <= MAX_ROWS;
+    drawn.scroll = scroll;
+    drawn.n = n;
+    drawn.rows = rows();
     /* rows past the edges: the title and soft-key bars are drawn after */
     if (!n)
         gfx_text_centered(top - scroll + 3, "No notifications", C_DIM, FONT_SMALL, 1);
     for (int r = 0; r < rows(); r++) {
         int h, y = top - scroll + row_top(r, &h);
 
+        if (r < MAX_ROWS) {
+            drawn.y[r] = y - top + scroll;
+            drawn.h[r] = h;
+            snap(r, n, &drawn.row[r]);
+        }
         if (y + h < top || y > bottom)
             continue;
-        if (r < n)
-            draw_note(y, notify_get(r), r == sel);
-        else
-            draw_control(y, r - n, r == sel);
+        draw_one(r, n, y);
     }
 }
 
@@ -296,7 +414,16 @@ static void key(screen_t *s, const key_event_t *ev)
 
 static void tick(screen_t *s)
 {
+    bool changed[MAX_ROWS], any = false;
+
     notify_tick();                      /* live texts (the track, its time) */
+    follow_sel();                       /* as draw() would */
+    if (!compare(changed))
+        any = true;
+    for (int r = 0; !any && r < rows(); r++)
+        any = changed[r];
+    if (any)                            /* only then a frame, of what changed */
+        ui_redraw_changed();
 }
 
 static void enter(screen_t *s)
@@ -314,6 +441,7 @@ static screen_t panel = {
 
 screen_t *ui_panel(void)
 {
+    ui_screen_partial(&panel);
     return &panel;
 }
 
@@ -408,7 +536,25 @@ static screen_t sound = {
     .enter = sound_enter, .draw = sound_draw, .key = sound_key,
 };
 
+/* What the Sound page shows: drawn again when a level changes elsewhere (a
+ * headset's buttons), not every second */
+static uint32_t sound_shown(screen_t *s)
+{
+    uint32_t k = (uint32_t)sound_rows();
+
+    for (int r = 0; r < sound_rows(); r++) {
+        int cat = sound_cat(r);
+
+        k = k * 31u + (uint32_t)cat;
+        k = k * 31u + (uint32_t)volume_level(cat);
+        k = k * 31u + (uint32_t)(uintptr_t)volume_name(cat);
+        k = k * 31u + (uint32_t)(uintptr_t)volume_icon(cat);
+    }
+    return k;
+}
+
 screen_t *ui_sound(void)
 {
+    ui_screen_shown(&sound, sound_shown);
     return &sound;
 }

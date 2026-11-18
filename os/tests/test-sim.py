@@ -33,6 +33,7 @@ import time
 
 REPO = Path(__file__).resolve().parents[2]
 QT = runpy.run_path(str(REPO / 'emulator/qemu/scripts/test-audio.py'))['QTest']
+card_file = runpy.run_path(str(Path(__file__).with_name('test-boot.py')))['card_file']
 spec = importlib.util.spec_from_file_location(
     'capture', REPO / 'emulator/qemu/scripts/capture-stock.py')
 capture = importlib.util.module_from_spec(spec)
@@ -264,11 +265,11 @@ def run(args, name, slots):
     assert inss == ['0xa4'], f'commands other than SELECT reached the card: {inss}'
     assert {s for s, c in resets if c == '1'} == {str(s) for s in range(2) if slots >> s & 1}, resets
 
-    image = card.read_bytes()
-    log_at = image.find(b'lcd: transfer spacing')       # the log's first line
-    assert log_at >= 0, 'no card log'
-    log_at = log_at // 512 * 512
-    log_text = image[log_at:image.find(b'\0', log_at)].decode(errors='replace')
+    # through the FAT: the log is not one run of sectors once another file
+    # (the data store) is made soon after boot
+    log = card_file(card.read_bytes(), '/b310e-os/log')
+    assert log, 'no card log'
+    log_text = log.decode(errors='replace')
     (out / 'card-log.txt').write_text(log_text)
     lines = [l[l.index('sim: '):] for l in log_text.splitlines() if 'sim: ' in l]
     result['log'] = lines

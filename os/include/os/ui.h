@@ -93,7 +93,9 @@ struct screen {
     void (*leave)(screen_t *s);                 /* popped */
     void (*draw)(screen_t *s);                  /* the content area */
     void (*key)(screen_t *s, const key_event_t *ev);  /* presses, repeats */
-    void (*tick)(screen_t *s);                  /* every tick_ms */
+    /* every tick_ms; calls ui_redraw() when it changed what draw() shows (an
+     * app built for API 2.18 or older is redrawn after every tick, as then) */
+    void (*tick)(screen_t *s);
     void *data;
     bool free_on_pop;                           /* kfree(s) when popped */
     uint32_t tick_ms;                           /* 0: once a second */
@@ -117,12 +119,40 @@ void ui_pop(void);
  *   UI_MODE_AWAKE     no screen timeout while keys come: awake_limit_s (5 min)
  *                     after the last, the normal timeout runs, so a game left
  *                     running does not keep the screen lit until the battery
- *                     is gone. "Screen off: never" in Settings still means never */
+ *                     is gone. "Screen off: never" in Settings still means never
+ *   UI_MODE_HOLD_KEYS 0-9, * and # reach key() when let go, or, held 0.6 s, once
+ *                     with repeat == UI_KEY_LONG and nothing at the release (a
+ *                     text editor's long presses; API 2.18). 0 held is then
+ *                     not the torch */
 #define UI_MODE_FULL      1u
 #define UI_MODE_RAW_KEYS  2u
 #define UI_MODE_AWAKE     4u
+#define UI_MODE_HOLD_KEYS 8u
+#define UI_KEY_LONG       2                 /* key_event_t.repeat of a long press */
 void ui_screen_mode(screen_t *s, unsigned flags);
 void ui_push_urgent(screen_t *s);   /* the alarm: even with the stack full */
+/* An OS screen (not the app API: screen_t's layout is apps', so no member for
+ * it) whose content changes only when shown(s) does: the once-a-second check
+ * redraws it then, or when the status bar changes, not every second. Screens
+ * without one are drawn every second as before, unless they have a tick()
+ * that asks for its frames (API 2.19). Up to 32 (a screen freed when popped
+ * loses its own). */
+void ui_screen_shown(screen_t *s, uint32_t (*shown)(screen_t *s));
+/* An OS screen whose draw() redraws only what changed when the frame in
+ * lcd_fb is still its own last one (the same screen, over the same screen,
+ * nothing drawn in between): then ui_partial() is true during draw() and the
+ * content area is NOT cleared first, nor the screen under a dialog drawn.
+ * draw() compares what it shows with what it drew; ui_draw_base() clears the
+ * content (and draws the screen under) when it must draw everything after
+ * all, and ui_partial() is false from then on. A key's frame may be partial;
+ * ui_redraw() asks for the whole frame. list_draw does this by itself, so a
+ * screen whose draw() is a list_draw (and drawing that stays in the content
+ * area) only registers. */
+void ui_screen_partial(screen_t *s);
+bool ui_partial(void);
+void ui_draw_base(void);
+/* From a partial screen's tick: draw again, its draw() finds what changed */
+void ui_redraw_changed(void);
 /* From a full-screen draw(): a whole frame sent where it lies, no copy: 32-byte
  * aligned, and not written until another is sent. The one sent already, or
  * NULL: the panel stays as it is. False if the screen is not on top and
@@ -130,8 +160,8 @@ void ui_push_urgent(screen_t *s);   /* the alarm: even with the stack full */
 bool ui_present(const uint16_t *px);
 void ui_home(void);                 /* back to the bottom screen */
 void ui_redraw(void);
-void ui_refresh(void);
-void ui_collect_apps(void);          /* unload apps that are no longer used */               /* ui_redraw from another thread: at once */
+void ui_refresh(void);              /* ui_redraw from another thread: at once */
+void ui_collect_apps(void);          /* unload apps that are no longer used */
 int ui_depth(void);
 void ui_run(screen_t *home) __attribute__((noreturn));   /* the UI thread */
 void ui_power_off(void) __attribute__((noreturn));
@@ -166,6 +196,7 @@ typedef struct {
                                      * normal screen timeout runs again */
     int player_idle_s;              /* Music closes after this long playing nothing
                                      * and with no key for it; 0: never */
+    int completion;                 /* 1: the text editor offers words (2.18) */
 } ui_settings_t;
 
 extern ui_settings_t ui_settings;
@@ -174,6 +205,7 @@ void ui_apply_brightness(void);
 bool ui_is_dark(void);              /* the panel asleep: apps can stop working */
 void ui_force_dark(void);           /* dark now, as after the timeout; the UI's */
 void ui_wake(void);                 /* light the screen, as a key would */
+void ui_keylight_touch(void);       /* the keylight setting changed: apply it */
 void ui_buzz(int level, uint32_t ms);   /* vibrate at level 1..7 for ms (5 s at most) */
 
 /* ---- widgets (ui/widgets.c) --------------------------------------------- */
@@ -190,6 +222,9 @@ typedef struct {
 
 void list_draw(list_t *l);
 bool list_key(list_t *l, const key_event_t *ev);   /* Up/Down; true if used */
+/* A shown key (ui_screen_shown) of what the visible rows say, not where the
+ * selection is: for a list whose texts change by themselves (a clock) */
+uint32_t list_shown(list_t *l);
 
 /* A confirm dialog: LSoft runs yes() and closes; RSoft just closes. */
 void ui_confirm(const char *title, const char *message, void (*yes)(void));
@@ -204,10 +239,18 @@ void ui_choose(const char *title, const char *const *options, int n, int current
 /* label ... value in one line of w pixels; neither runs into the other */
 void ui_kv(int x, int y, int w, const char *label, const char *value, uint16_t c);
 /* A multi-tap text editor (ui/textedit.c) with a copy of initial, up to
- * max characters; Center calls done() with the text, RSoft just leaves.
- * multiline: # starts a new line. title must outlive the screen. */
+ * max bytes of UTF-8 (never half a character); Center calls done() with the
+ * text, RSoft just leaves. multiline: # starts a new line. title must
+ * outlive the screen. The keys are in ui/textedit.c. */
 void ui_text_edit(const char *title, const char *initial, int max, bool multiline,
                   void (*done)(const char *text, void *ctx), void *ctx);
+/* The same with UI_TEXT_* or-ed (API 2.18) */
+#define UI_TEXT_MULTILINE  1u               /* as multiline above */
+#define UI_TEXT_PLAIN      2u               /* no word completion, nothing learned:
+                                             * names, codes, passwords */
+#define UI_TEXT_NUMBER     4u               /* starts in 123 (and so plain) */
+void ui_text_edit_ex(const char *title, const char *initial, int max, unsigned flags,
+                     void (*done)(const char *text, void *ctx), void *ctx);
 
 /* ---- apps (os/apps/) ---------------------------------------------------- */
 screen_t *app_home(void);

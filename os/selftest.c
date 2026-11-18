@@ -44,9 +44,23 @@ static void pong_main(void *arg)
     }
 }
 
+/* Priority inheritance. Low takes the mutex and sleeps; high blocks on it,
+ * which raises low to high's priority; then medium spins above the self-test
+ * and the UI. With inheritance low (now above medium) wakes, works PI_WORK_MS
+ * and lets go: high waits about PI_HOLD_MS + PI_WORK_MS. Without it medium
+ * starves low until its own cap, PI_MEDIUM_MS, and high waits longer than
+ * PI_PASS_MS: the check fails. Until 2026-11-18 medium was created before
+ * high: it ran first and spun its whole 300 ms before high even existed, so
+ * nothing was inherited (it passed only because low did its 50 ms after),
+ * and boot began with ~87 M instructions of spinning above the UI. */
+#define PI_HOLD_MS    5             /* low's sleep holding the mutex */
+#define PI_WORK_MS    10            /* low's work after it */
+#define PI_PASS_MS    40            /* high's wait, at most, with inheritance */
+#define PI_MEDIUM_MS  100           /* medium's cap: well past PI_PASS_MS */
+
 static mutex_t pi_mutex;
 static volatile uint32_t pi_wait;
-static volatile bool pi_done, pi_medium_stop;
+static volatile bool pi_done, pi_medium_stop, pi_held;
 
 static void busy_ms(uint32_t ms)
 {
@@ -56,11 +70,12 @@ static void busy_ms(uint32_t ms)
         ;
 }
 
-static void pi_low(void *arg)       /* holds the mutex for 50 ms of work */
+static void pi_low(void *arg)       /* holds the mutex through a sleep and work */
 {
     mutex_lock(&pi_mutex, WAIT_FOREVER);
-    thread_sleep(5);                /* let high and medium start */
-    busy_ms(50);
+    pi_held = true;
+    thread_sleep(PI_HOLD_MS);       /* high blocks, medium starts meanwhile */
+    busy_ms(PI_WORK_MS);
     mutex_unlock(&pi_mutex);
 }
 
@@ -68,7 +83,7 @@ static void pi_medium(void *arg)    /* would starve low without inheritance */
 {
     uint32_t t0 = kernel_ticks();
 
-    while (!pi_medium_stop && kernel_ticks() - t0 < 300)
+    while (!pi_medium_stop && kernel_ticks() - t0 < PI_MEDIUM_MS)
         ;
 }
 
@@ -108,19 +123,27 @@ void selftest_kernel(void)
     os_status.sem_rounds_per_s = dt ? 2000u * 1000u / dt : 0;
     report(ST_SEM, pong_rounds == 2000, "semaphore x2000");
 
-    /* priority inheritance: low holds, high waits, medium spins */
+    /* priority inheritance: low holds, high waits, medium spins (above) */
     mutex_init(&pi_mutex);
-    pi_done = pi_medium_stop = false;
+    pi_done = pi_medium_stop = pi_held = false;
     thread_create("pi-low", PRIO_LOW, 1024, pi_low, NULL);
-    thread_sleep(2);                /* low takes the mutex */
-    thread_create("pi-med", PRIO_NORMAL + 2, 1024, pi_medium, NULL);
+    /* low runs below the UI: wait until it has the mutex (a busy UI could
+     * keep it from it past a fixed 2 ms, and high would then take the mutex
+     * free, proving nothing) */
+    t0 = kernel_ticks();
+    while (!pi_held && kernel_ticks() - t0 < 500)
+        thread_sleep(1);
+    /* high first: each preempts this thread at once, so high is blocked on
+     * the mutex (low raised) before medium spins */
     thread_create("pi-high", PRIO_NORMAL + 4, 1024, pi_high, NULL);
+    thread_create("pi-med", PRIO_NORMAL + 2, 1024, pi_medium, NULL);
     t0 = kernel_ticks();
     while (!pi_done && kernel_ticks() - t0 < 500)
-        thread_sleep(10);
+        thread_sleep(5);
     pi_medium_stop = true;
     os_status.pi_wait_ms = pi_wait;
-    report(ST_MUTEX, pi_done && pi_wait < 80, "mutex inherit");
+    report(ST_MUTEX, pi_held && pi_done && pi_wait < PI_PASS_MS,
+           pi_held ? "mutex inherit" : "mutex inherit: low never ran");
 
     /* queue: 100 messages in order through a 4-slot queue */
     {
@@ -191,17 +214,39 @@ void selftest_card(void)
          (unsigned long)os_status.fs_read_kib_per_s);
 }
 
+static volatile bool running;
+
 static void selftest_main(void *arg)
 {
     selftest_kernel();
     selftest_card();
+    running = false;
 }
 
 /* Above the UI's priority, so the timing checks (sleep within 2 ms, the
- * inheritance wait) hold; the tests mostly sleep. */
-void selftest_start(void)
+ * inheritance wait) hold; the tests mostly sleep. Not at every boot since
+ * 2026-11-17 (main.c): it wrote the card 32 KB a boot, ran five threads and
+ * left its buffer as a hole in the heap (11 small free pieces, 35.7 KB). */
+bool selftest_start(void)
 {
-    thread_create("selftest", PRIO_NORMAL + 1, 2048, selftest_main, NULL);
+    uint32_t s = arch_irq_save();
+    bool busy = running;
+
+    running = true;
+    arch_irq_restore(s);
+    if (busy)
+        return false;
+    os_status.selftest_done = os_status.selftest_pass = 0;  /* this run's */
+    if (!thread_create("selftest", PRIO_NORMAL + 1, 2048, selftest_main, NULL)) {
+        running = false;
+        return false;
+    }
+    return true;
+}
+
+bool selftest_running(void)
+{
+    return running;
 }
 
 void selftest_show_card(void)
@@ -212,10 +257,9 @@ void selftest_show_card(void)
     os_status.sd_code = (uint32_t)fi->sd_code;
     os_status.fs_mounted = fi->mounted;
     os_status.fs_free_kib = fi->free_kib;
+    /* No console line for a mounted card: nothing sends it before Home is
+     * drawn over it (the log line below has it). The failures stay. */
     if (fi->mounted) {
-        console_printf("card %luM %s %s\n", (unsigned long)(fi->sectors / 2048),
-                       types[fi->fs_type <= 4 ? fi->fs_type : 0],
-                       fi->label[0] ? fi->label : "");
         if (fi->free_known)
             klog("boot: B310E OS built %s; card %lu MB %s, %lu MB free; mount %lu ms",
                  BUILD_DATE, (unsigned long)(fi->sectors / 2048),

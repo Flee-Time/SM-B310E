@@ -131,6 +131,7 @@ static void enter(screen_t *s)
 
 static void tick(screen_t *s)
 {
+    ui_redraw();                        /* the worker's progress: drawn as it goes */
 }
 
 static void key(screen_t *s, const key_event_t *ev)

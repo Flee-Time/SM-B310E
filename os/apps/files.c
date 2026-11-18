@@ -40,6 +40,11 @@ static void size_text(uint32_t size, char *out, int n)
         snprintf(out, (size_t)n, "%luM", (unsigned long)(size / (1024u * 1024)));
 }
 
+static uint32_t shown_fixed(screen_t *s)
+{
+    return 0;                           /* keys redraw it */
+}
+
 static void item(void *ctx, int i, char *text, int tn, char *detail, int dn)
 {
     browser_t *b = ctx;
@@ -138,6 +143,7 @@ static void draw(screen_t *s)
     if (b->reload)
         reload(b);
     if (b->error != FR_OK) {
+        ui_draw_base();                 /* a partial frame: the message on its own */
         snprintf(buf, sizeof(buf), b->error == FR_NOT_READY ? "no card" :
                  "error %d", (int)b->error);
         gfx_text_centered(UI_TOP + 50, buf, C_BAD, FONT_SMALL, 1);
@@ -351,6 +357,7 @@ static void copy_tick(screen_t *s)
         return;
     }
     cp.done += n;
+    ui_redraw();                        /* the bar moved */
     if (!n || cp.done >= cp.size) {
         copy_close(true);
         klog("files: copied %s to %s, %lu bytes", clip, cp.to, (unsigned long)cp.done);
@@ -445,7 +452,8 @@ static void op_key(screen_t *s, const key_event_t *ev)
 
         ui_pop();                       /* the options; then the action */
         if (row == OP_RENAME) {
-            ui_text_edit("Rename", op.name, (int)sizeof(op.name) - 1, false, renamed, NULL);
+            /* a name, not prose: no completion, nothing learned */
+            ui_text_edit_ex("Rename", op.name, (int)sizeof(op.name) - 1, UI_TEXT_PLAIN, renamed, NULL);
         } else if (row == OP_DELETE) {
             ui_confirm(op.dir ? "Delete folder" : "Delete file", op.name, delete_yes);
         } else if (row == OP_COPY) {
@@ -462,7 +470,9 @@ static void op_key(screen_t *s, const key_event_t *ev)
 static void op_draw(screen_t *s)
 {
     list_draw(&op_list);
-    if (op.path[0])
+    /* the name under the rows: drawn with a full frame only (partial, it is
+     * there already; blended twice it would not be the same pixels) */
+    if (op.path[0] && !ui_partial())
         gfx_text_centered(UI_BOTTOM - 12, op.name, C_DIM, FONT_SMALL, 1);
 }
 
@@ -500,6 +510,8 @@ static void options(browser_t *b, entry_t *e)
     op_list.count = op.count;
     op_list.sel = op_list.top = 0;
     op_list.item = op_item;
+    ui_screen_shown(&op_screen, shown_fixed);
+    ui_screen_partial(&op_screen);
     ui_push(&op_screen);
 }
 
@@ -515,6 +527,11 @@ static void key(screen_t *s, const key_event_t *ev)
         options(b, b->list.count ? &b->entries[b->list.sel] : NULL);
     else if (ev->code == KEY_RSOFT)
         ui_pop();
+}
+
+static uint32_t browser_shown(screen_t *s)
+{
+    return ((browser_t *)s)->reload;    /* to be read again: drawn then */
 }
 
 screen_t *app_files(const char *path)
@@ -538,5 +555,10 @@ screen_t *app_files(const char *path)
     b->list.item = item;
     b->list.icon = entry_icon;
     b->list.ctx = b;
+    /* The folder as read: keys and Options change it, not the second. It was
+     * redrawn every second, 20 of list-scroll's 80 frames (bench 2026-11-17);
+     * and a key redraws the rows that changed. Freed with the screen. */
+    ui_screen_shown(&b->s, browser_shown);
+    ui_screen_partial(&b->s);
     return &b->s;
 }

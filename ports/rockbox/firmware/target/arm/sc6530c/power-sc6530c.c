@@ -65,40 +65,9 @@
 
 static bool charger_present;
 
-static bool adi_read(uint32_t addr, uint32_t *value)
-{
-    int old = disable_irq_save();
-    uint32_t n = ADI_BUDGET, data;
-    bool ok = false;
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) goto done;
-    REG32(0x82000018) = addr & 0xfff;
-    n = ADI_BUDGET;
-    do {
-        data = REG32(0x8200001c);
-        if (!(data & (1u << 31))) {
-            ok = ((data >> 16) & 0xfff) == (addr & 0xfff);
-            if (ok) *value = data & 0xffff;
-            break;
-        }
-    } while (--n);
-done:
-    restore_irq(old);
-    return ok;
-}
-
-static bool adi_write(uint32_t addr, uint32_t val)
-{
-    uint32_t n = ADI_BUDGET;
-
-    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) return false;
-    REG32(addr) = val;
-    n = ADI_BUDGET;
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return false;
-    return true;
-}
+/* The shared IRQ-safe ADI copy (system-sc6530c.c). */
+#define adi_read(addr, value) sc6530_adi_read_checked(addr, value)
+#define adi_write(addr, val)  sc6530_adi_write(addr, val)
 
 void power_init(void)
 {

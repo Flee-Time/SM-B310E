@@ -66,28 +66,73 @@
 #define ADI_FIFO_EMPTY  (1 << 8)
 #define ADI_BUDGET      1000000u
 
-static uint32_t adi_read(uint32_t addr)
-{
-    uint32_t a = 0, n = ADI_BUDGET;
+/* The one ADI implementation of the port (system-target.h; the model is
+ * the B310E OS's os/arch/sc6530c/adi.c). Every driver used to keep its
+ * own unlocked copy: the 100 Hz button tick reads the END key from
+ * interrupt context, and a read it interleaved with handed the thread
+ * another register's value, which a read-modify-write then stored back.
+ * Reads mask interrupts, wait for queued writes to drain, check the
+ * echoed register index (bits 28:16) and retry; a read that never
+ * returns the asked-for register yields 0, not another register's value.
+ * Writes mask interrupts too, so a handler never sees a half-done one. */
+uint32_t sc6530_adi_read_errors;
 
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)  /* wait busy clear */
-        if (--n == 0) break;
-    return a & 0xffffu;
+bool sc6530_adi_read_checked(uint32_t addr, uint32_t *value)
+{
+    int old = disable_irq_save();
+    uint32_t data = 0;
+    bool ok = false;
+
+    for (int tries = 0; tries < 3 && !ok; tries++) {
+        uint32_t n = ADI_BUDGET;
+
+        while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY) && --n)
+            ;
+        REG32(ADI_RD_CMD) = addr & 0xfff;
+        n = ADI_BUDGET;
+        do {
+            data = REG32(ADI_RD_DATA);      /* wait busy clear */
+        } while ((data >> 31) && --n);
+        ok = !(data >> 31) && ((data >> 16) & 0xfff) == (addr & 0xfff);
+    }
+    if (ok)
+        *value = data & 0xffffu;
+    else
+        sc6530_adi_read_errors++;
+    restore_irq(old);
+    return ok;
 }
 
-static void adi_write(uint32_t addr, uint32_t val)
+uint32_t sc6530_adi_read(uint32_t addr)
 {
+    uint32_t value = 0;
+
+    sc6530_adi_read_checked(addr, &value);
+    return value;
+}
+
+bool sc6530_adi_write(uint32_t addr, uint32_t val)
+{
+    int old = disable_irq_save();
     uint32_t n = ADI_BUDGET;
+    bool ok = false;
 
-    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)   /* FIFO full */
-        if (--n == 0) return;
-    REG32(addr) = val;
-    n = ADI_BUDGET;
-    /* fpdoom-exact: wait until FIFO_EMPTY is SET (write drained) */
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return;
+    while ((REG32(ADI_FIFO_STS) & ADI_FIFO_FULL) && --n)   /* FIFO full */
+        ;
+    if (n) {
+        REG32(addr) = val;
+        n = ADI_BUDGET;
+        /* fpdoom-exact: wait until FIFO_EMPTY is SET (write drained) */
+        while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY) && --n)
+            ;
+        ok = n != 0;
+    }
+    restore_irq(old);
+    return ok;
 }
+
+#define adi_read(addr)       sc6530_adi_read(addr)
+#define adi_write(addr, val) sc6530_adi_write(addr, val)
 
 /* Best-effort disarm of the SC6530 watchdog (WDG 0x82001480, ADI). The
  * menu path that launches us (USB fdl / menu UI) normally never arms it,

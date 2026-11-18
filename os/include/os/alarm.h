@@ -14,6 +14,8 @@
 #define ALARM_MAX   8
 
 extern bool alarm_ringing;
+extern int alarm_snooze_min;            /* a snooze's minute, -1 none (it rings by
+                                         * the millisecond: the UI ticks each second) */
 #define ALARM_ONCE  0                   /* days: no weekday set, rings once */
 
 typedef struct {
@@ -34,6 +36,7 @@ int alarm_next(uint32_t *minutes_until);
 /* "Mon Tue", "Every day", "Weekdays", "Once" */
 void alarm_days_text(uint8_t days, char *out, int n);
 
-void alarm_check(int h, int m);         /* the UI, once a second */
+void alarm_check(int h, int m);         /* the UI: once a second, dark at each minute
+                                         * an alarm rings at */
 
 #endif

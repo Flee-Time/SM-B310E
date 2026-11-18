@@ -9,6 +9,7 @@
 #include "qemu/log.h"
 #include "qemu/timer.h"
 #include "hw/sd/sdhci.h"
+#include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
 #include "qapi/error.h"
 
@@ -85,6 +86,11 @@ static void sc6530_sdio_write(void *opaque, hwaddr offset, uint64_t val,
                       s->failed);
         h->norintsts |= SDHC_NIS_ERR;
         h->errintsts |= SDHC_EIS_DATACRC;
+        /* Signal it as SDHCI's own error paths do (sdhci_update_irq is
+         * static there): an interrupt-driven guest otherwise never hears
+         * of the fault. The guest's status clear deasserts it again. */
+        qemu_set_irq(h->irq, (h->norintsts & h->norintsigen) ||
+                             (h->errintsts & h->errintsigen));
         return;
     }
     s->sdhci_ops->write(opaque, offset, val, size);

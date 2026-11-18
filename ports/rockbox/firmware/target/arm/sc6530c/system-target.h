@@ -26,6 +26,8 @@
  * (GPLv2, Rockbox-derived; modeled on Rockbox's s3c2440/system-target.h)
  */
 
+#include <stdbool.h>
+#include <stdint.h>
 #include "system-arm.h"
 #include "cpucache-arm.h"
 
@@ -60,5 +62,17 @@ static inline void sc6530_gpio_clock_on(void)
  * feeds LED200. Long-press 0 toggles it (button-sc6530c.c). */
 void torch_set(bool on);
 bool torch_get(void);
+
+/* Analog die through the ADI mailbox (system-sc6530c.c), the one copy all
+ * drivers use. Safe from interrupt context: each access masks IRQs. A read
+ * checks the echoed register index and retries; _checked returns false and
+ * leaves *value alone on failure, the plain read returns 0 then. A write
+ * returns false if the FIFO stayed full (nothing written) or never drained.
+ * A read-modify-write that an interrupt handler may race on the same
+ * register needs its own disable_irq_save() around both calls. */
+extern uint32_t sc6530_adi_read_errors;
+bool sc6530_adi_read_checked(uint32_t addr, uint32_t *value);
+uint32_t sc6530_adi_read(uint32_t addr);
+bool sc6530_adi_write(uint32_t addr, uint32_t val);
 
 #endif /* SYSTEM_TARGET_H */

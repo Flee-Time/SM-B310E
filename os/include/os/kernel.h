@@ -133,7 +133,8 @@ extern thread_t *kernel_current;
 void kernel_reschedule(void);   /* svc and irq exit, interrupts off */
 void kernel_irq_exit(void);
 void kernel_tick(void);
-void kernel_irq_entry(void);        /* every interrupt, first */
+bool kernel_irq_entry(void);        /* every interrupt, first; true: it ended a
+                                     * tickless sleep (and restarted the timer) */
 void kernel_set_tickless(bool on);  /* tickless idle (on by default) */
 int cpufreq_holds(void);            /* holds keeping the clock up (the drain log) */
 
@@ -143,6 +144,9 @@ void cpufreq_set_mode(int mode);
 void cpufreq_hold(void);            /* at least 104 MHz until released */
 void cpufreq_release(void);
 void cpufreq_allow_low(bool on);    /* 26 MHz allowed (the panel asleep) */
+void cpufreq_lit_low(bool on);      /* 26 MHz allowed with the panel awake (dev) */
+bool cpufreq_lit_low_on(void);
+extern volatile uint32_t power_burst_dev;   /* music in bursts (dev, cpufreq.c) */
 void cpufreq_window(uint32_t busy_permille);   /* the tick, every 50 ms */
 
 #endif

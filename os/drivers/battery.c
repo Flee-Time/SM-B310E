@@ -53,6 +53,13 @@ static void recovery(void)
     set_bits(0x82001904, 1u << 3);
 }
 
+/* The ADC's enable bits (0: the block, set by the recovery; 1: this
+ * conversion) are set for each conversion and cleared after it: until
+ * 2026-11-18 they stayed set between reads (power audit A5). adc_recoveries
+ * counts the recovery block's runs: it should stay at the boot's one. */
+#define ADC_EN_BITS 3u
+uint32_t adc_recoveries;
+
 static uint32_t convert(unsigned ch)
 {
     uint32_t n = 100000, raw;
@@ -62,7 +69,7 @@ static uint32_t convert(unsigned ch)
     set_bits(ADC_CHSEL, ch & 0xf);
     set_bits(ADC_CHSEL, 0x10);          /* mode 0: both bits */
     set_bits(ADC_CHSEL, 0x20);
-    set_bits(ADC_ENABLE, 2);
+    set_bits(ADC_ENABLE, ADC_EN_BITS);
     while (!(adi_read(ADC_STATUS) & 1) && --n)
         ;
     raw = n ? adi_read(ADC_RESULT) & 0x3ff : TIMEOUT;
@@ -75,9 +82,11 @@ uint32_t adc_read(unsigned ch)
     uint32_t s = arch_irq_save(), raw = convert(ch);
 
     if (raw == TIMEOUT) {
+        adc_recoveries++;
         recovery();
         raw = convert(ch);
     }
+    adi_write(ADC_ENABLE, adi_read(ADC_ENABLE) & ~ADC_EN_BITS);
     arch_irq_restore(s);
     return raw;
 }

@@ -75,6 +75,7 @@ void clock_set_level(int level);
 void clock_pll_stop(void);           /* at 26 MHz only; the idle loop's */
 void clock_pll_need(void);           /* interrupts off: running and locked */
 uint32_t clock_pll_starts(void);
+uint32_t clock_pll_lock_us(void);    /* the wait after a restart: the hardware's gate */
 extern uint32_t adi_read_errors;     /* reads that never came back right */
 void clock_account(void);           /* irqs off: count the time at this level */
 uint32_t clock_level_ms(int level); /* ms at that level since start */
@@ -82,6 +83,9 @@ uint32_t clock_level_ms(int level); /* ms at that level since start */
 /* ---- analog die through the ADI mailbox (arch/sc6530c/adi.c) ----------- */
 uint32_t adi_read(uint32_t addr);
 bool adi_write(uint32_t addr, uint32_t value);
+/* One read, the raw data word (bit 31 busy, 28:16 the echoed index), without
+ * starting the PLL: only the Sleep test's measure of the restart uses it */
+uint32_t adi_read_once(uint32_t addr);
 
 /* ---- tick timer (arch/sc6530c/timer.c) --------------------------------- */
 #define TIMER_HZ 26000000u
@@ -96,14 +100,18 @@ uint32_t sleep_analog_id(void);
 void sleep_chip_init(void);         /* at boot: nothing playing; it waits */
 void sleep_stop(int level);         /* 0 the system may stop, 1 the core only */
 void sleep_idle(void);              /* the idle loop's wait, interrupts off */
+extern volatile bool sleep_keep_pll;    /* audio DMA runs: no PLL stop (pcm.c) */
 void sleep_idle_enable(bool on);    /* off: a plain wait for interrupt */
 extern uint32_t sleep_idle_count;   /* system sleeps the idle loop took */
 uint32_t sleep_counter_ms(void);    /* runs on through a sleep */
 void sleep_timer_start(uint32_t ms);
 uint32_t sleep_timer_stop(void);
 void timer_restart(uint32_t cycles);    /* a new period from now (irqs off) */
+bool timer_long_ok(void);           /* no load over a second read back cut short */
+uint32_t timer_long_max(void);      /* the longest load that read back right */
 uint32_t timer_load(void);          /* its reload value */
 uint32_t timer_elapsed(uint32_t start);  /* cycles since a timer_count() */
+void timer_wait_us(unsigned us);    /* busy wait on timer 2 (irqs off is fine) */
 
 /* ---- power (arch/sc6530c/power.c) -------------------------------------- */
 void watchdog_arm(void);            /* a reset in 8 s */

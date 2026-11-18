@@ -5,6 +5,7 @@
 #ifndef OS_STATUS_H
 #define OS_STATUS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #define OS_MAGIC 0x534f3342u        /* "B3OS" */
@@ -40,8 +41,17 @@ typedef struct {
     uint32_t apps_loaded;           /* loadable apps in memory */
     uint32_t cpu_mhz;               /* the CPU clock now */
     uint32_t audio_icon;            /* the status bar: 0 speaker, 1 headphones, 2 headset, 3 muted */
+    uint32_t ui_missing_glyphs;     /* characters drawn as '?': no glyph, or broken UTF-8 */
 } os_status_t;
 
 extern volatile os_status_t os_status;
+
+/* The self-test (selftest.c) behind the UI: kernel objects and a 32 KB card
+ * write and read, into selftest_* above and the log. At boot only in
+ * developer mode or on a card new to the OS (the store made at this boot);
+ * else on request (the shell). False if one is running already. */
+bool selftest_start(void);
+bool selftest_running(void);        /* started and not done yet */
+void selftest_show_card(void);      /* the card's line in the log, every boot */
 
 #endif

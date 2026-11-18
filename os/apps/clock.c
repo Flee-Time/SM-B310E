@@ -108,8 +108,14 @@ static void clock_enter(screen_t *s)
 
 static void clock_tick(screen_t *s)
 {
-    if (!clock_state.typed)
-        follow_clock();
+    int was[F_COUNT];
+
+    if (clock_state.typed)
+        return;
+    memcpy(was, clock_state.v, sizeof(was));
+    follow_clock();
+    if (memcmp(was, clock_state.v, sizeof(was)))
+        ui_redraw();                    /* a second on: four ticks in one frame */
 }
 
 static void field_text(int f, char *buf, size_t n)

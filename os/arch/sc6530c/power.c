@@ -71,6 +71,17 @@ bool arch_chain_fits(const void *image, uint32_t len)
     return (uintptr_t)image >= CHAIN_TO + len;
 }
 
+/* After a crash: the boot loader's menu at the next reset, not the stock
+ * firmware. With no request and the cable in, the loader chains the stock's
+ * charging screen (boot/hw.c boot_early), whose run overwrote the fault
+ * record in PSRAM (the phone, 2026-11-18: an unexplained stop during Music
+ * ended there). The menu, not this OS: a fault at every boot cannot loop. */
+static void crash_request(void)
+{
+    if (arch_boot_loader())             /* over any other request: no loop */
+        arch_boot_request(BOOT_REQ_MENU, NULL);
+}
+
 void arch_reboot(void)
 {
     arch_irq_save();
@@ -157,12 +168,16 @@ void arch_power_off(void)
     for (int ms = 30000; ms > 0 && ((adi_read(0x82001900) >> 3) & 1); ms--)
         udelay(1000);
     udelay(50000);
-    if (!adi_write(LDO_PD_SET1, 0x1f))
+    if (!adi_write(LDO_PD_SET1, 0x1f)) {
+        crash_request();
         arch_reboot();
+    }
     while ((REG32(0x82000020) & (1u << 9)) && --n)
         ;
-    if (!n)
+    if (!n) {
+        crash_request();
         arch_reboot();
+    }
     REG32(LDO_PD_SET0) = 0x3fff;
     for (;;)
         arch_wait_for_irq();
@@ -271,8 +286,9 @@ void arch_fault_report(void)
 }
 
 /* Undefined instruction, aborts, FIQ: keep the registers for the next boot's
- * log, show them, and restart in 20 s (the watchdog: even if this screen
- * hangs), or at once on END. */
+ * log, show them (the panel woken and lit if the screen was dark), and
+ * restart in 20 s (the watchdog: even if this screen hangs), or at once on
+ * END, into the boot loader's menu (crash_request). */
 void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
 {
     static const char *const names[] = {
@@ -287,8 +303,11 @@ void arch_fault(int kind, const uint32_t *regs, uint32_t spsr)
             ;
     in_fault = true;
     fault_keep(kind, regs, spsr);
+    crash_request();                    /* before the watchdog: its reset may come */
     watchdog_arm_hi(10);
     console_unlocked = true;            /* no kernel locks from here */
+    lcd_fault_wake();                   /* dark: the panel was asleep */
+    backlight_set(60);
     console_set_color(RGB(255, 255, 255), RGB(160, 0, 0));
     console_clear();
     console_printf("FAULT: %s\n", names[kind & 3]);

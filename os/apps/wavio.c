@@ -13,7 +13,9 @@
 #define RING_BYTES  (128u * 1024)       /* 0.7 s of 44.1 kHz stereo */
 #define RING_MASK   (RING_BYTES - 1)
 
-static uint8_t *ring;
+/* Held only while a file plays or a recording runs: 128 KB a big game needs.
+ * The callbacks read it once and do nothing with NULL. */
+static uint8_t *volatile ring;
 static volatile uint32_t head, tail;    /* bytes; head written, tail read */
 static FIL file;
 static bool file_open, playing, recording, tone, file_eof, write_failed;
@@ -35,6 +37,19 @@ static bool ring_alloc(void)
         ring = kmalloc(RING_BYTES);
     head = tail = 0;
     return ring != NULL;
+}
+
+/* Only from a thread, with the PCM stopped. Cleared with interrupts off, so a
+ * callback sees the ring or NULL, never a freed one (one core: an interrupt
+ * runs to the end before a thread goes on). */
+static void ring_free(void)
+{
+    uint32_t s = arch_irq_save();
+    uint8_t *r = ring;
+
+    ring = NULL;
+    arch_irq_restore(s);
+    kfree(r);
 }
 
 /* ---- playback ----------------------------------------------------------- */
@@ -64,6 +79,7 @@ static int16_t sine(uint32_t phase)
 
 static unsigned fill(int16_t *lr, unsigned frames, void *ctx)
 {
+    const uint8_t *rb;
     unsigned n = 0;
 
     if (tone) {
@@ -76,15 +92,17 @@ static unsigned fill(int16_t *lr, unsigned frames, void *ctx)
         total_bytes += frames * 4;
         return n;
     }
+    if (!(rb = ring))                   /* freed: wav_stop is on its way */
+        return 0;
     for (; n < frames; n++) {
         unsigned bytes = channels * 2;
         int16_t l, r;
 
         if (used() < bytes)
             break;
-        l = (int16_t)(ring[tail & RING_MASK] | ring[(tail + 1) & RING_MASK] << 8);
+        l = (int16_t)(rb[tail & RING_MASK] | rb[(tail + 1) & RING_MASK] << 8);
         if (channels == 2)
-            r = (int16_t)(ring[(tail + 2) & RING_MASK] | ring[(tail + 3) & RING_MASK] << 8);
+            r = (int16_t)(rb[(tail + 2) & RING_MASK] | rb[(tail + 3) & RING_MASK] << 8);
         else
             r = l;
         tail += bytes;
@@ -117,9 +135,11 @@ static void refill(void)
             file_eof = true;
             break;
         }
+        uint8_t *rb = ring;             /* held while playing: one load, not one a byte */
+
         data_bytes -= got;
         for (UINT i = 0; i < got; i++)
-            ring[(head + i) & RING_MASK] = buf[i];
+            rb[(head + i) & RING_MASK] = buf[i];
         head += got;
     }
 }
@@ -132,8 +152,10 @@ const char *wav_play_file(const char *path)
     wav_stop();
     if (!ring_alloc())
         return "not enough memory";
-    if (f_open(&file, path, FA_READ) != FR_OK)
+    if (f_open(&file, path, FA_READ) != FR_OK) {
+        ring_free();
         return "cannot open";
+    }
     file_open = true;
     if (f_read(&file, h, 12, &n) != FR_OK || n != 12 || memcmp(h, "RIFF", 4) ||
         memcmp(h + 8, "WAVE", 4))
@@ -178,6 +200,8 @@ const char *wav_play_file(const char *path)
         return "audio did not start";
     }
     playing = true;
+    ui_refresh();                       /* the UI loop pumps it (wav_pump): dark it may
+                                         * sleep 30 s */
     klog("audio: playing %s, %u Hz, %u ch, %s", path, rate, channels,
          audio_speaker() ? "speaker" : "headphones");
     return NULL;
@@ -209,13 +233,17 @@ const char *wav_play_tone(unsigned hz)
 
 static void sink(const int16_t *mono, unsigned frames, void *ctx)
 {
+    uint8_t *rb = ring;
+
+    if (!rb)                            /* freed: wav_stop is on its way */
+        return;
     if (RING_BYTES - used() < frames * 2) {
         dropped += frames;
         return;
     }
     for (unsigned i = 0; i < frames; i++) {
-        ring[head & RING_MASK] = (uint8_t)mono[i];
-        ring[(head + 1) & RING_MASK] = (uint8_t)(mono[i] >> 8);
+        rb[head & RING_MASK] = (uint8_t)mono[i];
+        rb[(head + 1) & RING_MASK] = (uint8_t)(mono[i] >> 8);
         head += 2;
     }
 }
@@ -241,9 +269,10 @@ static void drain(void)
     while (file_open && used() >= (recording ? sizeof(buf) : 1)) {
         uint32_t n = used() < sizeof(buf) ? used() : sizeof(buf);
         UINT w;
+        const uint8_t *rb = ring;       /* held until wav_stop's end: one load */
 
         for (uint32_t i = 0; i < n; i++)
-            buf[i] = ring[(tail + i) & RING_MASK];
+            buf[i] = rb[(tail + i) & RING_MASK];
         tail += n;
         if (f_write(&file, buf, n, &w) != FR_OK || w != n) {
             klog("audio: recording write failed");
@@ -272,8 +301,10 @@ const char *wav_record(unsigned r, int source)
         if (f_stat(name, &fi) != FR_OK)
             break;
     }
-    if (f_open(&file, name, FA_WRITE | FA_CREATE_NEW) != FR_OK)
+    if (f_open(&file, name, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        ring_free();
         return "cannot create the file";
+    }
     file_open = true;
     rate = r;
     channels = 1;
@@ -285,6 +316,7 @@ const char *wav_record(unsigned r, int source)
         return "recording did not start";
     }
     recording = true;
+    ui_refresh();                       /* as wav_play_file */
     write_failed = false;
     synced_at = kernel_ticks();
     klog("audio: recording %s, %u Hz, %s", name, rate,
@@ -355,6 +387,7 @@ void wav_stop(void)
     }
     tone = false;
     head = tail = 0;
+    ring_free();                        /* both stopped above: no callback of ours runs */
     if (!fm_is_on())
         audio_power(false);
 }

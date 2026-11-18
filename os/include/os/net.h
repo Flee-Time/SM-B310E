@@ -120,7 +120,4 @@ void tcp_close(tcp_conn_t *c);          /* FIN after the data; c is gone */
 uint16_t tcp_port(const tcp_conn_t *c); /* the local port */
 uint32_t tcp_peer(const tcp_conn_t *c); /* the PC's address */
 
-/* ---- inside the stack (net/) ------------------------------------------- */
-uint32_t net_crc32(uint32_t crc, const void *data, size_t n);  /* IEEE, ~ at the ends */
-
 #endif

@@ -53,10 +53,11 @@ void irq_dispatch(void)
 
     if (prof_cap && (pending & (1u << IRQ_TIMER2)))
         prof_sample();
-    kernel_irq_entry();                 /* the ticks catch up after a long sleep */
-    /* ending a long sleep, the catch-up restarts the tick and so acks the
-     * timer's interrupt itself: count it, it was a wake-up all the same */
-    if (pending & ~REG32(INTC_STATUS) & (1u << IRQ_TIMER2)) {
+    /* the ticks catch up after a long sleep. Ending one, the catch-up
+     * restarts the tick and so acks the timer's interrupt itself: count it,
+     * it was a wake-up all the same. Otherwise nothing was acked: no second
+     * status read (most interrupts are plain ticks) */
+    if (kernel_irq_entry() && (pending & ~REG32(INTC_STATUS) & (1u << IRQ_TIMER2))) {
         irq_count++;
         irq_line_count[IRQ_TIMER2]++;
     }

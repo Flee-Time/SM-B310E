@@ -105,6 +105,40 @@ explains where they go. Normal builds need no private DSP dump.
   `ports/rockbox/tests/`.
 - **QEMU, boot loader:** `python boot/tests/test-boot.py` (needs your own
   NOR dump; it stays local).
+- **QEMU, instruction counts:** `python os/tests/bench-instr.py --json run.json`
+  boots the OS under `-icount` with the `b310e-prof` TCG plugin and counts the
+  instructions of fixed scenarios (boot, idle lit and dark, menu and list
+  navigation, dialogs, the quick panel, text input, an app opened and closed,
+  settings changed), exactly and the same every run, per phase and per
+  function (top functions printed; every function in the JSON and in a CSV per
+  phase under `build/os/bench-instr/`). `--phase NAME` (repeatable) runs only
+  some; `--compare before.json after.json` prints each phase's change and the
+  functions that moved most. For "same pixels, fewer instructions": QEMU has
+  no caches or wait states, so the phone stays the final check. Details:
+  [emulator/qemu/README.md](emulator/qemu/README.md).
+- **Host, no QEMU:** `python os/tests/test-host.py` compiles OS source files
+  as they are on disk for the PC (msys64 gcc, 64-bit, UBSan in trap mode)
+  against stand-ins in `os/tests/host/` (a guard allocator that catches
+  overruns, double frees and writes after free and can fail the n-th
+  allocation; FatFs on files in RAM with a power-cut budget; a one-thread
+  kernel; klog into a buffer) and runs one case each, about 20 s in all:
+  `db-power-cut` (the data store with the card's power cut at every byte,
+  rename and unlink of a scripted run, torn tails clean and junk: after the
+  reboot each setting and record is as before or after the operation in
+  flight), `db-oom` (every allocation failing in turn, also during the load),
+  `crc32`, `string`, `printf` (against the C library, and the cut on a whole
+  UTF-8 character), `utf8-case` (UTF-8 helpers, Turkish i/I case),
+  `gsm` (LAPDm, RR, MM, the registration FSM: self-tests, known frames,
+  random and cut frames) and `art-fuzz` (the cover decoders on PIL-made
+  covers and their mutations). One PASS/FAIL line a case; `--case NAME`,
+  `--long` (every cut, thousands of mutations), `--prove` (each case built
+  with a broken reference must fail: the checks can see a fault).
+- **Stack audit:** `python os/tests/stack-audit.py` compiles the OS with
+  its real ARM flags plus `-fstack-usage -fcallgraph-info=su` into a scratch
+  folder and prints the largest frames and, for each thread (and interrupt
+  handler), the deepest direct-call chain next to the stack it is given,
+  with what it cannot see (indirect calls, recursion, assembler) flagged. A
+  report, not a test.
 - **Phone:** copy `sdcard/payloads/` to the card and pick the payload in the
   boot menu. Installing the loader writes NOR: [docs/sdboot.md](docs/sdboot.md).
 

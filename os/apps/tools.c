@@ -85,7 +85,9 @@ static int tool_toggle(void *ctx, int i)
 static void draw(screen_t *s)
 {
     list_draw(&list);
-    if (list.count <= 5)                /* below the rows, when they leave room */
+    /* below the rows, when they leave room; with a full frame only (partial,
+     * it is there already, and blended twice would not be the same pixels) */
+    if (list.count <= 5 && !ui_partial())
         gfx_text_centered(UI_BOTTOM - 12, "hold 0 anywhere: torch", C_DIM, FONT_SMALL, 1);
 }
 
@@ -130,8 +132,16 @@ static screen_t screen = {
     .draw = draw, .key = key,
 };
 
+/* a fixed list but for the torch's switch (0 held changes it anywhere) */
+static uint32_t tools_shown(screen_t *s)
+{
+    return (uint32_t)torch_get();
+}
+
 screen_t *app_tools(void)
 {
+    ui_screen_shown(&screen, tools_shown);
+    ui_screen_partial(&screen);         /* a key redraws the rows it changed */
     /* opened anew: from the top (back from a screen it opened, it stays) */
     list.sel = list.top = 0;
     list.count = ui_settings.dev_mode ? T_COUNT : T_COUNT - T_DEV_ONLY;   /* DSP boot, Register: dev only */

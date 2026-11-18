@@ -95,17 +95,47 @@ def main():
 
         # Dark: the codec off, the clock down
         wait_for(qt, base, lambda s: s['ui_light'] == 2, 40, 'never went dark')
-        s = wait_for(qt, base, lambda s: s['cpu_mhz'] == 26, 8, 'not 26 MHz, dark with a headset')
-        result['mhz_dark_headset'] = s['cpu_mhz']
+        # the clock level from the kernel's variable: dark, the UI copies it into
+        # os_status only every 10-30 s since 2026-11-17
+        level = symbol(elf, 'level')
+        mhz = lambda: {0: 26, 1: 104, 2: 208}.get(qt.read(level), -1)
+        t_end = time.time() + 8
+        while mhz() != 26 and time.time() < t_end:
+            time.sleep(0.1)
+        result['mhz_dark_headset'] = mhz()
+        assert result['mhz_dark_headset'] == 26, f'not 26 MHz, dark with a headset: {result}'
         result['codec_dark'] = qt.read(codec) & 0xff
         assert result['codec_dark'] == 0, result
         # The idle loop's system sleep, and the kernel's time going on through it
-        c0, t0 = qt.read(sleeps), status(qt, base)['ticks']
-        time.sleep(3)
-        result['idle_sleeps_in_3_s'] = qt.read(sleeps) - c0
-        result['ms_in_3_s_dark'] = status(qt, base)['ticks'] - t0
-        assert result['idle_sleeps_in_3_s'] > 0, result
-        assert result['ms_in_3_s_dark'] > 1500, result
+        # (the kernel's own tick count: dark, the UI copies it into os_status
+        # only every 10-30 s since 2026-11-17)
+        kticks = symbol(elf, 'ticks')
+        # Since 2026-11-18 a tickless sleep at 26 MHz lasts up to 60 s (dark, the
+        # UI wakes every 30 s), and both the count (taken as a sleep starts)
+        # and the kernel's ticks (caught up as it ends) stand still meanwhile:
+        # a fixed 3 s window saw neither move. Wait for the next sleep to
+        # start (the one before has ended, the ticks caught up), up to 70 s.
+        # Since 2026-11-18 the clock drops to 26 MHz as the panel sleeps (not
+        # 1 s later), so the window can start while the dark switch's own work
+        # (the log write) still runs, and a sleep may start within the 3 s: the
+        # ticks read are those of the latest sleep's start, so the wall time is
+        # taken at the last count change seen, not at the read.
+        c0, t0, w0 = qt.read(sleeps), qt.read(kticks), time.time()
+        c_seen, w_change = c0, None
+        while time.time() < w0 + 70:
+            c = qt.read(sleeps)
+            if c != c_seen:
+                c_seen, w_change = c, time.time()
+            if w_change and time.time() >= w0 + 3:
+                break
+            time.sleep(0.05)
+        wall_ms = ((w_change or time.time()) - w0) * 1000
+        result['idle_sleeps_dark'] = qt.read(sleeps) - c0
+        result['ms_dark'] = qt.read(kticks) - t0
+        result['wall_ms_dark'] = round(wall_ms)
+        assert result['idle_sleeps_dark'] > 0, result
+        # the kernel's time went on through it (QEMU's clock lags on Windows)
+        assert result['ms_dark'] > wall_ms / 2, result
         reads = [qt.read(PLL_CTL) & 1 for _ in range(200)]
         result['pll_off_reads_of_200'] = reads.count(0)
         assert reads.count(0) > 0, result
@@ -139,9 +169,10 @@ def main():
             press('down', 'Tools')
         t0 = status(qt, base)['ticks']
         qmp.hmp('sendkey ret 100')
-        title('System sleep', 15)           # after the core stop
-        time.sleep(0.4)
-        qmp.hmp('sendkey ret 100')          # Yes
+        title('System sleep', 40)           # after the PLL measures and the core stop
+        qmp.hmp('sendkey asterisk 100')     # the screen may have gone dim meanwhile:
+        time.sleep(0.6)                     # the first key only wakes it (* does
+        qmp.hmp('sendkey ret 100')          # nothing in the dialog); Yes
         title('Sleep test', 40)             # the report
         result['ms_for_the_test'] = status(qt, base)['ticks'] - t0
         t1 = status(qt, base)['ticks']
@@ -165,7 +196,9 @@ def main():
     lines = [x for x in log.splitlines() if 'sleep test' in x]
     (out / 'sleep-log.txt').write_text('\n'.join(lines))
     result['log_lines'] = len(lines)
-    for want in ('analog id', 'core stop: start', 'system: start', 'system, 26 MHz: start',
+    for want in ('analog id', 'PLL regs, after a restart', 'PLL restart wait', 'right and at the baseline',
+                 'timer 2 reads, 26 MHz, PLL stopped', 'idle-like, sleep, PLL stopped', 'trial PLL_WAIT 64',
+                 'core stop: start', 'system: start', 'system, 26 MHz: start',
                  'states, DSP in reset', 'PLL at 26 MHz: control', 'states, DSP out of reset, no program',
                  'DSP out of reset, gates, T2 on: start', 'DSP program: boot', 'after the last'):
         assert any(want in x for x in lines), (want, lines)

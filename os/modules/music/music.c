@@ -260,6 +260,68 @@ static void np_draw_art(const media_info_t *mi, const uint16_t *art, const char 
     draw_position(UI_BOTTOM - 21, pos, len, st);
 }
 
+/* What np_draw shows, as one number: the tick asks for a frame when it
+ * changes. The screen was redrawn ten times a second; the times are in
+ * seconds and the bar moves a pixel every second or so. The cover's arrival
+ * redraws by itself (art.c's ui_refresh). */
+static uint32_t mixk(uint32_t k, uint32_t v)
+{
+    return (k ^ v) * 16777619u;
+}
+
+static uint32_t mix_str(uint32_t k, const char *s)
+{
+    while (s && *s)
+        k = mixk(k, (uint8_t)*s++);
+    return mixk(k, 0x100);
+}
+
+static uint32_t np_drawn;               /* np_view() at the last np_draw */
+
+static uint32_t np_view(void)
+{
+    media_info_t mi;
+    bool on = media_queue_active();
+    bool have = on && media_info(&mi);
+    media_state_t st = on ? media_state() : MEDIA_IDLE;
+    uint32_t pos = seek_pos >= 0 ? (uint32_t)seek_pos : media_position();
+    uint32_t len = have ? mi.length_ms : 0, k = 2166136261u;
+    int cur = media_queue_current(), w = LCD_WIDTH - 2 * UI_PAD;
+    int value = len ? (int)(pos / 100) : 0, max = len ? (int)(len / 100) : 1;
+    const char *path = media_queue_path(cur);
+
+    k = mixk(k, (uint32_t)on * 2u + have);
+    k = mixk(k, (uint32_t)st);
+    k = mixk(k, (uint32_t)media_queue_count());
+    k = mixk(k, (uint32_t)cur);
+    k = mix_str(k, path);
+    k = mix_str(k, media_queue_error());
+    if (have) {
+        k = mix_str(k, mi.path);
+        k = mix_str(k, mi.title);
+        k = mix_str(k, mi.artist);
+        k = mix_str(k, mi.album);
+        k = mix_str(k, mi.codec);
+        k = mixk(k, mi.bitrate);
+    }
+    k = mixk(k, pos / 1000);            /* the times, in seconds */
+    k = mixk(k, len / 1000);
+    if (max <= 0)                       /* the bar's fill, as gfx_bar has it */
+        max = 1;
+    if (value > max)
+        value = max;
+    if (value < 0)
+        value = 0;
+    /* in 32 bits: the same quotient for anything under 9 days */
+    k = mixk(k, (uint32_t)w * (uint32_t)value / (uint32_t)max);
+    k = mixk(k, seek_pos >= 0);
+    k = mixk(k, volume_shown());
+    k = mixk(k, (uint32_t)volume_level(VOL_MUSIC));
+    k = mixk(k, media_queue_shuffle());
+    k = mixk(k, (uint32_t)media_queue_repeat());
+    return k;
+}
+
 static void np_draw(screen_t *s)
 {
     media_info_t mi;
@@ -275,6 +337,7 @@ static void np_draw(screen_t *s)
     const char *err = media_queue_error();
     int y = UI_TOP + 4, w = LCD_WIDTH - 2 * UI_PAD;
 
+    np_drawn = np_view();
     s->center = st == MEDIA_PAUSED || !on ? "Play" : "Pause";
     if (!count) {
         centered(UI_TOP + 40, "Nothing queued", C_TEXT, FONT_LARGE);
@@ -428,6 +491,8 @@ static void np_tick(screen_t *s)
         }
         seek_pos = -1;
     }
+    if (np_view() != np_drawn)          /* only when the screen would change */
+        ui_redraw();
 }
 
 /* ---- the notification: the track and its buttons while the queue plays,
@@ -666,6 +731,7 @@ static void list_tick(screen_t *s)
         need_fill = false;
         s->tick_ms = 500;
     }
+    ui_redraw();                        /* every tick, as before 2.19 */
 }
 
 static const screen_t list_tpl = {

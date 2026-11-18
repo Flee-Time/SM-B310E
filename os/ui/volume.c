@@ -141,6 +141,7 @@ int volume_tag(const char *name, const void *icon)
     if (!name || !name[0])
         return VOL_APP;
     strncpy(want, name, sizeof(want) - 1);
+    utf8_trim(want);                    /* a long name: cut on a character */
     s = arch_irq_save();                /* the UI's and the apps' threads */
     for (int i = 0; i < n_tags; i++)
         if (!strcmp(tags[i].name, want))
@@ -247,6 +248,7 @@ static void parse_line(char *line)
         level = level * 10 + (*p - '0');
     memset(t, 0, sizeof(*t));
     strncpy(t->name, name + 1, sizeof(t->name) - 1);
+    utf8_trim(t->name);
     t->level = (uint8_t)(level > VOL_LEVELS ? VOL_LEVELS : level);
     hex++;
     if (name - hex == ICON_HEX) {

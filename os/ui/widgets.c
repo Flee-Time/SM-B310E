@@ -30,16 +30,109 @@ void ui_kv(int x, int y, int w, const char *label, const char *value, uint16_t c
     gfx_text(x + w - vw, y, value, c, FONT_SMALL, 1, vw);
 }
 
+#define LIST_Y     (UI_TOP + (UI_CONTENT_H - LIST_ROWS * UI_ROW_H) / 2 + 1)
+
+/* One row as list_draw shows it: everything its pixels depend on but y */
+typedef struct {
+    char text[48], detail[24];
+    const icon_t *icon;
+    int sw;                             /* the switch, -1 none */
+    bool sel, used;
+} row_t;
+
+/* What the last list_draw left in lcd_fb. With the frame still the screen's
+ * (ui_partial), a key redraws only the rows that differ from it, and a scroll
+ * by a row or a few moves the rows that stay instead of drawing them again:
+ * every key redrew all six rows (157 glyphs and icons, ~124k instructions of
+ * list-scroll's ~300k a key, bench 2026-11-17), for two rows that changed. */
+static struct {
+    const list_t *l;
+    int count, top, w;
+    row_t row[LIST_ROWS];
+} drawn;
+
+static void row_get(list_t *l, int i, row_t *r)
+{
+    r->text[0] = r->detail[0] = 0;
+    l->item(l->ctx, i, r->text, sizeof(r->text), r->detail, sizeof(r->detail));
+    utf8_trim(r->text);                 /* filled to a byte limit: never half a character */
+    utf8_trim(r->detail);
+    r->icon = l->icon ? l->icon(l->ctx, i) : NULL;
+    r->sw = l->toggle ? l->toggle(l->ctx, i) : -1;
+    r->sel = i == l->sel;
+    r->used = true;
+}
+
+static bool row_same(const row_t *a, const row_t *b)
+{
+    return a->used && b->used && a->sel == b->sel && a->icon == b->icon && a->sw == b->sw &&
+           !strcmp(a->text, b->text) && !strcmp(a->detail, b->detail);
+}
+
+static void row_draw(const row_t *rw, int x, int y, int w)
+{
+    int tx = x + 7, right = x + w - 6;
+    int th = gfx_text_height(FONT_BODY, 1), sh = gfx_text_height(FONT_SMALL, 1);
+    bool sel = rw->sel;
+    uint16_t fg = sel ? C_SEL_TEXT : C_TEXT;
+
+    gfx_round(x, y, w, CARD_H, UI_RADIUS, sel ? C_ACCENT : C_CARD);
+    if (rw->icon) {
+        gfx_icon(x + 4, y + (CARD_H - ICON_SIZE) / 2, rw->icon, sel ? C_SEL_TEXT : C_ACCENT);
+        tx = x + 4 + ICON_SIZE + 5;
+    }
+    if (rw->sw >= 0) {                  /* a switch at the right */
+        right -= 20;
+        if (sel)                        /* keep it visible on the accent */
+            gfx_round(right - 1, y + (CARD_H - 10) / 2 - 1, 22, 12, 2, C_SEL_TEXT);
+        gfx_switch(right, y + (CARD_H - 10) / 2, rw->sw);
+        right -= 4;
+    } else if (rw->detail[0]) {
+        int dw = gfx_text_width(rw->detail, FONT_SMALL, 1);
+
+        right -= dw;
+        gfx_text(right, y + (CARD_H - sh) / 2, rw->detail,
+                 sel ? C_SEL_TEXT : C_DIM, FONT_SMALL, 1, 0);
+        right -= 5;
+    }
+    gfx_text(tx, y + (CARD_H - th) / 2, rw->text, fg, FONT_BODY, 1, right - tx);
+}
+
+/* The rows' pixels moved by d rows (d > 0: up, as the list scrolls down),
+ * a line at a time in the order that reads each before it is written over.
+ * Through gfx_blit, so the frame stays the drawing code's to keep. */
+static void rows_move(int x, int w, int d)
+{
+    int lines = (LIST_ROWS - (d > 0 ? d : -d)) * UI_ROW_H, by = d * UI_ROW_H;
+
+    if (d > 0)
+        for (int j = 0; j < lines; j++)
+            gfx_blit(x, LIST_Y + j, w, 1, lcd_fb + (LIST_Y + j + by) * LCD_WIDTH + x);
+    else
+        for (int j = lines - 1; j >= 0; j--)
+            gfx_blit(x, LIST_Y + j - by, w, 1, lcd_fb + (LIST_Y + j) * LCD_WIDTH + x);
+    if (d > 0) {
+        memmove(&drawn.row[0], &drawn.row[d], (size_t)(LIST_ROWS - d) * sizeof(row_t));
+        for (int r = LIST_ROWS - d; r < LIST_ROWS; r++)
+            drawn.row[r].used = false;
+    } else {
+        memmove(&drawn.row[-d], &drawn.row[0], (size_t)(LIST_ROWS + d) * sizeof(row_t));
+        for (int r = 0; r < -d; r++)
+            drawn.row[r].used = false;
+    }
+}
+
 void list_draw(list_t *l)
 {
-    char text[48], detail[24];
-    int y = UI_TOP + (UI_CONTENT_H - LIST_ROWS * UI_ROW_H) / 2 + 1;
-    bool bar = l->count > LIST_ROWS;
+    int y = LIST_Y;
+    bool bar = l->count > LIST_ROWS, part;
     int x = UI_PAD, w = LCD_WIDTH - 2 * UI_PAD - (bar ? 4 : 0);
-    int th = gfx_text_height(FONT_BODY, 1), sh = gfx_text_height(FONT_SMALL, 1);
+    row_t now;
 
     os_status.ui_list_count = (uint32_t)l->count;
     if (l->count == 0) {
+        ui_draw_base();
+        drawn.l = NULL;
         gfx_text_centered(UI_TOP + UI_CONTENT_H / 2 - 4, "(empty)", C_DIM,
                           FONT_BODY, 1);
         return;
@@ -49,47 +142,68 @@ void list_draw(list_t *l)
     if (l->sel >= l->top + LIST_ROWS)
         l->top = l->sel - LIST_ROWS + 1;
 
-    for (int r = 0; r < LIST_ROWS && l->top + r < l->count; r++) {
-        int i = l->top + r, tx = x + 7, right = x + w - 6, sw = -1;
-        bool sel = i == l->sel;
-        const icon_t *icon = l->icon ? l->icon(l->ctx, i) : NULL;
-        uint16_t fg = sel ? C_SEL_TEXT : C_TEXT;
+    /* the rows in lcd_fb are this list's as drawn last: only what differs */
+    part = ui_partial() && drawn.l == l && drawn.count == l->count && drawn.w == w;
+    if (part && drawn.top != l->top) {
+        int d = l->top - drawn.top;
 
-        text[0] = detail[0] = 0;
-        l->item(l->ctx, i, text, sizeof(text), detail, sizeof(detail));
-        gfx_round(x, y, w, CARD_H, UI_RADIUS, sel ? C_ACCENT : C_CARD);
-        if (icon) {
-            gfx_icon(x + 4, y + (CARD_H - ICON_SIZE) / 2, icon, sel ? C_SEL_TEXT : C_ACCENT);
-            tx = x + 4 + ICON_SIZE + 5;
-        }
-        if (l->toggle)
-            sw = l->toggle(l->ctx, i);
-        if (sw >= 0) {                  /* a switch at the right */
-            right -= 20;
-            if (sel)                    /* keep it visible on the accent */
-                gfx_round(right - 1, y + (CARD_H - 10) / 2 - 1, 22, 12, 2, C_SEL_TEXT);
-            gfx_switch(right, y + (CARD_H - 10) / 2, sw);
-            right -= 4;
-        } else if (detail[0]) {
-            int dw = gfx_text_width(detail, FONT_SMALL, 1);
+        /* a move by part of a page with every row there before and after */
+        if (d >= LIST_ROWS || d <= -LIST_ROWS || l->top + LIST_ROWS > l->count ||
+            drawn.top + LIST_ROWS > l->count)
+            part = false;
+        else
+            rows_move(x, w, d);
+    }
+    if (!part) {
+        ui_draw_base();                 /* a partial frame that needs it all */
+        for (int r = 0; r < LIST_ROWS; r++)
+            drawn.row[r].used = false;
+    }
+    drawn.l = l;
+    drawn.count = l->count;
+    drawn.top = l->top;
+    drawn.w = w;
 
-            right -= dw;
-            gfx_text(right, y + (CARD_H - sh) / 2, detail,
-                     sel ? C_SEL_TEXT : C_DIM, FONT_SMALL, 1, 0);
-            right -= 5;
+    for (int r = 0; r < LIST_ROWS; r++, y += UI_ROW_H) {
+        if (l->top + r >= l->count) {
+            drawn.row[r].used = false;
+            continue;
         }
-        gfx_text(tx, y + (CARD_H - th) / 2, text, fg, FONT_BODY, 1, right - tx);
-        y += UI_ROW_H;
+        row_get(l, l->top + r, &now);
+        if (part && row_same(&now, &drawn.row[r]))
+            continue;
+        if (part)                       /* as the full draw's cleared ground */
+            gfx_fill(x, y, w, CARD_H, C_BG);
+        row_draw(&now, x, y, w);
+        drawn.row[r] = now;
     }
     if (bar) {                          /* a thin scroll indicator */
         int track = LIST_ROWS * UI_ROW_H - 2;
-        int top = UI_TOP + (UI_CONTENT_H - LIST_ROWS * UI_ROW_H) / 2 + 1;
         int h = track * LIST_ROWS / l->count;
         int pos = (track - (h < 8 ? 8 : h)) * l->top / (l->count - LIST_ROWS);
 
-        gfx_fill(LCD_WIDTH - UI_PAD - 2, top, 2, track, C_CARD);
-        gfx_fill(LCD_WIDTH - UI_PAD - 2, top + pos, 2, h < 8 ? 8 : h, C_DIM);
+        /* the track over all of the old one: the same pixels a full draw has */
+        gfx_fill(LCD_WIDTH - UI_PAD - 2, LIST_Y, 2, track, C_CARD);
+        gfx_fill(LCD_WIDTH - UI_PAD - 2, LIST_Y + pos, 2, h < 8 ? 8 : h, C_DIM);
     }
+}
+
+uint32_t list_shown(list_t *l)
+{
+    uint32_t k = 2166136261u;
+    row_t now;
+
+    for (int r = 0; r < LIST_ROWS && l->top + r < l->count; r++) {
+        row_get(l, l->top + r, &now);
+        for (const char *p = now.text; *p; p++)
+            k = (k ^ (uint8_t)*p) * 16777619u;
+        k = (k ^ 1u) * 16777619u;
+        for (const char *p = now.detail; *p; p++)
+            k = (k ^ (uint8_t)*p) * 16777619u;
+        k = (k ^ (uint32_t)(uintptr_t)now.icon) * 16777619u;
+        k = (k ^ (uint32_t)(now.sw + 2)) * 16777619u;
+    }
+    return k ^ (uint32_t)l->count;
 }
 
 bool list_key(list_t *l, const key_event_t *ev)
@@ -126,16 +240,19 @@ static int wrap(const char *t, int font, int width, const char **starts, int *le
     while (*t && n < max) {
         const char *e = t;
         int len = 0, cut = -1, w = 0;
-        char one[2] = { 0, 0 };
+        char one[5];
 
-        while (*e && *e != '\n') {
-            one[0] = *e;
+        while (*e && *e != '\n') {      /* a character at a time, not a byte */
+            int k = utf8_len(e);
+
+            memcpy(one, e, (size_t)k);
+            one[k] = 0;
             w += gfx_text_width(one, font, 1);
             if (w > width && len)
                 break;
             if (*e == ' ')
                 cut = len;
-            e++, len++;
+            e += k, len += k;
         }
         if (*e && *e != '\n' && cut > 0)
             len = cut;
@@ -157,7 +274,7 @@ static int draw_lines(const char *text, int font, int first, int x, int y, int w
 
     for (int r = 0; r < rows && first + r < n; r++) {
         int len = lens[first + r] < (int)sizeof(line) - 1 ? lens[first + r]
-                                                           : (int)sizeof(line) - 1;
+                  : (int)utf8_cut(starts[first + r], sizeof(line) - 1);
 
         memcpy(line, starts[first + r], (size_t)len);
         line[len] = 0;
@@ -176,8 +293,16 @@ typedef struct {
     screen_t s;
     void (*yes)(void);
     bool no;                            /* No is the selected button */
+    bool drawn_no;                      /* the one drawn last */
+    int y, h;                           /* the card as drawn */
     char text[];
 } dialog_t;
+
+/* A static screen's shown key: keys and ui_redraw() redraw it */
+static uint32_t shown_fixed(screen_t *s)
+{
+    return 0;
+}
 
 #define DLG_W   112
 #define DLG_X   ((LCD_WIDTH - DLG_W) / 2)
@@ -190,18 +315,36 @@ static void button(int x, int y, int w, const char *label, bool primary)
              primary ? C_SEL_TEXT : C_TEXT, FONT_BODY, 1, w - 4);
 }
 
+/* Opened, the dimmed screen, the shadow, the card and its text are drawn
+ * once; a Yes/No move then redraws the two buttons on the card's plain
+ * ground. It redrew all of it, the list under it too, at ~680k instructions
+ * a move (gfx_round_alpha 225k, gfx_shade 154k; bench 2026-11-17). */
 static void dialog_draw(screen_t *s)
 {
     dialog_t *d = (dialog_t *)s;
     const char *starts[MAX_LINES];
     int lens[MAX_LINES];
-    int lines = wrap(d->text, FONT_BODY, DLG_W - 16, starts, lens, MAX_LINES);
-    int h, y;
+    int lines, h, y;
 
+    if (ui_partial()) {                 /* the frame is this dialog's last */
+        if (d->yes && d->no != d->drawn_no) {
+            y = d->y + d->h - 20;
+            gfx_fill(DLG_X + 6, y, 44, 15, C_CARD);
+            gfx_fill(DLG_X + DLG_W - 50, y, 44, 15, C_CARD);
+            button(DLG_X + 6, y, 44, "Yes", !d->no);
+            button(DLG_X + DLG_W - 50, y, 44, "No", d->no);
+            d->drawn_no = d->no;
+        }
+        return;
+    }
+    lines = wrap(d->text, FONT_BODY, DLG_W - 16, starts, lens, MAX_LINES);
     if (lines > 5)
         lines = 5;
     h = 20 + lines * 12 + 24;
     y = UI_TOP + (UI_CONTENT_H - h) / 2;
+    d->y = y;
+    d->h = h;
+    d->drawn_no = d->no;
     /* the screen under it, dimmed, and a hard drop shadow */
     gfx_shade(0, UI_TOP, LCD_WIDTH, UI_CONTENT_H, RGB(0, 0, 0), 120);
     gfx_round_alpha(DLG_X + 3, y + 3, DLG_W, h, UI_RADIUS, RGB(0, 0, 0), 150);
@@ -225,9 +368,8 @@ static void dialog_key(screen_t *s, const key_event_t *ev)
     if (yes) {
         switch (ev->code) {
         case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
-            d->no = !d->no;             /* two buttons: any direction moves */
-            ui_redraw();
-            break;
+            d->no = !d->no;             /* two buttons: any direction moves; */
+            break;                      /* the key's frame draws them */
         case KEY_CENTER: {              /* the selected one */
             bool no = d->no;            /* ui_pop frees d */
 
@@ -267,6 +409,8 @@ static void dialog(const char *title, const char *message, void (*yes)(void))
     d->s.free_on_pop = true;
     d->s.overlay = true;
     d->yes = yes;
+    ui_screen_shown(&d->s, shown_fixed);
+    ui_screen_partial(&d->s);
     ui_push(&d->s);
 }
 
@@ -350,6 +494,7 @@ void ui_text_view(const char *title, const char *text)
     v->s.draw = view_draw;
     v->s.key = view_key;
     v->s.free_on_pop = true;
+    ui_screen_shown(&v->s, shown_fixed);    /* a copy: it changes by keys only */
     ui_push(&v->s);
 }
 
@@ -381,6 +526,12 @@ static const icon_t *picker_icon(void *ctx, int i)
 static void picker_draw(screen_t *s)
 {
     list_draw(&((picker_t *)s->data)->list);
+}
+
+/* the options are the caller's: drawn again if their texts change */
+static uint32_t picker_shown(screen_t *s)
+{
+    return list_shown(&((picker_t *)s->data)->list);
 }
 
 static void picker_key(screen_t *s, const key_event_t *ev)
@@ -429,5 +580,7 @@ void ui_choose(const char *title, const char *const *options, int n, int current
     p->s.key = picker_key;
     p->s.data = p;
     p->s.free_on_pop = true;
+    ui_screen_shown(&p->s, picker_shown);
+    ui_screen_partial(&p->s);           /* its draw is a list_draw */
     ui_push(&p->s);
 }

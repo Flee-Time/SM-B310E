@@ -393,4 +393,5 @@ const os_api_t os_api = {
     .utf8_valid = utf8_valid,
     .utf8_cut = utf8_cut,
     .utf8_from_latin1 = utf8_from_latin1,
+    .ui_text_edit_ex = ui_text_edit_ex,
 };

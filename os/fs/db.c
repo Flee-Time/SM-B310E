@@ -29,7 +29,6 @@
 #include "os/fs.h"
 #include "os/kernel.h"
 #include "os/lib.h"
-#include "os/net.h"
 
 #define DB_NEW       DB_PATH "-new"
 #define DB_BAD       DB_PATH "-bad"
@@ -97,7 +96,11 @@ static struct {
     obuf_t pend;
     uint32_t flush_at, first_set;
     uint32_t writes, changes;
-    uint8_t *scratch;                   /* one record's body and CRC */
+    uint8_t *scratch;                   /* one record's body and CRC, for one call */
+    uint32_t scratch_cap;
+    uint32_t retry_at;                  /* a failed write or compaction: not before */
+    bool waited;                        /* the log thread wakes for what is due */
+    bool made;                          /* the file was made at this boot */
     bool told_crc, told_io;
 } db;
 
@@ -106,6 +109,10 @@ static db_table_t *tables[DB_TABLES];
 static FIL rf;
 static bool rf_open;
 static bool loading;                    /* records' lengths kept (tables' lens) */
+/* Loading met no memory, or a read error: what RAM has is not the file, and
+ * the file is not bad. It is left as it is (no compaction, no cut tail, not
+ * data-bad) and the store runs in RAM only. */
+static bool load_short;
 
 static struct {
     char name[DB_NAME_MAX];
@@ -117,6 +124,7 @@ static struct {
 static volatile bool watch_due;
 
 static int compact(bool keep_bad);
+static uint32_t due_ms(void);
 
 /* ---- bytes ----------------------------------------------------------------- */
 
@@ -144,7 +152,7 @@ static void put32(uint8_t *p, uint32_t v)
 
 static uint32_t crc(const void *p, uint32_t n)
 {
-    return ~net_crc32(0xffffffffu, p, n);
+    return ~crc32_update(0xffffffffu, p, n);
 }
 
 static uint32_t fnv(const void *p, uint32_t n)
@@ -174,12 +182,24 @@ static void lock(void)
     mutex_lock(&db.lock, WAIT_FOREVER);
 }
 
-/* The file opened for reading stays open for one call into the store only. */
+/* The file opened for reading and the record scratch last for one call into
+ * the store only: the scratch was 16.5 KB held from boot for records of a
+ * few dozen bytes. Work made for the log thread while it waits for none
+ * (a set, a failed table write) wakes it. */
 static void unlock(void)
 {
-    if (rf_open && db.lock.depth == 1) {
-        f_close(&rf);
-        rf_open = false;
+    if (db.lock.depth == 1) {
+        if (rf_open) {
+            f_close(&rf);
+            rf_open = false;
+        }
+        kfree(db.scratch);
+        db.scratch = NULL;
+        db.scratch_cap = 0;
+        if (!db.waited && due_ms() != WAIT_FOREVER) {
+            db.waited = true;
+            fs_kick();
+        }
     }
     mutex_unlock(&db.lock);
 }
@@ -197,10 +217,17 @@ static bool card_ok(void)
     return db.file && !db.away && fs_info()->mounted;
 }
 
-static bool scratch(void)
+/* At least n bytes, in 256-byte steps so a call reading many records rarely
+ * grows it; values decoded from the last record point into it, and nothing
+ * reads a second record while those are in use. */
+static bool scratch(uint32_t n)
 {
-    if (!db.scratch)
-        db.scratch = kmalloc(BODY_MAX + 4);
+    if (db.scratch && db.scratch_cap >= n)
+        return true;
+    kfree(db.scratch);
+    n = (n + 255) & ~255u;
+    db.scratch = kmalloc(n);
+    db.scratch_cap = db.scratch ? n : 0;
     return db.scratch != NULL;
 }
 
@@ -241,11 +268,11 @@ static int rec_read(uint32_t off, uint8_t *h, uint32_t *len)
     l = get16(h + 2);
     if (l > BODY_MAX)
         return DB_EIO;
-    if (!scratch())
+    if (!scratch(l + 4))
         return DB_ENOMEM;
     if ((r = rd(off + REC_HDR, db.scratch, l + 4)))
         return r;
-    if (~net_crc32(net_crc32(0xffffffffu, h, REC_HDR), db.scratch, l) != get32(db.scratch + l)) {
+    if (~crc32_update(crc32_update(0xffffffffu, h, REC_HDR), db.scratch, l) != get32(db.scratch + l)) {
         if (!db.told_crc)
             klog("db: record at %lu: bad CRC", (unsigned long)off);
         db.told_crc = true;
@@ -462,12 +489,40 @@ uint32_t db_changes(void)
 
 /* ---- settings in RAM --------------------------------------------------------------- */
 
+/* The list again as an array in the same (strcmp) order, for a binary
+ * search: walking the list took 16.5 strcmp a lookup (QEMU settings-set,
+ * 14.5k strcmp for 884 lookups), about 5 this way with 32 keys. */
+static kv_t **kv_ix;
+static unsigned kv_n, kv_cap;
+
+/* the first place whose key is not below key; *hit when it is key */
+static unsigned kv_pos(const char *key, bool *hit)
+{
+    unsigned lo = 0, hi = kv_n;
+
+    *hit = false;
+    while (lo < hi) {
+        unsigned mid = (lo + hi) / 2;
+        int c = strcmp(kv_ix[mid]->key, key);
+
+        if (!c) {
+            *hit = true;
+            return mid;
+        }
+        if (c < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
 static kv_t *kv_find(const char *key)
 {
-    for (kv_t *k = kvs; k; k = k->next)
-        if (!strcmp(k->key, key))
-            return k;
-    return NULL;
+    bool hit;
+    unsigned at = kv_pos(key, &hit);
+
+    return hit ? kv_ix[at] : NULL;
 }
 
 static kv_t *kv_live(const char *key)
@@ -477,27 +532,57 @@ static kv_t *kv_live(const char *key)
     return k && !k->gone ? k : NULL;
 }
 
+/* key is not there yet (kv_find said so) */
 static kv_t *kv_add(const char *key, size_t kl)
 {
-    kv_t **at = &kvs, *k = kzalloc(sizeof(kv_t) + kl + 1);
+    kv_t *k = kzalloc(sizeof(kv_t) + kl + 1);
+    unsigned at;
+    bool hit;
 
-    if (!k)
+    if (k && kv_n == kv_cap) {          /* no realloc in the kernel: a bigger one */
+        kv_t **ix = kmalloc((kv_cap + 32) * sizeof(*ix));
+
+        if (ix) {
+            if (kv_n)
+                memcpy(ix, kv_ix, kv_n * sizeof(*ix));
+            kfree(kv_ix);
+            kv_ix = ix;
+            kv_cap += 32;
+        } else {
+            kfree(k);
+            k = NULL;
+        }
+    }
+    if (!k) {
+        load_short |= loading;
         return NULL;
+    }
     memcpy(k->key, key, kl + 1);
-    while (*at && strcmp((*at)->key, key) < 0)  /* in order: listings, prefixes */
-        at = &(*at)->next;
-    k->next = *at;
-    *at = k;
+    at = kv_pos(k->key, &hit);          /* in order: listings, prefixes */
+    k->next = at < kv_n ? kv_ix[at] : NULL;
+    if (at)
+        kv_ix[at - 1]->next = k;
+    else
+        kvs = k;
+    memmove(kv_ix + at + 1, kv_ix + at, (kv_n - at) * sizeof(*kv_ix));
+    kv_ix[at] = k;
+    kv_n++;
     return k;
 }
 
 static void kv_free(kv_t *k)
 {
-    for (kv_t **at = &kvs; *at; at = &(*at)->next)
-        if (*at == k) {
-            *at = k->next;
-            break;
-        }
+    bool hit;
+    unsigned at = kv_pos(k->key, &hit);
+
+    if (hit && kv_ix[at] == k) {
+        if (at)
+            kv_ix[at - 1]->next = k->next;
+        else
+            kvs = k->next;
+        kv_n--;
+        memmove(kv_ix + at, kv_ix + at + 1, (kv_n - at) * sizeof(*kv_ix));
+    }
     kfree(k->val);
     kfree(k);
 }
@@ -508,8 +593,10 @@ static bool kv_value(kv_t *k, int type, int32_t i, const void *p, uint32_t n)
         if (!k->val || k->vlen != n) {
             uint8_t *v = kmalloc(n + 1);
 
-            if (!v)
+            if (!v) {
+                load_short |= loading;
                 return false;
+            }
             kfree(k->val);
             k->val = v;
         }
@@ -674,7 +761,20 @@ static int kv_set(const char *key, int type, int32_t i, const void *p, uint32_t 
         unlock();                       /* no change: nothing to write */
         return DB_OK;
     }
-    if ((!k && !(k = kv_add(key, kl))) || !kv_value(k, type, i, p, n)) {
+    if (!k) {
+        if (!(k = kv_add(key, kl))) {
+            unlock();
+            return DB_ENOMEM;
+        }
+        /* A new entry whose value cannot be stored must not stay: it would
+         * be listed (type 0) and never written. kv_free takes it out of
+         * the list and the sorted index (os/tests/test-host.py db-oom). */
+        if (!kv_value(k, type, i, p, n)) {
+            kv_free(k);
+            unlock();
+            return DB_ENOMEM;
+        }
+    } else if (!kv_value(k, type, i, p, n)) {
         unlock();
         return DB_ENOMEM;
     }
@@ -801,12 +901,20 @@ int db_type(const char *key)
 bool db_key_next(const char *after, char *out)
 {
     bool found = false;
+    kv_t *k0;
 
     if (!db.ready)
         return false;
     lock();
-    for (kv_t *k = kvs; k; k = k->next)
-        if (!k->gone && strcmp(k->key, after) > 0) {
+    {
+        bool hit;
+        unsigned at = kv_pos(after, &hit);
+
+        at += hit;                      /* the keys after it are the list from there */
+        k0 = at < kv_n ? kv_ix[at] : NULL;
+    }
+    for (kv_t *k = k0; k; k = k->next)
+        if (!k->gone) {
             strncpy(out, k->key, DB_KEY_MAX);
             found = true;
             break;
@@ -847,6 +955,7 @@ static db_table_t *table_new(const char *name)
         if (!tables[i]) {
             db_table_t *t = kzalloc(sizeof(*t));
 
+            load_short |= loading && !t;
             if (t) {
                 strncpy(t->name, name, DB_NAME_MAX - 1);
                 t->next_id = 1;
@@ -909,6 +1018,7 @@ static bool ent_grow(db_table_t *t)
 
     if (!e || (lens && !(l = kmalloc(cap * sizeof(uint16_t))))) {
         kfree(e);
+        load_short |= loading;
         return false;
     }
     if (t->count)
@@ -1617,6 +1727,7 @@ static uint32_t scan(FIL *f, const char **why)
     *why = NULL;
     if (!buf) {
         *why = "no memory to read it";
+        load_short = true;
         return HDR;
     }
     for (;;) {
@@ -1629,6 +1740,7 @@ static uint32_t scan(FIL *f, const char **why)
             pos = 0;
             if (f_read(f, buf + have, cap - have, &got) != FR_OK) {
                 *why = "a read error";
+                load_short = true;
                 break;
             }
             eof = got < cap - have;
@@ -1699,6 +1811,7 @@ static void load(void)
     close_rf();
     db.dead = 0;
     db.pend.len = 0;
+    load_short = false;
     db.file = fs_info()->mounted;
     if (!db.file) {
         klog("db: no card: settings in RAM only");
@@ -1714,7 +1827,13 @@ static void load(void)
     r = f_open(&f, DB_PATH, FA_READ);
     if (r == FR_OK) {
         fsize = (uint32_t)f_size(&f);
-        if (f_read(&f, h, HDR, &n) != FR_OK || n != HDR || get32(h) != MAGIC ||
+        if (f_read(&f, h, HDR, &n) != FR_OK) {
+            f_close(&f);                /* the card, not the file: it stays */
+            klog("db: %s cannot be read: settings in RAM only", DB_PATH);
+            db.file = false;
+            return;
+        }
+        if (n != HDR || get32(h) != MAGIC ||
             get16(h + 4) != VERSION || crc(h, 12) != get32(h + 12)) {
             f_close(&f);
             klog("db: %s has no valid header: kept as %s, a new one made", DB_PATH, DB_BAD);
@@ -1726,6 +1845,7 @@ static void load(void)
     if (r == FR_NO_FILE || r == FR_NO_PATH) {
         if (create())
             db.file = false;
+        db.made = db.file;
         klog("db: %s %s", DB_PATH, db.file ? "made" : "cannot be made: settings in RAM only");
         rebind();
         if (db.kv_dirty)
@@ -1756,6 +1876,12 @@ static void load(void)
             kfree(t->lens);
             t->lens = NULL;
         }
+    }
+    if (load_short) {                   /* not the file's fault: never rewritten from this */
+        klog("db: %s at byte %lu of %lu: kept as it is, settings in RAM only",
+             why ? why : "no memory", (unsigned long)end, (unsigned long)fsize);
+        db.file = false;
+        return;
     }
     for (kv_t *k = kvs; k; k = k->next)
         keys += !k->gone;
@@ -1922,18 +2048,78 @@ void db_init(void)
     unlock();
 }
 
+static bool compact_due(void)
+{
+    return card_ok() && !db.kv_dirty && !db.pend.len && db.dead >= COMPACT_MIN &&
+           db.dead > db.size / 2;
+}
+
+/* What db_tick will do and when (the lock held). Without the card nothing:
+ * db_resume (fs_resume) sees to it when it is back. */
+static uint32_t due_ms(void)
+{
+    uint32_t now = kernel_ticks();
+    int32_t left;
+
+    if (!db.ready || !card_ok())
+        return WAIT_FOREVER;
+    if (db.pend.len)
+        left = 0;
+    else if (db.kv_dirty)
+        left = db.flush_at ? (int32_t)(db.flush_at - now) : 0;
+    else if (compact_due())
+        left = 0;
+    else
+        return WAIT_FOREVER;
+    if (db.retry_at && (int32_t)(db.retry_at - now) > left)
+        left = (int32_t)(db.retry_at - now);
+    return left > 0 ? (uint32_t)left : 0;
+}
+
+uint32_t db_next_ms(void)
+{
+    uint32_t ms;
+
+    if (!db.ready)
+        return WAIT_FOREVER;
+    lock();
+    ms = due_ms();
+    db.waited = ms != WAIT_FOREVER;     /* so unlock does not kick for it */
+    unlock();
+    return ms;
+}
+
+bool db_new(void)
+{
+    return db.made;
+}
+
+/* A failure is tried again later, not at every wake: each try is a card hold
+ * and a PLL start (until 2026-11-17 every second, as the log thread woke). */
+#define RETRY_MS         5000
+#define COMPACT_RETRY_MS 60000
+
 void db_tick(void)
 {
+    uint32_t now;
+
     if (!db.ready)
         return;
     lock();
-    if (db.pend.len || (db.kv_dirty && (int32_t)(kernel_ticks() - db.flush_at) >= 0)) {
+    now = kernel_ticks();
+    if (db.retry_at && (int32_t)(now - db.retry_at) < 0) {
+        unlock();
+        return;
+    }
+    db.retry_at = 0;
+    if (db.pend.len || (db.kv_dirty && (int32_t)(now - db.flush_at) >= 0)) {
         if (flush() == DB_OK)
             db.flush_at = 0;
+        else if (card_ok())
+            db.retry_at = (now + RETRY_MS) | 1;
     }
-    if (card_ok() && !db.kv_dirty && !db.pend.len && db.dead >= COMPACT_MIN &&
-        db.dead > db.size / 2)
-        compact(false);
+    if (compact_due() && compact(false) != DB_OK)
+        db.retry_at = (now + COMPACT_RETRY_MS) | 1;
     unlock();
 }
 
@@ -2070,19 +2256,6 @@ bool utf8_valid(const char *s, size_t n)
         n -= (size_t)k;
     }
     return true;
-}
-
-size_t utf8_cut(const char *s, size_t n)
-{
-    const uint8_t *p = (const uint8_t *)s;
-    size_t lead = n;
-
-    while (lead > 0 && (p[lead - 1] & 0xc0) == 0x80 && n - lead < 3)
-        lead--;
-    if (lead == 0 || p[lead - 1] < 0xc0)
-        return n;                       /* ASCII last, or no sequence to cut */
-    lead--;
-    return n - lead >= (size_t)(p[lead] >= 0xf0 ? 4 : p[lead] >= 0xe0 ? 3 : 2) ? n : lead;
 }
 
 size_t utf8_from_latin1(const char *in, size_t n, char *out, size_t size)

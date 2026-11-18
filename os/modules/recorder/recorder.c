@@ -298,8 +298,17 @@ static void list_enter(screen_t *s)
 
 static void list_tick(screen_t *s)
 {
+    static int was = -1;
+    int now;
+
     if (playing_path[0] && !wav_playing())
         playing_path[0] = 0;            /* played to the end */
+    /* the rows show which one plays and its seconds, or the one recording:
+     * frames while either goes on, and once as it ends; none at rest */
+    now = we_play() * 4 + wav_recording() * 2 + (playing_path[0] != 0);
+    if (now != was || now >= 2)
+        ui_redraw();
+    was = now;
 }
 
 static screen_t list_screen = {
@@ -421,12 +430,27 @@ static void tick(screen_t *s)
 {
     unsigned p = audio_peak();
 
+    static uint32_t was = ~0u;
+    uint32_t now;
+
     if (wav_recording() || we_play())
         level = p > level ? p : level * 3 / 4;
     else
         level = 0;
     if (playing_path[0] && !wav_playing())
         playing_path[0] = 0;
+    /* Recording or playing, the meter, the time and the dot move: a frame each
+     * tick, as before. At rest only when what it shows changes (it was ten
+     * frames a second of "Ready"). */
+    if (wav_recording() || we_play()) {
+        was = ~0u;
+        ui_redraw();
+        return;
+    }
+    now = (uint32_t)card_mounted() | (uint32_t)n_recs << 1;
+    if (now != was)
+        ui_redraw();
+    was = now;
 }
 
 static void enter(screen_t *s)

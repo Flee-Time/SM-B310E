@@ -40,6 +40,7 @@ ui_settings_t ui_settings = {
     1,                               /* system sleep in dark idle */
     300,                             /* UI_MODE_AWAKE: 5 minutes with no key */
     900,                             /* Music: 15 minutes playing nothing */
+    1,                               /* word completion in the text editor */
 };
 
 static screen_t *stack[MAX_DEPTH + 1]; /* one more for an alarm, whatever is open */
@@ -56,6 +57,9 @@ static int n_hosts;
 static struct { screen_t *s; unsigned flags; } modes[4];   /* ui_screen_mode */
 
 #define PANEL_HOLD_MS  600
+#define LONG_MS        600              /* UI_MODE_HOLD_KEYS: a long press */
+static uint8_t hold_key;                /* UI_MODE_HOLD_KEYS: down, not yet passed on */
+static uint32_t hold_down;              /* when; 0: passed on (a press or a long one) */
 
 /* Run a screen callback with its app as the current one (for ownership of
  * what it pushes and allocates). */
@@ -74,6 +78,158 @@ static uint8_t held_key, swallow_key;
 static int light;                       /* 0 on, 1 dim, 2 dark */
 static int bat_mv = -1;
 static int charging;                    /* CHARGE_* */
+
+/* Dark idle (no clock hold, nothing playing): the once-a-second work runs
+ * this often, and at the minute an alarm rings at. Until 2026-11-17 it ran
+ * every second dark too, its charger read an analog-die access that starts
+ * the PLL (a 2 ms busy wait) each time. The charger and the battery are
+ * read again as the screen wakes. A plug or unplug wakes the UI by the
+ * charger's EIC interrupt (keypad.c, keypad_charger_event), so USB that
+ * starts by itself on the plug no longer needs a 10 s poll (until
+ * 2026-11-18: 6 wakes a minute dark); DARK_TICK_MS stays as the safety net.
+ * Each dark pass also kicks the END thread, so its own dark wait (a minute)
+ * never ends on a wake of its own: about one wake a minute in all. */
+#define DARK_TICK_MS   60000
+#define BATTERY_MS     30000            /* the ADC is slow: twice a minute */
+#define BATTERY_DARK_MS 300000          /* dark: every 5 minutes (and on wake) */
+/* The keypad light: off when the screen dims or goes dark, and KEYLIGHT_MS
+ * after the last key while lit; any key (or the screen waking) lights it
+ * again (power audit A1; owner's OK 2026-11-18). */
+#define KEYLIGHT_MS    5000
+static bool keylit;
+static uint32_t keylight_off_at;
+#define DRAIN_FIRST_MS 180000           /* the drain log: at 3 minutes (not at boot:
+                                         * its load is boot work), then every 10 */
+#define DRAIN_MS       600000
+static uint32_t next_battery, next_drain = DRAIN_FIRST_MS, next_rtc_save = DRAIN_MS;
+static bool audio_was;                  /* background audio at the last pass */
+
+/* OS screens' hooks (not the app API): what a screen shows (ui_screen_shown)
+ * and whether its draw() redraws only what changed (ui_screen_partial). A
+ * screen freed when popped loses its entry then: its address comes back for
+ * the next kzalloc'd screen. 32: the static screens, and a stack of folders,
+ * pickers and dialogs over them. */
+static struct { screen_t *s; uint32_t (*fn)(screen_t *s); bool partial; } hooks[32];
+static uint32_t shown_key, shown_skey;  /* the screen's and the bar's, as drawn */
+static bool shown_valid;
+
+static int hook_slot(screen_t *s)
+{
+    int free_slot = -1;
+
+    for (int i = 0; i < (int)ARRAY_SIZE(hooks); i++) {
+        if (hooks[i].s == s)
+            return i;
+        if (!hooks[i].s && free_slot < 0)
+            free_slot = i;
+    }
+    if (free_slot >= 0)
+        hooks[free_slot].s = s;
+    return free_slot;                   /* full: the screen is drawn as before */
+}
+
+void ui_screen_shown(screen_t *s, uint32_t (*shown)(screen_t *s))
+{
+    int i = hook_slot(s);
+
+    if (i >= 0)
+        hooks[i].fn = shown;
+}
+
+void ui_screen_partial(screen_t *s)
+{
+    int i = hook_slot(s);
+
+    if (i >= 0)
+        hooks[i].partial = true;
+}
+
+static void hook_forget(const screen_t *s)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(hooks); i++)
+        if (hooks[i].s == s) {
+            hooks[i].s = NULL;
+            hooks[i].fn = NULL;
+            hooks[i].partial = false;
+        }
+}
+
+static uint32_t (*shown_of(const screen_t *s))(screen_t *)
+{
+    for (unsigned i = 0; s && i < ARRAY_SIZE(hooks); i++)
+        if (hooks[i].s == s)
+            return hooks[i].fn;
+    return NULL;
+}
+
+static bool is_partial(const screen_t *s)
+{
+    for (unsigned i = 0; i < ARRAY_SIZE(hooks); i++)
+        if (hooks[i].s == s)
+            return hooks[i].partial;
+    return false;
+}
+
+/* Until 2026-11-18 the UI redrew after every tick() of the top screen, whatever
+ * it did: the text editor ten times a second for a cursor that had not moved
+ * (158 of 194 frames unchanged, 80% of a typing session's instructions), the
+ * Stopwatch ten times a second at a stopped 00:00.0. Now a tick asks for its
+ * frame (ui_redraw) when it changed something; only an app built for API 2.18
+ * or older, whose tick may count on the old way, still gets one after each.
+ * Its tick is in its image (an OS screen it opened, the editor, is not). */
+static bool tick_redraws(const screen_t *s)
+{
+    uint32_t pc = (uint32_t)(uintptr_t)s->tick, base, size;
+    const char *name;
+
+    for (int i = 0; app_span(i, &name, &base, &size); i++)
+        if (pc - base < size)
+            return ((const app_info_t *)(uintptr_t)base)->api_minor < 19;
+    return false;
+}
+
+static uint32_t shown_by_tick(screen_t *s)
+{
+    return 0;                           /* its tick and its keys ask for frames */
+}
+
+/* The hook second_redraw goes by: the screen's own, or for a screen whose
+ * tick asks for its frames, none needed (the bar's changes still show) */
+static uint32_t (*shown_fn(screen_t *s))(screen_t *)
+{
+    uint32_t (*fn)(screen_t *) = shown_of(s);
+
+    if (!fn && s->tick && !tick_redraws(s))
+        fn = shown_by_tick;
+    return fn;
+}
+
+/* ---- the frame kept in lcd_fb (a back buffer: what was drawn stays) ------- */
+
+/* lcd_fb holds kept_s's last frame (over kept_u, its overlay's screen, whose
+ * shown key was kept_ukey) with nothing drawn since: a partial screen's
+ * draw() may then redraw only what changed. Anything else that draws, or may
+ * have changed what a screen shows without its knowing, drops it. */
+static bool kept;
+static screen_t *kept_s, *kept_u;
+static uint32_t kept_ukey;
+static bool partial_now;                /* during draw(): ui_partial() */
+static bool base_drawn;                 /* this frame's content area was cleared */
+static screen_t *draw_u;                /* the overlay's screen being drawn */
+
+/* The bars as drawn last (copies: a screen may reuse a buffer for a label) */
+static char bar_text[4][40];
+static bool bar_ok[4];
+static uint32_t status_drawn;
+
+static volatile uint32_t drop_gen;     /* ui_refresh may come from another thread */
+
+static void redraw_all(void)
+{
+    dirty = true;
+    kept = false;
+    drop_gen++;
+}
 
 /* ---- settings ------------------------------------------------------------ */
 
@@ -106,6 +262,7 @@ static const struct {
     { "time_zone", &ui_settings.tz_min, -720, 840 },
     { "net_time", &ui_settings.net_time, 0, 1 },
     { "dev_mode", &ui_settings.dev_mode, 0, 1 },
+    { "completion", &ui_settings.completion, 0, 1 },
 };
 
 static void settings_import(void)
@@ -147,6 +304,13 @@ static void settings_import(void)
     klog("settings: %s read into the store", OLD_SETTINGS);
 }
 
+/* What the store holds for each setting as far as we know (read or written
+ * last): ui_settings_save writes only the ones that differ. Writing all 20
+ * was 20 snprintf and 20 key-list walks a toggle (about 1 M of the 6.65 M of
+ * 20 Settings toggles, bench 2026-11-17). */
+static int stored[ARRAY_SIZE(setting_table)];
+static bool stored_known;
+
 static void settings_from_db(void)
 {
     char key[32];
@@ -156,9 +320,11 @@ static void settings_from_db(void)
 
         snprintf(key, sizeof(key), "ui.%s", setting_table[i].name);
         v = db_get_int(key, *setting_table[i].v);
+        stored[i] = v;                  /* out of range too: written over at a save */
         if (v >= setting_table[i].min && v <= setting_table[i].max)
             *setting_table[i].v = v;
     }
+    stored_known = true;
 }
 
 /* Only what changed is written, a second or two later (the store batches). */
@@ -167,8 +333,11 @@ void ui_settings_save(void)
     char key[32];
 
     for (unsigned i = 0; i < ARRAY_SIZE(setting_table); i++) {
+        if (stored_known && stored[i] == *setting_table[i].v)
+            continue;
         snprintf(key, sizeof(key), "ui.%s", setting_table[i].name);
-        db_set_int(key, *setting_table[i].v);
+        if (db_set_int(key, *setting_table[i].v) == DB_OK)
+            stored[i] = *setting_table[i].v;    /* else tried again at the next */
     }
 }
 
@@ -191,15 +360,18 @@ static void settings_changed(void *ctx)
     settings_from_db();
     if (ui_settings.brightness != was.brightness && light == 0)
         ui_apply_brightness();
-    if (ui_settings.keylight != was.keylight && light == 0)
-        keylight_set(ui_settings.keylight);
+    if (ui_settings.keylight != was.keylight)
+        ui_keylight_touch();
     if (ui_settings.cpu_max != was.cpu_max)
         cpufreq_set_mode(ui_settings.cpu_max ? CPUFREQ_MAX : CPUFREQ_AUTO);
     if (ui_settings.deep_idle != was.deep_idle)
         kernel_set_tickless(ui_settings.deep_idle);
     if (ui_settings.chip_sleep != was.chip_sleep)
         sleep_idle_enable(ui_settings.chip_sleep);
-    dirty = true;
+    /* our own save comes back here too, with nothing new: the frame the key
+     * drew stays; a value set elsewhere (the shell) is drawn in full */
+    if (memcmp(&ui_settings, &was, sizeof(was)))
+        redraw_all();
 }
 
 void ui_apply_brightness(void)
@@ -240,11 +412,14 @@ void ui_push(screen_t *s)
                 collect = true;
                 app_forget(a, s);
             }
+            hook_forget(s);
             kfree(s);
         }
         return;
     }
     held_key = 0;                       /* a held key's repeat is not the new screen's */
+    hold_key = 0;
+    hold_down = 0;
     if (depth && top_mode() & UI_MODE_RAW_KEYS)
         raw_release_all(stack[depth - 1], kernel_ticks());  /* a game lets go of its keys */
     if (!s->app)
@@ -254,7 +429,7 @@ void ui_push(screen_t *s)
         AS_OWNER(s, s->enter(s));
     next_tick = kernel_ticks() + tick_period(s);
     publish();
-    dirty = true;
+    redraw_all();
 }
 
 /* ---- screens in a mode of their own (games) ------------------------------ */
@@ -267,7 +442,7 @@ void ui_screen_mode(screen_t *s, unsigned flags)
             modes[i].flags = flags;
             if (!flags)
                 modes[i].s = NULL;
-            dirty = true;
+            redraw_all();
             return;
         }
         if (!modes[i].s && free_slot < 0)
@@ -276,7 +451,7 @@ void ui_screen_mode(screen_t *s, unsigned flags)
     if (flags && free_slot >= 0) {
         modes[free_slot].s = s;
         modes[free_slot].flags = flags;
-        dirty = true;
+        redraw_all();
     }
 }
 
@@ -298,6 +473,8 @@ void ui_pop(void)
         return;
     s = stack[--depth];
     held_key = 0;                       /* nor the screen's under it */
+    hold_key = 0;
+    hold_down = 0;
     ui_screen_mode(s, 0);
     if (s->leave)
         AS_OWNER(s, s->leave(s));
@@ -309,11 +486,13 @@ void ui_pop(void)
         else
             s->app = NULL;              /* tagged again when pushed again */
     }
-    if (s->free_on_pop)
+    if (s->free_on_pop) {
+        hook_forget(s);
         kfree(s);
+    }
     next_tick = kernel_ticks() + tick_period(stack[depth - 1]);
     publish();
-    dirty = true;
+    redraw_all();
 }
 
 void ui_home(void)
@@ -322,7 +501,15 @@ void ui_home(void)
         ui_pop();
 }
 
+/* Asked from anywhere (a notification, a tick, an app): whatever changed may
+ * be under a dialog too, so the whole frame. A key's own redraw (dispatch)
+ * lets a partial screen redraw only what it finds changed. */
 void ui_redraw(void)
+{
+    redraw_all();
+}
+
+void ui_redraw_changed(void)
 {
     dirty = true;
 }
@@ -353,7 +540,7 @@ static bool on_host(void)
 
 void ui_refresh(void)
 {
-    dirty = true;
+    redraw_all();
     keypad_inject(0, false);
 }
 
@@ -379,16 +566,15 @@ static int audio_status_icon(void)
     return h.buttons ? 2 : 1;
 }
 
-static void draw_status(void)
+/* t: the time status_key had, so the bar and its key agree at a minute's turn */
+static void draw_status(const rtc_datetime_t *t)
 {
     char buf[16];
     int pct, sh = gfx_text_height(FONT_SMALL, 1), y = (UI_STATUS_H - sh) / 2;
     int x = LCD_WIDTH - UI_PAD - 17;
-    rtc_datetime_t t;
 
     gfx_fill(0, 0, LCD_WIDTH, UI_STATUS_H, C_BAR);
-    rtc_get(&t);
-    snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.min);
+    snprintf(buf, sizeof(buf), "%02d:%02d", t->hour, t->min);
     gfx_text(UI_PAD + 2, y, buf, C_TEXT, FONT_SMALL, 1, 0);
 
     /* battery: a rounded outline, its level, the cap */
@@ -466,35 +652,132 @@ static void draw_bars(screen_t *s, const char *title)
                  s->right, C_TEXT, FONT_BODY, 1, 44);
 }
 
+/* The title and soft-key labels as drawn: false if one differs (or is too
+ * long to keep), and then kept as they are now */
+static bool bars_same(const char *const now[4])
+{
+    bool same = true;
+
+    for (int i = 0; i < 4; i++) {
+        const char *t = now[i] ? now[i] : "";
+        size_t n = strlen(t);
+
+        if (!bar_ok[i] || n >= sizeof(bar_text[i]) || strcmp(bar_text[i], t))
+            same = false;
+        bar_ok[i] = n < sizeof(bar_text[i]);
+        if (bar_ok[i])
+            memcpy(bar_text[i], t, n + 1);
+    }
+    return same;
+}
+
+/* The content area cleared and the screen under an overlay drawn: before
+ * draw(), or from a partial draw() that finds it must draw everything */
+static void draw_base(void)
+{
+    partial_now = false;
+    base_drawn = true;
+    gfx_fill(0, UI_TOP, LCD_WIDTH, UI_CONTENT_H, C_BG);
+    if (draw_u && draw_u->draw)         /* a dialog over the screen under it */
+        AS_OWNER(draw_u, draw_u->draw(draw_u));
+}
+
+bool ui_partial(void)
+{
+    return partial_now;
+}
+
+void ui_draw_base(void)
+{
+    if (partial_now)
+        draw_base();
+}
+
+static uint32_t status_key(const rtc_datetime_t *t);
+static void shown_note(screen_t *s, screen_t *under, const rtc_datetime_t *t, uint32_t skey);
+
+static bool first_frame = true;         /* redraw's first push: lcd_update() */
+
 static void redraw(void)
 {
     screen_t *s = stack[depth - 1], *under = depth > 1 ? stack[depth - 2] : NULL;
     bool overlay = s->overlay && under;
+    uint32_t gen = drop_gen, skey;
+    const char *labels[4];
+    rtc_datetime_t t;
 
     if (light == 2)                     /* asleep: drawn again on wake */
         return;
     dirty = false;
     if (app_reloading()) {              /* an app between two loads: not the
                                          * screen under it for a moment */
+        kept = false;
         gfx_fill(0, 0, LCD_WIDTH, LCD_HEIGHT, C_BG);
         gfx_text_centered(LCD_HEIGHT / 2 - 4, RELOADING, C_DIM, FONT_SMALL, 1);
         lcd_update();
         return;
     }
     if (top_mode() & UI_MODE_FULL) {    /* the whole LCD is the screen's */
+        kept = false;
         if (s->draw)
             AS_OWNER(s, s->draw(s));
         lcd_update();
         return;
     }
-    gfx_fill(0, UI_TOP, LCD_WIDTH, UI_CONTENT_H, C_BG);
-    if (overlay && under->draw)         /* a dialog over the screen under it */
-        AS_OWNER(under, under->draw(under));
+    /* The same screen over the same one as the frame in lcd_fb, nothing in
+     * between: a partial screen redraws what changed (a list the two rows a
+     * key moved, a dialog its buttons), and the bars only if they changed.
+     * Under a dialog only a screen that says what it shows, unchanged. */
+    draw_u = overlay ? under : NULL;
+    partial_now = kept && kept_s == s && kept_u == draw_u && is_partial(s);
+    if (partial_now && draw_u) {
+        uint32_t (*ufn)(screen_t *) = shown_of(draw_u);
+
+        partial_now = ufn && ufn(draw_u) == kept_ukey;
+    }
+    base_drawn = false;
+    if (!partial_now)
+        draw_base();
     if (s->draw)
         AS_OWNER(s, s->draw(s));
-    draw_bars(s, overlay ? under->title : s->title);
-    draw_status();
-    lcd_update();
+    partial_now = false;
+    labels[0] = overlay ? under->title : s->title;
+    labels[1] = s->left;
+    labels[2] = s->center;
+    labels[3] = s->right;
+    /* a full draw may run past the content area (the quick panel's rows):
+     * the bars go over it as before */
+    rtc_get(&t);                        /* carry-safe, as every_second's */
+    skey = status_key(&t);
+    /* The status bar's icons are 12 px at y 0 in an 11 px bar: their last
+     * row lies on the title bar. Drawn alone, the status blended that row
+     * over its own last blend (the ui-tour's radio icon, 2026-11-18): with
+     * the status, the bars go first, as in a full draw. */
+    if (!bars_same(labels) || base_drawn || skey != status_drawn)
+        draw_bars(s, labels[0]);
+    if (skey != status_drawn || base_drawn) {
+        draw_status(&t);
+        status_drawn = skey;
+    }
+    /* Everything here drew through gfx_* (which marks its rows), so only
+     * those rows are compared; the first frame after boot compares them
+     * all, whatever wrote lcd_fb before the UI (main.c, the console). */
+    if (first_frame) {
+        first_frame = false;
+        lcd_update();
+    } else {
+        lcd_update_drawn();
+    }
+    kept = gen == drop_gen;            /* not if dropped meanwhile (ui_refresh) */
+    kept_s = s;
+    kept_u = draw_u;
+    if (draw_u) {
+        uint32_t (*ufn)(screen_t *) = shown_of(draw_u);
+
+        kept_ukey = ufn ? ufn(draw_u) : 0;
+    }
+    draw_u = NULL;
+    shown_note(s, under, &t, skey);
 }
 
 /* (API 2.9) From a screen's draw(). Only a full-screen one on top has the
@@ -510,6 +793,7 @@ bool ui_present(const uint16_t *px)
 
 static void splash(const char *text)
 {
+    kept = false;
     lcd_wake();
     gfx_fill(0, 0, LCD_WIDTH, LCD_HEIGHT, C_BG);
     gfx_text_centered(LCD_HEIGHT / 2 - 8, text, C_TEXT, FONT_LARGE, 1);
@@ -716,6 +1000,49 @@ static void dispatch(const key_event_t *ev)
     dirty = true;
 }
 
+/* UI_MODE_HOLD_KEYS: the keys a text editor gives a long press of their own */
+static bool holdable(uint8_t code)
+{
+    return (code >= KEY_0 && code <= KEY_9) || code == KEY_STAR || code == KEY_HASH;
+}
+
+/* The key waited on reaches the screen: as a press, or held long */
+static void hold_pass(uint32_t now)
+{
+    key_event_t ev = { hold_key, 1, now, 0 };
+
+    hold_down = 0;
+    dispatch(&ev);
+}
+
+static void keylight_touch(uint32_t now)
+{
+    keylight_off_at = now + KEYLIGHT_MS;
+    if (!keylit && ui_settings.keylight) {
+        keylight_set(true);
+        keylit = true;
+    }
+}
+
+static void keylight_off(void)
+{
+    if (keylit) {
+        keylight_set(false);
+        keylit = false;
+    }
+}
+
+/* the setting changed (Settings): on now for KEYLIGHT_MS, or off */
+void ui_keylight_touch(void)
+{
+    if (ui_settings.keylight && light == 0) {
+        keylight_touch(kernel_ticks());
+    } else {
+        keylight_set(false);
+        keylit = false;
+    }
+}
+
 /* The screen timeout: dim, then dark (LED and keypad light off, panel
  * asleep). Until 2026-11-07 dark only set the LED to 0 and stopped the
  * refresh: on the phone the screen stayed lit and froze. */
@@ -726,22 +1053,29 @@ static void set_light(int level)
         light = 2;
         backlight_set(0);
         keylight_set(false);
+        keylit = false;
         lcd_sleep();
         audio_headset_idle(true);
         return;
     }
     if (light == 2) {
         audio_headset_idle(false);
+        keypad_kick();                  /* the headset's buttons back now */
         light = level;
+        charging = charge_state();      /* dark it was read every minute only */
+        next_second = kernel_ticks();   /* the rest (battery ...) this pass */
+        next_battery = next_second;     /* dark: read every 5 minutes only */
         redraw();                       /* the frame the panel wakes to */
         lcd_wake();
-        keylight_set(ui_settings.keylight);
     }
     light = level;
-    if (level == 1)
+    if (level == 1) {
+        keylight_off();
         backlight_set(DIM_PERCENT);
-    else
+    } else {
+        keylight_touch(kernel_ticks());
         ui_apply_brightness();
+    }
 }
 
 static void wake(void)
@@ -783,14 +1117,25 @@ static void buzz_main(void *arg)
     }
 }
 
+/* At boot, from ui_run: a thread that lives for ever, so its stack sits at
+ * the bottom of the heap. Made at the first buzz (2026-11-18, the phone) it
+ * came after Music's big blocks and stayed between them: ~500 KB free under
+ * it that a large block could no longer use. */
+static void buzz_start(void)
+{
+    if (buzz_thread)
+        return;
+    sem_init(&buzz_sem, 0);
+    mutex_init(&buzz_lock);
+    buzz_thread = thread_create("buzz", PRIO_NORMAL + 3, 768, buzz_main, NULL);
+}
+
 void ui_buzz(int level, uint32_t ms)
 {
     if (level <= 0 || !ms)
         return;
-    if (!buzz_thread) {
-        sem_init(&buzz_sem, 0);
-        mutex_init(&buzz_lock);
-        buzz_thread = thread_create("buzz", PRIO_NORMAL + 3, 768, buzz_main, NULL);
+    if (!buzz_thread) {                 /* failed at boot: once more now */
+        buzz_start();
         if (!buzz_thread)
             return;
     }
@@ -890,6 +1235,8 @@ static bool chord(const key_event_t *ev, uint32_t now)
         return true;
     held_key = swallow_key = 0;
     center_down = zero_down = 0;
+    hold_key = 0;                       /* a * or # the editor waited on */
+    hold_down = 0;
     if (top_mode() & UI_MODE_RAW_KEYS)
         raw_release_all(s, now);        /* the first of the two, and the rest */
     if (s == ui_panel() || s == ui_sound()) {
@@ -910,6 +1257,8 @@ static void on_key(const key_event_t *ev, uint32_t now)
     os_status.keys++;
     os_status.last_key = ev->code | (uint32_t)ev->down << 8;
     last_input = last_key = now;
+    if (ev->down && light == 0)
+        keylight_touch(now);            /* dim or dark: wake() lights it */
 
     if (app_reloading()) {              /* the keys are not for the screen under it */
         if (ev->code == KEY_END && !ev->down) {
@@ -918,6 +1267,8 @@ static void on_key(const key_event_t *ev, uint32_t now)
         }
         held_key = swallow_key = 0;
         center_down = zero_down = 0;
+        hold_key = 0;
+        hold_down = 0;
         return;
     }
     if (chord(ev, now))
@@ -957,6 +1308,19 @@ static void on_key(const key_event_t *ev, uint32_t now)
         static const uint8_t strength[4] = { 0, 2, 4, 7 };
 
         ui_buzz(strength[ui_settings.vol[VOL_TACTILE] & 3], TACTILE_MS);
+    }
+    if (ev->down && hold_down && ev->code != hold_key)
+        hold_pass(now);                 /* the one still down was a press */
+    if ((top_mode() & UI_MODE_HOLD_KEYS) && holdable(ev->code)) {
+        if (ev->down) {
+            hold_key = ev->code;
+            hold_down = now ? now : 1;
+        } else if (ev->code == hold_key) {
+            if (hold_down)              /* let go before the hold: a press */
+                hold_pass(now);
+            hold_key = 0;
+        }
+        return;                         /* 0 held is not the torch here */
     }
     if (ev->code == KEY_0)
         zero_down = ev->down ? now : 0;
@@ -1037,9 +1401,102 @@ static void drain_log(uint32_t now)
     last_now = now;
 }
 
+/* What the status bar shows, as one number: it changes when the bar would */
+static uint32_t status_key(const rtc_datetime_t *t)
+{
+    uint32_t k = (uint32_t)(t->day * 1440 + t->hour * 60 + t->min);
+    notify_t *n;
+
+    k = k * 31u + (uint32_t)battery_percent(bat_mv);
+    k = k * 31u + (uint32_t)charging;
+    k = k * 31u + (uint32_t)(uintptr_t)usb_auto_label();
+    k = k * 31u + (uint32_t)torch_get();
+    k = k * 31u + (uint32_t)audio_status_icon();
+    for (int i = 0; (n = notify_get(i)); i++)  /* posts redraw; an update may change an icon */
+        k = k * 31u + (uint32_t)(uintptr_t)n->icon + 1u;
+    return k;
+}
+
+/* Lit: the frame again only if the bar or the top screen changed, for a
+ * screen that says what it shows (ui_screen_shown); the others every second
+ * as before. On Home that was a whole redraw a second (about 7 ms of CPU at
+ * 104 MHz) for lcd_update to find nothing changed, for a clock in minutes. */
+/* The screen's shown key now (with the one under a dialog); false: it has
+ * none, and is drawn every second. A screen under a dialog goes by its own
+ * hook only: its tick does not run while covered, and it was redrawn (live
+ * figures, a running clock) each second. */
+static bool shown_now(screen_t *s, screen_t *under, uint32_t *key)
+{
+    uint32_t (*fn)(screen_t *) = shown_fn(s), (*ufn)(screen_t *) = NULL;
+
+    if (s->overlay && under && !(ufn = shown_of(under)))
+        fn = NULL;                      /* the screen under a dialog is drawn too */
+    if (!fn || app_reloading() || (top_mode() & UI_MODE_FULL))
+        return false;
+    *key = fn(s);
+    if (ufn)
+        *key = *key * 31u + ufn(under);
+    return true;
+}
+
+/* After a frame: what it showed. Compared with the last second's key (as
+ * until 2026-11-18) a frame a key had drawn was drawn again at the next
+ * second, as the selection was in the key. */
+static void shown_note(screen_t *s, screen_t *under, const rtc_datetime_t *t, uint32_t skey)
+{
+    shown_valid = shown_now(s, under, &shown_key);
+    shown_skey = skey;
+}
+
+static void second_redraw(const rtc_datetime_t *t)
+{
+    screen_t *s = stack[depth - 1], *under = depth > 1 ? stack[depth - 2] : NULL;
+    uint32_t key, skey;
+
+    if (!shown_now(s, under, &key)) {
+        shown_valid = false;
+        redraw_all();                   /* as before: all of it, every second */
+        return;
+    }
+    skey = status_key(t);
+    if (!shown_valid || key != shown_key)
+        redraw_all();                   /* the screen says it changed */
+    else if (skey != shown_skey)
+        dirty = true;                   /* the bar only: a partial screen keeps its frame */
+    shown_key = key;
+    shown_skey = skey;
+    shown_valid = true;
+}
+
+/* The next run of every_second dark: DARK_TICK_MS on, or just past the minute
+ * the next alarm rings at (alarm_check rings it at the minute). */
+static uint32_t dark_next(uint32_t now, const rtc_datetime_t *t)
+{
+    uint32_t wait = DARK_TICK_MS, in, usb = usb_auto_due_ms(now);
+
+    if (usb < wait)                     /* a bench ends: USB back on time */
+        wait = usb + 50;
+
+    if (alarm_next(&in) >= 0 && in >= 1 && in <= 24u * 60) {
+        uint32_t at = ((in - 1) * 60u + (uint32_t)(60 - t->sec)) * 1000u + 50u;
+
+        if (at < wait)
+            wait = at;
+    }
+    return now + wait;
+}
+
+/* Only what needs the second waits for it: a clock hold (codec, USB, an app,
+ * a card transfer) keeps the CPU from the chip sleep anyway, and sound, a
+ * ringing or snoozed alarm (its snooze is in ms) or an app closing tick at 1 s */
+static bool dark_idle(void)
+{
+    return light == 2 && !cpufreq_holds() && !background_audio() && !alarm_ringing &&
+           alarm_snooze_min < 0 && !closing;
+}
+
 static void every_second(uint32_t now)
 {
-    static unsigned n;
     uint32_t timeout = (uint32_t)ui_settings.screen_timeout_s * 1000u;
     rtc_datetime_t t;
 
@@ -1048,32 +1505,46 @@ static void every_second(uint32_t now)
     usb_auto_tick();
     notify_tick();
     audio_idle_tick();
+    sd_idle_tick();
     volume_save();
     charging = charge_state();          /* a plug shows at once, as on Home */
-    if (n % 30 == 0) {                  /* the ADC is slow: twice a minute */
+    if ((int32_t)(now - next_battery) >= 0) {
+        next_battery = now + (light == 2 ? BATTERY_DARK_MS : BATTERY_MS);
         bat_mv = battery_mv();
         os_status.battery_mv = (uint32_t)bat_mv;
     }
-    if (n == 180 || (n && n % 600 == 0)) /* the drain log: at 3 minutes, then
-                                         * every 10 (not at boot: its load is
-                                         * boot work) */
+    if ((int32_t)(now - next_drain) >= 0) {
+        next_drain = (now / DRAIN_MS + 1) * DRAIN_MS;
         drain_log(now);
-    if (n && n % 600 == 0)
+    }
+    if ((int32_t)(now - next_rtc_save) >= 0) {
+        next_rtc_save = now + DRAIN_MS;
         rtc_save();
-    n++;
+    }
     os_status.ticks = now;
     os_status.idle_permille = kernel_idle_permille();
     os_status.cpu_mhz = (uint32_t)clock_mhz();
     os_status.heap_free = heap_free_bytes();
     os_status.stray_irqs = irq_stray_count;
 
-    if ((top_mode() & UI_MODE_AWAKE) && now - last_key < (uint32_t)ui_settings.awake_limit_s * 1000u)
+    /* Signed: what ran above (the alarm ringing, an app's notification) may
+     * have woken the screen with kernel_ticks(), later than now; unsigned,
+     * now - last_input wrapped to ~4e9 and the ringing alarm's screen was
+     * dimmed in the same pass and stayed dim (the phone, 2026-11-18). */
+    if ((top_mode() & UI_MODE_AWAKE) &&
+        (int32_t)(now - last_key) < (int32_t)((uint32_t)ui_settings.awake_limit_s * 1000u))
         last_input = now;               /* a game being played: no timeout */
-    if (timeout && light == 0 && now - last_input > timeout)
+    if (timeout && light == 0 && (int32_t)(now - last_input) > (int32_t)timeout)
         set_light(1);
-    else if (timeout && light == 1 && now - last_input > timeout + DARK_AFTER_MS)
+    else if (timeout && light == 1 &&
+             (int32_t)(now - last_input) > (int32_t)(timeout + DARK_AFTER_MS))
         set_light(2);
-    dirty = true;                       /* the clock */
+    if (light < 2)
+        second_redraw(&t);
+    if (dark_idle()) {
+        next_second = dark_next(now, &t);
+        keypad_kick();                  /* its dark wait restarts from this wake */
+    }
 }
 
 /* The next tick after now, on the clock's phase: a screen ticking every
@@ -1105,6 +1576,7 @@ void ui_run(screen_t *home)
     key_event_t ev;
 
     thread_owned_exit = app_thread_ended;
+    buzz_start();                       /* low in the heap, before any app */
 
     settings_load();
     db_watch("ui.", false, settings_changed, NULL);
@@ -1114,8 +1586,9 @@ void ui_run(screen_t *home)
     kernel_set_tickless(ui_settings.deep_idle);
     sleep_idle_enable(ui_settings.chip_sleep);
     ui_apply_brightness();
-    keylight_set(ui_settings.keylight);
     last_input = kernel_ticks();
+    keylight_set(false);                /* the loader may have left it on */
+    keylight_touch(last_input);
     next_second = last_input;
     sem_init(&call_done, 0);
     mutex_init(&call_lock);
@@ -1124,19 +1597,31 @@ void ui_run(screen_t *home)
     klog("boot: home drawn at %lu ms", (unsigned long)kernel_ticks());
 
     for (;;) {
-        uint32_t now = kernel_ticks(), wait = 1000;
+        uint32_t now = kernel_ticks(), wait;
+        bool audio = background_audio();
 
-        if ((int32_t)(next_second - now) < (int32_t)wait)
-            wait = (int32_t)(next_second - now) > 0 ? next_second - now : 0;
+        /* up to DARK_TICK_MS in dark idle (every_second sets next_second) */
+        wait = (int32_t)(next_second - now) > 0 ? next_second - now : 0;
         if (held_key && (int32_t)(next_repeat - now) < (int32_t)wait)
             wait = (int32_t)(next_repeat - now) > 0 ? next_repeat - now : 0;
-        if ((int32_t)(next_tick - now) < (int32_t)wait)
+        /* a screen without tick() has nothing to wake for: Home woke each second */
+        if (stack[depth - 1]->tick && (int32_t)(next_tick - now) < (int32_t)wait)
             wait = (int32_t)(next_tick - now) > 0 ? next_tick - now : 0;
         if ((end_down || zero_down || closing) && wait > 100)
             wait = 100;
-        if (center_down && wait > 50)
+        if ((center_down || hold_down) && wait > 50)
             wait = 50;
-        if (background_audio() && wait > MUSIC_MS)
+        if (lcd_holding() && lcd_busy_ms() < wait)
+            wait = lcd_busy_ms();       /* its clock hold back when done */
+        if (keylit && (int32_t)(keylight_off_at - now) < (int32_t)wait)
+            wait = (int32_t)(keylight_off_at - now) > 0 ? keylight_off_at - now : 0;
+        if (audio && !audio_was) {      /* a sound started: the jack matters again, */
+            keypad_kick();              /* and the second's work (audio idle, notifications) */
+            if ((int32_t)(next_second - now) > 1000)
+                next_second = now + 1000;
+        }
+        audio_was = audio;
+        if (audio && wait > MUSIC_MS)
             wait = MUSIC_MS;
         if (dirty && light < 2) {     /* dark: drawn on wake, do not spin */
             uint32_t busy = lcd_busy_ms();  /* the keys in the meantime, and then
@@ -1147,6 +1632,9 @@ void ui_run(screen_t *home)
 
         if (keypad_get(&ev, wait) == WAIT_OK && ev.code)
             on_key(&ev, kernel_ticks());
+        if (keypad_charger_event())     /* plugged or unplugged: usb_auto_tick now */
+            next_second = kernel_ticks();
+        lcd_tick();
         if (call_fn)
             serve_call();
         db_dispatch();                  /* the store's watchers: here, on this thread */
@@ -1163,6 +1651,8 @@ void ui_run(screen_t *home)
             dispatch(&rep);
         }
         ui_alive_at = now;
+        if (keylit && (int32_t)(now - keylight_off_at) >= 0)
+            keylight_off();
         if (ui_end_held) {
             ui_end_held = false;
             ui_power_off();
@@ -1178,6 +1668,12 @@ void ui_run(screen_t *home)
             center_down = 0;            /* held: the quick panel, not a press */
             ui_buzz(4, 40);
             ui_push(ui_panel());
+        }
+        if (hold_down && now - hold_down >= LONG_MS) {
+            key_event_t ev = { hold_key, 1, now, UI_KEY_LONG };
+
+            hold_down = 0;              /* its release does nothing */
+            dispatch(&ev);
         }
         if (zero_down && now - zero_down >= TORCH_HOLD_MS) {
             zero_down = 0;              /* one toggle per press */
@@ -1195,8 +1691,11 @@ void ui_run(screen_t *home)
 
             next_tick = tick_after(now, tick_period(s));
             if (s->tick) {
+                bool old_way = tick_redraws(s);     /* before: the tick may pop s */
+
                 AS_OWNER(s, s->tick(s));
-                dirty = true;
+                if (old_way)
+                    redraw_all();
             }
         }
         if (collect) {

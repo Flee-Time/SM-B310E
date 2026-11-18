@@ -7,6 +7,7 @@
  */
 #include <stdarg.h>
 #include "codecs.h"
+#include "glue.h"
 #include "rbunicode.h"
 #include "errno.h"
 #include <ctype.h>
@@ -41,6 +42,10 @@ int close(int fd)
 }
 
 /* ---- log ------------------------------------------------------------------ */
+/* To the engine's panicf, which logs it and marks the track failed, then
+ * out of the codec (glue_run): returning, the caller went on running on
+ * the heap it had just found corrupt until its next get_command. Only
+ * from the parser, outside a run, does it still return. */
 void panicf(const char *fmt, ...)
 {
     char buf[96];
@@ -49,7 +54,8 @@ void panicf(const char *fmt, ...)
     va_start(ap, fmt);
     ci->vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    ci->klog("codec: panic: %s", buf);
+    ci->panicf("%s", buf);
+    glue_panic();
 }
 
 void debugf(const char *fmt, ...)

@@ -33,6 +33,8 @@ static void home_draw(screen_t *s)
     const fs_info_t *fi = fs_info();
     rtc_datetime_t t;
     bool date_ok = rtc_get(&t) == 0;
+    int charge = charge_state();        /* read once: each is an ADI read
+                                         * (charger_present), and it was two */
 
     snprintf(buf, sizeof(buf), "%02d:%02d", t.hour, t.min);
     gfx_text_centered(UI_TOP + 8, buf, C_TEXT, FONT_HUGE, 1);
@@ -43,9 +45,9 @@ static void home_draw(screen_t *s)
         snprintf(buf, sizeof(buf), "date not set");
     gfx_text_centered(UI_TOP + 40, buf, C_DIM, FONT_BODY, 1);
 
-    if (charge_state() == CHARGE_DONE)
+    if (charge == CHARGE_DONE)
         snprintf(buf, sizeof(buf), "charged");
-    else if (charge_state() == CHARGE_CHARGING)
+    else if (charge == CHARGE_CHARGING)
         snprintf(buf, sizeof(buf), "charging");
     else if (pct >= 0)
         snprintf(buf, sizeof(buf), "%d%%  %d.%02d V", pct, mv / 1000, mv % 1000 / 10);
@@ -65,6 +67,25 @@ static void home_draw(screen_t *s)
     }
 }
 
+/* What home_draw shows beyond the status bar's (the minute, the day and the
+ * charge state are in the UI's own key): the mV it prints, the charger's
+ * state, the card's line. The UI redraws Home when this changes, not every
+ * second. */
+static uint32_t home_shown(screen_t *s)
+{
+    const fs_info_t *fi = fs_info();
+    uint32_t k = os_status.battery_mv;
+
+    k = k * 31u + (uint32_t)charge_state();
+    k = k * 31u + (uint32_t)fi->mounted * 2u + fi->free_known;
+    return k * 31u + fi->free_kib / 1024;   /* it prints MB */
+}
+
+static uint32_t menu_shown(screen_t *s)
+{
+    return 0;                           /* a fixed list: keys redraw it */
+}
+
 static void home_key(screen_t *s, const key_event_t *ev)
 {
     if (ev->code == KEY_CENTER || ev->code == KEY_LSOFT)
@@ -82,6 +103,9 @@ screen_t *app_home(void)
 {
     ui_panel_host(&home);
     ui_panel_host(&menu);
+    ui_screen_shown(&home, home_shown);
+    ui_screen_shown(&menu, menu_shown);
+    ui_screen_partial(&menu);           /* a list_draw: the rows a key changed */
     return &home;
 }
 

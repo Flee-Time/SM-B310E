@@ -68,35 +68,9 @@
 #define LED_KL_OFF_BIT       0x10u
 #define LED_KL_MASK          0x30u
 
-/* Bounded ADI mailbox (fpdoom/B310E-OS drivers/led.c pattern). */
-#define ADI_RD_CMD      0x82000018
-#define ADI_RD_DATA     0x8200001C
-#define ADI_FIFO_STS    0x82000020
-#define ADI_FIFO_FULL   (1 << 9)
-#define ADI_FIFO_EMPTY  (1 << 8)
-#define ADI_BUDGET      1000000u
-
-static uint32_t adi_read(uint32_t addr)
-{
-    uint32_t a = 0, n = ADI_BUDGET;
-
-    REG32(ADI_RD_CMD) = addr & 0xfff;
-    while ((a = REG32(ADI_RD_DATA)) >> 31)
-        if (--n == 0) break;
-    return a & 0xffffu;
-}
-
-static void adi_write(uint32_t addr, uint32_t val)
-{
-    uint32_t n = ADI_BUDGET;
-
-    while (REG32(ADI_FIFO_STS) & ADI_FIFO_FULL)
-        if (--n == 0) return;
-    REG32(addr) = val;
-    n = ADI_BUDGET;
-    while (!(REG32(ADI_FIFO_STS) & ADI_FIFO_EMPTY))
-        if (--n == 0) return;
-}
+/* Bounded ADI mailbox: the shared IRQ-safe copy (system-sc6530c.c). */
+#define adi_read(addr)       sc6530_adi_read(addr)
+#define adi_write(addr, val) sc6530_adi_write(addr, val)
 
 /* LCD backlight, 0..100 percent: fpdoom sys_brightness's duty
  * (syscode.c:225-238, 0..100 -> duty 1..32) with the stock on/off order
