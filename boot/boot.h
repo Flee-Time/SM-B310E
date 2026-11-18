@@ -4,8 +4,8 @@
 #ifndef BOOT_H
 #define BOOT_H
 
-#define BOOT_VERSION     0x00010014     /* 1.20 */
-#define BOOT_VERSION_STR "v1.20"
+#define BOOT_VERSION     0x00010015     /* 1.21 */
+#define BOOT_VERSION_STR "v1.21"
 #define BOOT_TAIL_MAGIC  0x4c494154     /* "TAIL": boot.ld, start.S */
 #define SFC_SIZE_REG     0x20a00200     /* the NOR size the windows decode, MiB */
 #define STOCK_ENTRY      0x000046e4     /* the stock PBL (NOR word 0x20 before) */

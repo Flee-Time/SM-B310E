@@ -9,6 +9,14 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "boot.h"
+#include "os/status.h"
+
+/* What the OS's ui/gfx.c writes besides the frame (2026-11-17/18): the
+ * rows drawn, for the OS's lcd_update_drawn (here every flush sends the
+ * whole frame, so they are only written), and os_status, whose
+ * ui_missing_glyphs it counts. 124 bytes of IRAM .bss. */
+int lcd_dirty_y0, lcd_dirty_y1;
+volatile os_status_t os_status;
 
 #define LCM_BASE      0x20800000u
 #define LCM_CR(x)     REG32(LCM_BASE + (x))

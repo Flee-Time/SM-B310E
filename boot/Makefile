@@ -27,7 +27,8 @@ LDFLAGS := $(ARCH_FLAGS) -nostdlib -T boot.ld -Wl,--gc-sections \
 
 OBJS := $(BUILD)/start.o $(BUILD)/hw.o $(BUILD)/lcd.o $(BUILD)/sd.o \
         $(BUILD)/diskio.o $(BUILD)/lib.o $(BUILD)/main.o $(BUILD)/battery.o \
-        $(BUILD)/ui/gfx.o $(BUILD)/ui/font_montserrat.o $(BUILD)/ui/icons.o \
+        $(BUILD)/ui/gfx.o $(BUILD)/ui/font_ascii.o $(BUILD)/ui/icons.o \
+        $(BUILD)/lib/utf8.o \
         $(BUILD)/fatfs/ff.o $(BUILD)/fatfs/ffunicode.o
 
 all: $(BUILD)/b310e-boot.bin
@@ -41,6 +42,20 @@ $(BUILD)/%.o: %.S boot.h
 	$(CC) $(ASFLAGS) -c $< -o $@
 
 $(BUILD)/ui/%.o: ../os/ui/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# The OS's fonts cut to ASCII: whole (484 glyphs each since 2026-11-17)
+# they overflowed the 64 KB of NOR by some 18 KB (mkfont-ascii.py)
+$(BUILD)/ui/font_ascii.c: ../os/ui/font_montserrat.c mkfont-ascii.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) mkfont-ascii.py $< $@
+
+$(BUILD)/ui/font_ascii.o: $(BUILD)/ui/font_ascii.c
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+# gfx.c reads text with the OS's utf8_get (since 2026-11-17)
+$(BUILD)/lib/%.o: ../os/lib/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 

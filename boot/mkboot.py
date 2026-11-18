@@ -125,7 +125,8 @@ def cmd_verify(args):
     ok &= same
     end = NOR_AT + (len(image) + SECTOR - 1) // SECTOR * SECTOR
     tail = flash[NOR_AT + len(image):end]
-    print(f'rest of the last sector: {"erased" if tail == b"\xff" * len(tail) else "NOT erased"}')
+    erased = tail == b'\xff' * len(tail)
+    print(f'rest of the last sector: {"erased" if erased else "NOT erased"}')
     sys.exit(0 if ok else 1)
 
 

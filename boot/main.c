@@ -428,8 +428,11 @@ static void auto_load(void)
             } else if (!strcasecmp_(key, "timeout")) {
                 int t = 0;
 
-                while (*val >= '0' && *val <= '9')
-                    t = t * 10 + (*val++ - '0');
+                while (*val >= '0' && *val <= '9') {
+                    if (t <= 99)    /* no int overflow on a long digit string */
+                        t = t * 10 + (*val - '0');
+                    val++;
+                }
                 /* at least 1 s: a key in the countdown is the only way
                  * to the menu past an entry that does not start */
                 auto_timeout = t > 99 ? 99 : t < 1 ? 1 : t;
@@ -442,7 +445,8 @@ static void auto_load(void)
 static const char *auto_save(void)
 {
     static FIL f;
-    char text[160], n[8], path[32];
+    /* 134-byte header + "entry = " name (< NAME_LEN) + timeout line */
+    char text[160 + NAME_LEN], n[8], path[32];
     UINT w = 0;
 
     auto_path(path, sizeof(path));
