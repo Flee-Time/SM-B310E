@@ -1215,6 +1215,12 @@ screen_t *kit_start(void)
     }
     if (kit_game.rom_exts)
         return kit_menu_start();        /* an emulator: the list, or the ROM */
+    if (kit_game.first) {
+        screen_t *s = kit_game.first();
+
+        if (s)
+            return s;                   /* the game's own: it goes on from there */
+    }
     if (kit_game.prepare && !kit_game.prepare()) {
         game.title = app_info.name;
         if (!kit.error[0])

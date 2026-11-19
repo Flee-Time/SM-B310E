@@ -50,6 +50,9 @@ typedef struct {
     const kit_option_t *options;
     void (*rom_args)(const char *rom, const uint8_t *values);
     int row_grid;                       /* drawn in tiles this many rows high: 0 if not */
+    /* A game's own first screen before prepare (Doom's choice of IWAD), or
+     * NULL to go on with prepare as usual. Or NULL. */
+    screen_t *(*first)(void);
 } kit_game_t;
 extern const kit_game_t kit_game;
 
